@@ -1,20 +1,23 @@
-# Context Guard
+# Last Call
 
-A Claude Code hook that tells the assistant when it is running out of context —
-before it starts working from a compacted memory of files it only thinks it
-read.
+**Last call for your Claude Code session.** Tells the assistant to finish up
+while it still has the room to do it properly — before it starts working from a
+compacted memory of files it only thinks it read.
 
 Long sessions fail quietly. Once the context window fills, older material is
 summarized away, and the assistant carries on editing against stale state with
-complete confidence. Nothing in the transcript announces this. Context Guard
-measures the real number every time the assistant stops, and speaks up once,
-at the moment it matters.
+complete confidence. Nothing in the transcript announces this.
+
+Most context tools *show you* a number: a bar, a meter, a percentage in the
+status line. This one talks to the assistant instead, once, at the threshold —
+and if you let it, holds the session open until the handoff is actually
+written.
 
 ```
-CONTEXT GUARD — YELLOW. 74% of the context window is in use
+LAST CALL — YELLOW. 74% of the context window is in use
 (743,106 of 1,000,000 tokens; 256,894 left).
-Wrap up; do not stop dead. This is an alarm, not a decision — you judge
-what still fits — but start no new phase or feature.
+Finish what is in flight; start nothing new. This is an alarm, not a
+decision — you judge what still fits.
 ```
 
 ## Install
@@ -22,16 +25,16 @@ what still fits — but start no new phase or feature.
 **As a plugin** (recommended — no absolute paths anywhere):
 
 ```
-/plugin marketplace add YOURNAME/claude-context-guard
-/plugin install context-guard@claude-context-guard
+/plugin marketplace add YOURNAME/claude-lastcall
+/plugin install lastcall@claude-lastcall
 ```
 
 **Standalone**, if you would rather not use plugins, or you are on Windows
 where `python3` is often not on `PATH`:
 
 ```
-git clone https://github.com/YOURNAME/claude-context-guard
-cd claude-context-guard
+git clone https://github.com/YOURNAME/claude-lastcall
+cd claude-lastcall
 python3 install.py            # this project only
 python3 install.py --global   # every project
 python3 install.py --uninstall
@@ -54,11 +57,11 @@ tokens. That is 371% of the window the identifier implies. Any tool that infers
 the window from the model name is wrong on that session and cannot tell.
 
 Guessing low is the dangerous direction: a 1M session mislabelled as 200K gets
-told to wrap up at 15% full, which actively wrecks good sessions. So Context
-Guard stays **silent** when it does not know, and says so loudly when asked:
+told to wrap up at 15% full, which actively wrecks good sessions. So Last Call
+stays **silent** when it does not know, and says so loudly when asked:
 
 ```
-python3 .../context_guard.py doctor ~/.claude/projects/<project>/<session>.jsonl
+python3 .../lastcall.py doctor ~/.claude/projects/<project>/<session>.jsonl
 ```
 
 Three ways to fix that, best first:
@@ -71,7 +74,7 @@ telling again:
 {
   "statusLine": {
     "type": "command",
-    "command": "python3 /path/to/plugins/context-guard/scripts/statusline.py"
+    "command": "python3 /path/to/plugins/lastcall/scripts/statusline.py"
   }
 }
 ```
@@ -80,7 +83,7 @@ It prints a normal status line too: `Opus 5 | myrepo | ctx [#######---] 74% YELL
 If your Claude Code version names those fields differently, `statusline.py --dump`
 prints the raw payload so you can check.
 
-**2. Just tell it.** `.claude/context-guard.json`:
+**2. Just tell it.** `.claude/lastcall.json`:
 
 ```json
 { "context_window_tokens": 200000 }
@@ -93,8 +96,8 @@ only helps 1M users, and only after they are already deep into a session.
 
 ## Configuration
 
-`.claude/context-guard.json` in your project. Every field is optional, and every
-one can be overridden per-run with `CONTEXT_GUARD_<FIELD>` in the environment.
+`.claude/lastcall.json` in your project. Every field is optional, and every
+one can be overridden per-run with `LASTCALL_<FIELD>` in the environment.
 
 | field | default | meaning |
 |---|---|---|
@@ -105,7 +108,7 @@ one can be overridden per-run with `CONTEXT_GUARD_<FIELD>` in the environment.
 | `template` | `null` | path to your own wrap-up instructions |
 | `include_output_tokens` | `false` | count the last response's output too — budget for the next turn's input rather than the current window |
 | `debug` | `false` | write a redacted copy of the last hook payload |
-| `state_dir` | `~/.claude/context-guard` | where per-session state lives |
+| `state_dir` | `~/.claude/lastcall` | where per-session state lives |
 | `state_ttl_days` | `14` | prune state files older than this |
 | `disabled` | `false` | turn the whole thing off without uninstalling |
 
@@ -119,7 +122,7 @@ to your project, so write it down and point at it:
 ```
 
 Placeholders: `{percent}` `{tokens}` `{window}` `{remaining}` `{band}`. See
-`plugins/context-guard/templates/example-wrapup.md` for a fuller one that
+`plugins/lastcall/templates/example-wrapup.md` for a fuller one that
 covers status docs, a dated handoff file, and committing before the session
 ends.
 

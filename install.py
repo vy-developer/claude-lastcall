@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone installer for Context Guard — the fallback when you are not using
+"""Standalone installer for Last Call — the fallback when you are not using
 Claude Code plugins.
 
 The plugin install is better: it registers hooks through ${CLAUDE_PLUGIN_ROOT},
@@ -26,10 +26,10 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(HERE, "plugins", "context-guard", "scripts", "context_guard.py")
+SCRIPT = os.path.join(HERE, "plugins", "lastcall", "scripts", "lastcall.py")
 
 EVENTS = (("Stop", 15), ("SessionStart", 10), ("PostCompact", 10))
-MARKER = "context_guard.py"
+MARKER = "lastcall.py"
 
 
 def find_interpreter():
@@ -87,7 +87,7 @@ def save_settings(path, settings):
     them."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if os.path.isfile(path):
-        shutil.copy2(path, path + ".context-guard.bak")
+        shutil.copy2(path, path + ".lastcall.bak")
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(settings, handle, indent=2)
@@ -144,7 +144,7 @@ def main(argv):
 
     if uninstall:
         save_settings(settings_path, settings)
-        print("removed Context Guard hooks from %s" % settings_path)
+        print("removed Last Call hooks from %s" % settings_path)
         return 0
 
     if not os.path.isfile(SCRIPT):
@@ -170,7 +170,7 @@ def main(argv):
         })
 
     save_settings(settings_path, settings)
-    print("installed Context Guard into %s" % settings_path)
+    print("installed Last Call into %s" % settings_path)
     print("  interpreter : %s" % " ".join(interpreter))
     print("  script      : %s" % SCRIPT)
     print("\nVerify it resolves correctly:")

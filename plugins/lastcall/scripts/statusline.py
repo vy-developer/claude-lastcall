@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Optional status line that teaches Context Guard the exact context window.
+"""Optional status line that teaches Last Call the exact context window.
 
 The Stop hook cannot see how big the window is. The transcript records the
 model as e.g. "claude-opus-5" whether that session has a 200K window or a 1M
@@ -26,7 +26,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from context_guard import (band_for, load_config, read_state, state_dir,
+    from lastcall import (band_for, load_config, read_state, state_dir,
                                write_state)
 except ImportError:  # standalone copy — degrade to printing only
     band_for = load_config = read_state = state_dir = write_state = None
@@ -116,7 +116,7 @@ def main(argv):
     elif window:
         parts.append("ctx window %s" % "{:,}".format(window))
 
-    print(" | ".join(parts) if parts else "context-guard")
+    print(" | ".join(parts) if parts else "lastcall")
     return 0
 
 

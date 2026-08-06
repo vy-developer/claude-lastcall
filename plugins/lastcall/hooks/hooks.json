@@ -1,12 +1,12 @@
 {
-  "description": "Context Guard — measure context usage at Stop, re-arm on compaction.",
+  "description": "Last Call — measure context usage at Stop, re-arm on compaction.",
   "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_guard.py\" Stop",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" Stop",
             "timeout": 15
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_guard.py\" SessionStart",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" SessionStart",
             "timeout": 10
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/context_guard.py\" PostCompact",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" PostCompact",
             "timeout": 10
           }
         ]

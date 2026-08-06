@@ -1,5 +1,5 @@
 {
-  "name": "claude-context-guard",
+  "name": "claude-lastcall",
   "owner": {
     "name": "neo.the.lobster"
   },
@@ -9,13 +9,13 @@
   },
   "plugins": [
     {
-      "name": "context-guard",
+      "name": "lastcall",
       "description": "Warns the assistant when the session's context window is filling up, so it wraps up and writes a handoff instead of silently working from a compacted memory.",
       "version": "1.0.0",
       "author": {
         "name": "neo.the.lobster"
       },
-      "source": "./plugins/context-guard"
+      "source": "./plugins/lastcall"
     }
   ]
 }

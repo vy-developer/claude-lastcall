@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for Context Guard. Standard library only.
+"""Tests for Last Call. Standard library only.
 
     python3 -m unittest discover -s tests -v
 
@@ -18,10 +18,10 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(ROOT, "plugins", "context-guard", "scripts", "context_guard.py")
+SCRIPT = os.path.join(ROOT, "plugins", "lastcall", "scripts", "lastcall.py")
 sys.path.insert(0, os.path.dirname(SCRIPT))
 
-import context_guard as cg  # noqa: E402
+import lastcall as cg  # noqa: E402
 
 
 def assistant_line(tokens, model="claude-sonnet-5", session="s1", sidechain=False):
@@ -43,7 +43,7 @@ def assistant_line(tokens, model="claude-sonnet-5", session="s1", sidechain=Fals
 
 class TempCase(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="ctxguard-")
+        self.dir = tempfile.mkdtemp(prefix="lastcall-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.state = os.path.join(self.dir, "state")
 
@@ -247,7 +247,7 @@ class TestMeasure(TempCase):
 class TestConfig(TempCase):
     def test_file_overrides_defaults(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "context-guard.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
             json.dump({"yellow_percent": 50, "mode": "advisory"}, fh)
         config = cg.load_config({"cwd": self.dir})
         self.assertEqual(config["yellow_percent"], 50)
@@ -256,17 +256,17 @@ class TestConfig(TempCase):
 
     def test_env_overrides_file_field_by_field(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "context-guard.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
             json.dump({"yellow_percent": 50, "mode": "advisory"}, fh)
-        os.environ["CONTEXT_GUARD_YELLOW_PERCENT"] = "33"
-        self.addCleanup(os.environ.pop, "CONTEXT_GUARD_YELLOW_PERCENT", None)
+        os.environ["LASTCALL_YELLOW_PERCENT"] = "33"
+        self.addCleanup(os.environ.pop, "LASTCALL_YELLOW_PERCENT", None)
         config = cg.load_config({"cwd": self.dir})
         self.assertEqual(config["yellow_percent"], 33)
         self.assertEqual(config["mode"], "advisory")  # untouched
 
     def test_broken_config_does_not_raise(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "context-guard.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
             fh.write("{ broken")
         config = cg.load_config({"cwd": self.dir})
         self.assertEqual(config["yellow_percent"], cg.DEFAULTS["yellow_percent"])
@@ -275,24 +275,24 @@ class TestConfig(TempCase):
         """Regression: coercion used to be inferred from the default value, so
         every field defaulting to None was treated as numeric and any path
         passed through the environment was silently discarded."""
-        os.environ["CONTEXT_GUARD_STATE_DIR"] = "/tmp/ctxguard-example"
-        os.environ["CONTEXT_GUARD_TEMPLATE"] = "docs/wrapup.md"
-        self.addCleanup(os.environ.pop, "CONTEXT_GUARD_STATE_DIR", None)
-        self.addCleanup(os.environ.pop, "CONTEXT_GUARD_TEMPLATE", None)
+        os.environ["LASTCALL_STATE_DIR"] = "/tmp/lastcall-example"
+        os.environ["LASTCALL_TEMPLATE"] = "docs/wrapup.md"
+        self.addCleanup(os.environ.pop, "LASTCALL_STATE_DIR", None)
+        self.addCleanup(os.environ.pop, "LASTCALL_TEMPLATE", None)
         config = cg.load_config({"cwd": self.dir})
-        self.assertEqual(config["state_dir"], "/tmp/ctxguard-example")
+        self.assertEqual(config["state_dir"], "/tmp/lastcall-example")
         self.assertEqual(config["template"], "docs/wrapup.md")
-        self.assertEqual(cg.state_dir(config), "/tmp/ctxguard-example")
+        self.assertEqual(cg.state_dir(config), "/tmp/lastcall-example")
 
     def test_nonsense_numeric_env_falls_back_to_the_default(self):
-        os.environ["CONTEXT_GUARD_RED_PERCENT"] = "not-a-number"
-        self.addCleanup(os.environ.pop, "CONTEXT_GUARD_RED_PERCENT", None)
+        os.environ["LASTCALL_RED_PERCENT"] = "not-a-number"
+        self.addCleanup(os.environ.pop, "LASTCALL_RED_PERCENT", None)
         config = cg.load_config({"cwd": self.dir})
         self.assertEqual(config["red_percent"], cg.DEFAULTS["red_percent"])
 
     def test_boolean_env_coercion(self):
-        os.environ["CONTEXT_GUARD_DISABLED"] = "true"
-        self.addCleanup(os.environ.pop, "CONTEXT_GUARD_DISABLED", None)
+        os.environ["LASTCALL_DISABLED"] = "true"
+        self.addCleanup(os.environ.pop, "LASTCALL_DISABLED", None)
         self.assertTrue(cg.load_config({"cwd": self.dir})["disabled"])
 
 
@@ -316,7 +316,7 @@ class TestTemplate(TempCase):
             fh.write("use {unknown_placeholder} here")
         config = self.config(template=path)
         message = cg.render(config, "red", 180_000, 200_000)
-        self.assertIn("CONTEXT GUARD — RED", message)
+        self.assertIn("LAST CALL — RED", message)
 
 
 class TestStateAndRearm(TempCase):
@@ -413,8 +413,8 @@ class TestEndToEnd(TempCase):
 
     def invoke(self, payload, event="Stop", env=None):
         environment = dict(os.environ)
-        environment["CONTEXT_GUARD_STATE_DIR"] = self.state
-        environment["CONTEXT_GUARD_CONTEXT_WINDOW_TOKENS"] = "200000"
+        environment["LASTCALL_STATE_DIR"] = self.state
+        environment["LASTCALL_CONTEXT_WINDOW_TOKENS"] = "200000"
         environment.pop("CLAUDE_PROJECT_DIR", None)
         environment.update(env or {})
         process = subprocess.run(
@@ -437,7 +437,7 @@ class TestEndToEnd(TempCase):
                               "hook_event_name": "Stop", "cwd": self.dir})
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         output = json.loads(result.stdout.decode())
-        self.assertIn("CONTEXT GUARD — YELLOW", output["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("LAST CALL — YELLOW", output["hookSpecificOutput"]["additionalContext"])
 
     def test_red_session_blocks_by_default(self):
         path = self.transcript([assistant_line(190_000)])
@@ -466,7 +466,7 @@ class TestEndToEnd(TempCase):
         result = self.invoke(
             {"transcript_path": path, "session_id": "e2e-off",
              "hook_event_name": "Stop", "cwd": self.dir},
-            env={"CONTEXT_GUARD_DISABLED": "1"},
+            env={"LASTCALL_DISABLED": "1"},
         )
         self.assertEqual(result.stdout, b"")
 
@@ -483,7 +483,7 @@ class TestEndToEnd(TempCase):
             {"transcript_path": path, "session_id": "s1",
              "hook_event_name": "Stop", "cwd": self.dir,
              "last_assistant_message": "SECRET"},
-            env={"CONTEXT_GUARD_DEBUG": "1"},
+            env={"LASTCALL_DEBUG": "1"},
         )
         target = os.path.join(self.state, "last-payload.json")
         self.assertTrue(os.path.exists(target))
@@ -497,7 +497,7 @@ class TestEndToEnd(TempCase):
         result = self.invoke(
             {"transcript_path": path, "session_id": "s1",
              "hook_event_name": "Stop", "cwd": self.dir},
-            env={"CONTEXT_GUARD_CONTEXT_WINDOW_TOKENS": "auto"},
+            env={"LASTCALL_CONTEXT_WINDOW_TOKENS": "auto"},
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"")

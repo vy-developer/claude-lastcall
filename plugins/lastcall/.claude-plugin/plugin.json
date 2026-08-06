@@ -1,10 +1,10 @@
 {
-  "name": "context-guard",
+  "name": "lastcall",
   "version": "1.0.0",
   "description": "Warns the assistant when the session's context window is filling up, so it wraps up and writes a handoff instead of silently working from a compacted memory.",
   "author": {
     "name": "neo.the.lobster"
   },
-  "homepage": "https://github.com/USERNAME/claude-context-guard",
+  "homepage": "https://github.com/USERNAME/claude-lastcall",
   "keywords": ["hooks", "context", "handoff", "sessions"]
 }

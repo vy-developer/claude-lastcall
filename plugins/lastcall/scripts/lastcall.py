@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Context Guard — a Claude Code hook that watches how full the session is.
+"""Last Call — a Claude Code hook that watches how full the session is.
 
 Claude Code sessions degrade quietly. Once the context window fills, older
 material is summarized away and the assistant carries on working from a lossy
@@ -17,7 +17,7 @@ DESIGN — fail passive, never fail green. If the window size is unknown, or the
 transcript cannot be read, or anything at all goes wrong, this stays quiet
 rather than guessing. A guard that guesses is worse than no guard, because its
 wrong answer is indistinguishable from "nothing to warn about". Run
-`context_guard.py doctor` to see what it actually resolved.
+`lastcall.py doctor` to see what it actually resolved.
 
 Events (all optional, register what you want):
   Stop         measure and warn/block                     [the actual guard]
@@ -63,12 +63,12 @@ DEFAULTS = {
     # Opt-in, redacted, size-capped. Never on by default: hook payloads carry
     # the full text of the last assistant message.
     "debug": False,
-    "state_dir": None,          # default: ~/.claude/context-guard
+    "state_dir": None,          # default: ~/.claude/lastcall
     "state_ttl_days": 14,
     "disabled": False,
 }
 
-ENV_PREFIX = "CONTEXT_GUARD_"
+ENV_PREFIX = "LASTCALL_"
 
 # The window CANNOT be inferred from the model identifier. Measured on a real
 # transcript: a session running the 1M-context Opus records itself as plain
@@ -109,7 +109,7 @@ Wrap up this session rather than starting anything new.
      against your memory of the session. Your memory is the thing that is
      running out.
 
-Configure this text: set "template" in .claude/context-guard.json."""
+Configure this text: set "template" in .claude/lastcall.json."""
 
 
 # --------------------------------------------------------------------------
@@ -139,7 +139,7 @@ def project_dir(payload):
 
 # Coercion is driven by the key, never by the default value. Inferring it from
 # the default means every field defaulting to None looks numeric, so an
-# environment override like CONTEXT_GUARD_STATE_DIR=/tmp/x parses as a failed
+# environment override like LASTCALL_STATE_DIR=/tmp/x parses as a failed
 # number and silently becomes None — the override vanishes without a word.
 _FLOAT_KEYS = frozenset(("yellow_percent", "red_percent"))
 _INT_KEYS = frozenset(("context_window_tokens", "state_ttl_days"))
@@ -164,11 +164,11 @@ def _coerce(key, value):
 
 
 def load_config(payload):
-    """defaults < .claude/context-guard.json < environment."""
+    """defaults < .claude/lastcall.json < environment."""
     config = dict(DEFAULTS)
     root = project_dir(payload)
 
-    path = os.path.join(root, ".claude", "context-guard.json")
+    path = os.path.join(root, ".claude", "lastcall.json")
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as handle:
@@ -181,7 +181,7 @@ def load_config(payload):
             pass
 
     # Environment overrides individual fields rather than replacing the whole
-    # config, so CONTEXT_GUARD_RED=90 for one run keeps everything else.
+    # config, so LASTCALL_RED=90 for one run keeps everything else.
     for key in config:
         env_value = os.environ.get(ENV_PREFIX + key.upper())
         if env_value is not None:
@@ -196,7 +196,7 @@ def state_dir(config):
     override = config.get("state_dir")
     if override:
         return os.path.expanduser(override)
-    return os.path.expanduser("~/.claude/context-guard")
+    return os.path.expanduser("~/.claude/lastcall")
 
 
 # --------------------------------------------------------------------------
@@ -430,17 +430,17 @@ def render(config, band, tokens, window):
     percent = (tokens * 100.0) / window
     if band == "red":
         header = (
-            "CONTEXT GUARD — RED. {percent:.0f}% of the context window is in use "
+            "LAST CALL — RED. {percent:.0f}% of the context window is in use "
             "({tokens:,} of {window:,} tokens; {remaining:,} left).\n"
-            "Do not continue normal work. Wrap-up only — do not start, resume, "
-            "or 'quickly finish' anything."
+            "Closing time. Wrap-up only — do not start, resume, or 'quickly "
+            "finish' anything."
         )
     else:
         header = (
-            "CONTEXT GUARD — YELLOW. {percent:.0f}% of the context window is in "
+            "LAST CALL — YELLOW. {percent:.0f}% of the context window is in "
             "use ({tokens:,} of {window:,} tokens; {remaining:,} left).\n"
-            "Wrap up; do not stop dead. This is an alarm, not a decision — you "
-            "judge what still fits — but start no new phase or feature."
+            "Finish what is in flight; start nothing new. This is an alarm, "
+            "not a decision — you judge what still fits."
         )
     values = {
         "percent": percent,
@@ -606,7 +606,7 @@ def doctor(argv):
             transcript = arg
     config = load_config(payload)
 
-    print("context-guard %s" % __version__)
+    print("lastcall %s" % __version__)
     print("  project dir   : %s" % config["_project_dir"])
     print("  config file   : %s" % (config["_config_path"] or "(none — using defaults)"))
     print("  state dir     : %s" % state_dir(config))
@@ -618,7 +618,7 @@ def doctor(argv):
 
     if not transcript:
         print("\nPass a transcript path to measure a real session, e.g.")
-        print("  context_guard.py doctor ~/.claude/projects/<project>/<session>.jsonl")
+        print("  lastcall.py doctor ~/.claude/projects/<project>/<session>.jsonl")
         return 0
 
     payload["transcript_path"] = transcript
@@ -635,7 +635,7 @@ def doctor(argv):
         print("\n  -> the guard stays SILENT: it will not guess the window size.")
         print("     A model identifier does not reveal it — the 1M and 200K")
         print("     variants record the same name. Fix it either way:")
-        print("       1. echo '{\"context_window_tokens\": 200000}' > .claude/context-guard.json")
+        print("       1. echo '{\"context_window_tokens\": 200000}' > .claude/lastcall.json")
         print("       2. or install the status line, which is handed the real")
         print("          number by Claude Code (see README).")
         return 1

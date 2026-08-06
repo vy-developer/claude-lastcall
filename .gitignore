@@ -1,5 +1,5 @@
 __pycache__/
 *.py[cod]
 .claude/settings.local.json
-*.context-guard.bak
+*.lastcall.bak
 .DS_Store

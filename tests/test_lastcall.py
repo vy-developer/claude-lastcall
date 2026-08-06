@@ -220,7 +220,11 @@ class TestMeasure(TempCase):
         replaces every non-alphanumeric character. A derived path is wrong in
         two independent ways, so it must not be attempted at all."""
         config = self.config()
-        payload = {"cwd": "/home/x/SimpleHome/mobile", "session_id": "s1"}
+        # Shape taken from a real captured Stop payload: cwd was a subdirectory
+        # of the project, while the transcript lived under the project root's
+        # slug. Deriving the path from cwd lands on a directory that does not
+        # exist, and the guard silently disables itself.
+        payload = {"cwd": "/home/user/myproject/subdir", "session_id": "s1"}
         tokens, _w, source, _m = cg.measure(config, payload)
         self.assertIsNone(tokens)
         self.assertEqual(source, "no-transcript")
@@ -264,6 +268,19 @@ class TestConfig(TempCase):
         self.assertEqual(config["yellow_percent"], 33)
         self.assertEqual(config["mode"], "advisory")  # untouched
 
+    def test_shipped_example_config_is_valid(self):
+        """The example is documentation people paste in, so it has to parse and
+        it must not name a field the code ignores."""
+        example = os.path.join(ROOT, "plugins", "lastcall", "lastcall.example.json")
+        with open(example, encoding="utf-8") as handle:
+            data = json.load(handle)
+        for key in data:
+            if key.startswith("_comment"):
+                continue
+            self.assertIn(key, cg.DEFAULTS, "example config names unknown field %r" % key)
+        for key in cg.DEFAULTS:
+            self.assertIn(key, data, "example config omits documented field %r" % key)
+
     def test_broken_config_does_not_raise(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
         with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
@@ -302,12 +319,18 @@ class TestTemplate(TempCase):
         for leak in ("tmux", "docs/status.md", "docs/handoff", "codex", "git commit"):
             self.assertNotIn(leak, text)
 
+    def zone(self, config, name):
+        for zone in cg.resolve_zones(config):
+            if zone["name"] == name:
+                return zone
+        raise AssertionError("no zone named %r" % name)
+
     def test_user_template_is_used_and_interpolated(self):
         path = os.path.join(self.dir, "wrap.md")
         with open(path, "w") as fh:
             fh.write("at {percent:.0f}% with {remaining:,} left")
         config = self.config(template=path)
-        message = cg.render(config, "yellow", 140_000, 200_000)
+        message = cg.render(config, self.zone(config, "yellow"), 140_000, 200_000)
         self.assertIn("at 70% with 60,000 left", message)
 
     def test_template_with_stray_braces_still_warns(self):
@@ -315,8 +338,107 @@ class TestTemplate(TempCase):
         with open(path, "w") as fh:
             fh.write("use {unknown_placeholder} here")
         config = self.config(template=path)
-        message = cg.render(config, "red", 180_000, 200_000)
+        message = cg.render(config, self.zone(config, "red"), 180_000, 200_000)
         self.assertIn("LAST CALL — RED", message)
+
+
+class TestZones(TempCase):
+    """Two zones called yellow and red are the default arrangement, not a
+    built-in limit."""
+
+    def test_defaults_build_yellow_and_red(self):
+        zones = cg.resolve_zones(dict(cg.DEFAULTS))
+        self.assertEqual([z["name"] for z in zones], ["yellow", "red"])
+        self.assertEqual([z["at"] for z in zones], [70, 85])
+        self.assertFalse(zones[0]["block"])
+        self.assertTrue(zones[1]["block"])
+
+    def test_custom_zones_replace_the_defaults(self):
+        config = self.config(zones=[
+            {"name": "nudge", "at": 40},
+            {"name": "winddown", "at": 65},
+            {"name": "closing", "at": 90, "block": True},
+        ])
+        self.assertEqual(cg.band_for(10, config), "green")
+        self.assertEqual(cg.band_for(45, config), "nudge")
+        self.assertEqual(cg.band_for(70, config), "winddown")
+        self.assertEqual(cg.band_for(95, config), "closing")
+
+    def test_zones_are_sorted_regardless_of_declaration_order(self):
+        config = self.config(zones=[
+            {"name": "high", "at": 90}, {"name": "low", "at": 30}])
+        self.assertEqual([z["name"] for z in cg.resolve_zones(config)],
+                         ["low", "high"])
+        self.assertEqual(cg.band_for(95, config), "high")
+
+    def test_a_single_zone_is_legitimate(self):
+        config = self.config(zones=[{"name": "done", "at": 80, "block": True}])
+        self.assertEqual(cg.band_for(50, config), "green")
+        self.assertEqual(cg.band_for(80, config), "done")
+
+    def test_empty_zone_list_can_never_fire(self):
+        config = self.config(zones=[])
+        # An empty list is indistinguishable from "not set", so the defaults
+        # apply — silently disabling the tool on a typo would be worse.
+        self.assertEqual(cg.band_for(95, config), "red")
+
+    def test_malformed_zones_are_dropped_not_fatal(self):
+        config = self.config(zones=[
+            {"name": "ok", "at": 50},
+            {"name": "no-threshold"},
+            {"at": "not a number"},
+            "not even a dict",
+        ])
+        zones = cg.resolve_zones(config)
+        self.assertEqual([z["name"] for z in zones], ["ok"])
+
+    def test_zone_without_a_name_gets_one_from_its_threshold(self):
+        config = self.config(zones=[{"at": 75}])
+        self.assertEqual(cg.band_for(80, config), "75%")
+
+    def test_per_zone_inline_message(self):
+        config = self.config(zones=[
+            {"name": "winddown", "at": 60, "message": "STOP. Write docs/handoff.md."}])
+        zone = cg.resolve_zones(config)[0]
+        message = cg.render(config, zone, 130_000, 200_000)
+        self.assertIn("LAST CALL — WINDDOWN", message)
+        self.assertIn("STOP. Write docs/handoff.md.", message)
+        self.assertNotIn("Configure this text", message)  # not the built-in
+
+    def test_per_zone_template_file_beats_the_global_one(self):
+        specific = os.path.join(self.dir, "closing.md")
+        with open(specific, "w") as fh:
+            fh.write("closing instructions at {percent:.0f}%")
+        shared = os.path.join(self.dir, "shared.md")
+        with open(shared, "w") as fh:
+            fh.write("shared instructions")
+        config = self.config(template=shared, zones=[
+            {"name": "early", "at": 50},
+            {"name": "closing", "at": 80, "template": specific},
+        ])
+        early, closing = cg.resolve_zones(config)
+        self.assertIn("shared instructions", cg.render(config, early, 110_000, 200_000))
+        self.assertIn("closing instructions at 90%",
+                      cg.render(config, closing, 180_000, 200_000))
+
+    def test_custom_headline(self):
+        config = self.config(zones=[
+            {"name": "z", "at": 50, "headline": "Down tools."}])
+        message = cg.render(config, cg.resolve_zones(config)[0], 110_000, 200_000)
+        self.assertIn("Down tools.", message)
+
+    def test_zones_from_environment_as_json(self):
+        os.environ["LASTCALL_ZONES"] = json.dumps([{"name": "solo", "at": 55}])
+        self.addCleanup(os.environ.pop, "LASTCALL_ZONES", None)
+        config = cg.load_config({"cwd": self.dir})
+        self.assertEqual([z["name"] for z in cg.resolve_zones(config)], ["solo"])
+
+    def test_broken_zones_json_in_environment_falls_back(self):
+        os.environ["LASTCALL_ZONES"] = "{not json"
+        self.addCleanup(os.environ.pop, "LASTCALL_ZONES", None)
+        config = cg.load_config({"cwd": self.dir})
+        self.assertEqual([z["name"] for z in cg.resolve_zones(config)],
+                         ["yellow", "red"])
 
 
 class TestStateAndRearm(TempCase):
@@ -508,7 +630,7 @@ class TestEndToEnd(TempCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.assertEqual(process.returncode, 0)
-        self.assertIn(b"thresholds", process.stdout)
+        self.assertIn(b"zones", process.stdout)
 
 
 if __name__ == "__main__":

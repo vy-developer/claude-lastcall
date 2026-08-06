@@ -45,6 +45,12 @@ DEFAULTS = {
     # on any model that wasn't the one its author used.
     "yellow_percent": 70,
     "red_percent": 85,
+    # Define your own zones and you get full control: as many as you like, your
+    # names, your thresholds, your instructions, and which ones hold the stop.
+    # None means "build the standard two from the percentages above".
+    #   [{"name": "wind-down", "at": 60, "template": ".claude/winddown.md"},
+    #    {"name": "closing",   "at": 85, "block": true}]
+    "zones": None,
     # None means "work it out from an exact source, or stay silent". Setting it
     # explicitly is the escape hatch when no exact source is available — see
     # resolve_window for why this is never inferred from the model name.
@@ -144,10 +150,18 @@ def project_dir(payload):
 _FLOAT_KEYS = frozenset(("yellow_percent", "red_percent"))
 _INT_KEYS = frozenset(("context_window_tokens", "state_ttl_days"))
 _BOOL_KEYS = frozenset(("include_output_tokens", "debug", "disabled"))
+_JSON_KEYS = frozenset(("zones",))
 
 
 def _coerce(key, value):
     """Environment variables arrive as strings; config values arrive typed."""
+    if key in _JSON_KEYS:
+        if isinstance(value, (list, tuple)):
+            return value
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return DEFAULTS[key]
     if key in _BOOL_KEYS:
         return str(value).strip().lower() in ("1", "true", "yes", "on")
     if key in _FLOAT_KEYS or key in _INT_KEYS:
@@ -322,14 +336,68 @@ def resolve_window(config, state=None):
     return None, "unknown"
 
 
+_DEFAULT_HEADLINES = {
+    "yellow": ("Finish what is in flight; start nothing new. This is an alarm, "
+               "not a decision — you judge what still fits."),
+    "red": ("Closing time. Wrap-up only — do not start, resume, or 'quickly "
+            "finish' anything."),
+}
+
+
+def resolve_zones(config):
+    """The thresholds, lowest first.
+
+    Two zones named yellow and red are just the default arrangement, not a
+    built-in limit. A project that wants one gentle nudge at 50% and a hard
+    stop at 90%, or four escalating steps, says so in config and nothing here
+    treats that as unusual.
+    """
+    declared = config.get("zones")
+    if not declared:
+        declared = [
+            {"name": "yellow", "at": config.get("yellow_percent")},
+            {"name": "red", "at": config.get("red_percent"), "block": True},
+        ]
+    if not isinstance(declared, (list, tuple)):
+        return []
+
+    zones = []
+    for entry in declared:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            at = float(entry.get("at"))
+        except (TypeError, ValueError):
+            continue  # a malformed zone is dropped, not fatal
+        name = str(entry.get("name") or ("%g%%" % at))
+        zones.append({
+            "name": name,
+            "at": at,
+            # Replaces the generic body for this zone only. Inline text or a
+            # file; the file wins if both are given.
+            "message": entry.get("message"),
+            "template": entry.get("template"),
+            # One line after the numbers, before the instructions.
+            "headline": entry.get("headline") or _DEFAULT_HEADLINES.get(name),
+            "block": bool(entry.get("block", False)),
+        })
+    zones.sort(key=lambda zone: zone["at"])
+    return zones
+
+
+def zone_for(percent, zones):
+    """The highest zone this reading has reached, or None while below them all."""
+    current = None
+    for zone in zones:  # ascending, so the last match is the highest
+        if percent >= zone["at"]:
+            current = zone
+    return current
+
+
 def band_for(percent, config):
-    yellow = float(config["yellow_percent"])
-    red = float(config["red_percent"])
-    if percent >= red:
-        return "red"
-    if percent >= yellow:
-        return "yellow"
-    return "green"
+    """Zone name for a reading, or "green" below every zone."""
+    zone = zone_for(percent, resolve_zones(config))
+    return zone["name"] if zone else "green"
 
 
 # --------------------------------------------------------------------------
@@ -413,43 +481,50 @@ def write_debug(config, payload):
 # Message
 # --------------------------------------------------------------------------
 
-def load_template(config):
-    path = config.get("template")
+def read_template(config, path):
     if not path:
-        return DEFAULT_TEMPLATE
+        return None
     if not os.path.isabs(path):
         path = os.path.join(config["_project_dir"], path)
     try:
         with open(path, "r", encoding="utf-8") as handle:
             return handle.read().strip()
     except OSError:
-        return DEFAULT_TEMPLATE
+        return None
 
 
-def render(config, band, tokens, window):
+def zone_body(config, zone):
+    """What this zone actually tells the assistant to do.
+
+    Most specific first: this zone's own file, this zone's inline text, the
+    project-wide template, then the generic built-in.
+    """
+    return (read_template(config, zone.get("template"))
+            or zone.get("message")
+            or read_template(config, config.get("template"))
+            or DEFAULT_TEMPLATE)
+
+
+def render(config, zone, tokens, window):
     percent = (tokens * 100.0) / window
-    if band == "red":
-        header = (
-            "LAST CALL — RED. {percent:.0f}% of the context window is in use "
-            "({tokens:,} of {window:,} tokens; {remaining:,} left).\n"
-            "Closing time. Wrap-up only — do not start, resume, or 'quickly "
-            "finish' anything."
-        )
-    else:
-        header = (
-            "LAST CALL — YELLOW. {percent:.0f}% of the context window is in "
-            "use ({tokens:,} of {window:,} tokens; {remaining:,} left).\n"
-            "Finish what is in flight; start nothing new. This is an alarm, "
-            "not a decision — you judge what still fits."
-        )
     values = {
         "percent": percent,
         "tokens": tokens,
         "window": window,
         "remaining": max(0, window - tokens),
-        "band": band,
+        "band": zone["name"],
+        "zone": zone["name"],
+        "at": zone["at"],
     }
-    body = load_template(config)
+    header = (
+        "LAST CALL — %s. {percent:.0f}%% of the context window is in use "
+        "({tokens:,} of {window:,} tokens; {remaining:,} left)."
+        % zone["name"].upper()
+    )
+    if zone.get("headline"):
+        header += "\n" + zone["headline"]
+
+    body = zone_body(config, zone)
     try:
         body = body.format(**values)
     except (KeyError, IndexError, ValueError):
@@ -536,7 +611,8 @@ def handle_stop(config, payload):
         return 0
 
     percent = (tokens * 100.0) / window
-    band = band_for(percent, config)
+    zone = zone_for(percent, resolve_zones(config))
+    band = zone["name"] if zone else "green"
     previous = state.get("band", "green")
 
     # Compaction re-arm. After a compact the live usage drops back to green,
@@ -550,10 +626,10 @@ def handle_stop(config, payload):
     state["peak"] = max(peak, tokens)
     state["band"] = band
 
-    if band == "green":
-        # Recorded even on green — this is what re-arms the bands. The original
-        # version returned early here, so the state never cleared and a session
-        # that crossed yellow once never warned again.
+    if zone is None:
+        # Recorded even below every zone — this is what re-arms them. The
+        # original version returned early here, so the state never cleared and
+        # a session that crossed yellow once never warned again.
         write_state(config, session_id, state)
         return 0
 
@@ -561,10 +637,11 @@ def handle_stop(config, payload):
         write_state(config, session_id, state)
         return 0  # already said this; do not repeat it every turn
 
-    message = render(config, band, tokens, window)
+    message = render(config, zone, tokens, window)
     reason = None
-    if band == "red" and config.get("mode") == "block_once":
-        reason = "Context is in the red band — write the handoff before stopping."
+    if zone.get("block") and config.get("mode") == "block_once":
+        reason = ("Context has reached the %s zone — write the handoff before "
+                  "stopping." % zone["name"])
 
     emit(event, message, reason)
     # Bookkeeping only after the payload is out, and only after a successful
@@ -610,7 +687,16 @@ def doctor(argv):
     print("  project dir   : %s" % config["_project_dir"])
     print("  config file   : %s" % (config["_config_path"] or "(none — using defaults)"))
     print("  state dir     : %s" % state_dir(config))
-    print("  thresholds    : yellow %s%%  red %s%%" % (config["yellow_percent"], config["red_percent"]))
+    zones = resolve_zones(config)
+    if zones:
+        print("  zones         : %s" % ("  ".join(
+            "%s@%g%%%s%s" % (
+                zone["name"], zone["at"],
+                "[block]" if zone["block"] else "",
+                "[own text]" if (zone["template"] or zone["message"]) else "",
+            ) for zone in zones)))
+    else:
+        print("  zones         : NONE CONFIGURED — nothing can ever fire")
     print("  mode          : %s" % config["mode"])
     print("  include output: %s" % bool(config["include_output_tokens"]))
     print("  template      : %s" % (config["template"] or "(built-in default)"))

@@ -96,13 +96,16 @@ only helps 1M users, and only after they are already deep into a session.
 
 ## Configuration
 
-`.claude/lastcall.json` in your project. Every field is optional, and every
-one can be overridden per-run with `LASTCALL_<FIELD>` in the environment.
+`.claude/lastcall.json` in your project. Every field is optional, and every one
+can be overridden per-run with `LASTCALL_<FIELD>` in the environment. Copy
+[`plugins/lastcall/lastcall.example.json`](plugins/lastcall/lastcall.example.json)
+to start from a commented version.
 
 | field | default | meaning |
 |---|---|---|
 | `yellow_percent` | `70` | warn once at this much of the window used |
 | `red_percent` | `85` | escalate once here |
+| `zones` | `null` | your own zones instead of the two above — see below |
 | `context_window_tokens` | `null` | window size; `null` means "work it out or stay quiet" |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
 | `template` | `null` | path to your own wrap-up instructions |
@@ -121,10 +124,80 @@ to your project, so write it down and point at it:
 { "template": ".claude/wrapup.md" }
 ```
 
-Placeholders: `{percent}` `{tokens}` `{window}` `{remaining}` `{band}`. See
-`plugins/lastcall/templates/example-wrapup.md` for a fuller one that
-covers status docs, a dated handoff file, and committing before the session
-ends.
+Placeholders: `{percent}` `{tokens}` `{window}` `{remaining}` `{zone}`. See
+[`example-wrapup.md`](plugins/lastcall/templates/example-wrapup.md) for a
+fuller one that covers status docs, a dated handoff file, and committing before
+the session ends.
+
+### Your own zones
+
+Yellow at 70% and red at 85% is just the default arrangement, not a limit. Set
+`zones` and you get as many as you like, with your names, your thresholds, your
+instructions, and your choice of which ones hold the session open:
+
+```json
+{
+  "zones": [
+    { "name": "nudge",    "at": 50, "message": "Past halfway. Prefer finishing threads over opening them." },
+    { "name": "winddown", "at": 70, "template": ".claude/winddown.md" },
+    { "name": "closing",  "at": 88, "template": ".claude/closing.md", "block": true }
+  ]
+}
+```
+
+| key | meaning |
+|---|---|
+| `name` | what the zone is called, in the message and in state. Defaults to its threshold |
+| `at` | percentage of the window that triggers it |
+| `template` | file of instructions for this zone only |
+| `message` | inline instructions for this zone only, if you don't want a file |
+| `headline` | one line printed straight after the numbers, before the instructions |
+| `block` | hold the stop once when this zone is first entered |
+
+Instructions resolve most-specific-first: this zone's `template`, then its
+`message`, then the project-wide `template`, then the built-in text. A shared
+template plus one zone that overrides it works without repeating yourself.
+
+`mode: "advisory"` overrides every `block` at once, which is the quickest way
+to try a configuration out without it interrupting you.
+
+Malformed zones are dropped rather than being fatal, and an empty `zones` list
+falls back to the defaults — silently disabling the tool because of a typo
+would be the worst possible failure for something whose job is to speak up.
+Check what it resolved with `doctor`:
+
+```
+zones : nudge@50%[own text]  winddown@70%[own text]  closing@88%[block][own text]
+```
+
+## What the assistant actually receives
+
+Nothing, while you are below every zone. That is the point, and it is why this
+costs no context until it matters.
+
+On the turn a zone is first entered, the hook returns JSON on stdout and Claude
+Code injects its `additionalContext` into the conversation as hook feedback.
+The assistant reads it as an instruction. It arrives **once per zone entry**,
+not every turn.
+
+The message is two parts. Last Call generates the first — the numbers, plus the
+zone's `headline` — and you own the second entirely:
+
+```
+LAST CALL — WINDDOWN. 74% of the context window is in use
+(743,106 of 1,000,000 tokens; 256,894 left).
+Finish what is in flight; start nothing new.
+
+<everything from here down is your template>
+```
+
+If the zone has `block`, the hook also returns `decision: "block"`, which stops
+the assistant ending its turn and hands it that reason. It blocks **once**:
+Claude Code sets `stop_hook_active` on the retry, and Last Call sees that flag
+and stands down, so it can never trap a session in a loop of its own making.
+
+To see a real message rather than trust this description, point `doctor` at any
+session transcript.
 
 ## How it works
 

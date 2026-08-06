@@ -149,6 +149,24 @@ class TestReverseReader(TempCase):
         got = [l.decode() for l in cg.iter_lines_reverse(path, chunk=64)]
         self.assertEqual(got, list(reversed(lines)))
 
+    def test_crlf_transcripts_do_not_leave_a_dangling_cr(self):
+        """Windows writes CRLF. Splitting on LF alone leaves \\r on every line,
+        which then travels into the parsed model name and the zone name."""
+        path = os.path.join(self.dir, "crlf.jsonl")
+        with open(path, "wb") as handle:
+            handle.write(b'{"a": 1}\r\n{"b": 2}\r\n')
+        got = [l.decode() for l in cg.iter_lines_reverse(path)]
+        self.assertEqual(got, ['{"b": 2}', '{"a": 1}'])
+
+    def test_crlf_transcript_still_measures(self):
+        line = assistant_line(145_000).encode()
+        path = os.path.join(self.dir, "crlf-session.jsonl")
+        with open(path, "wb") as handle:
+            handle.write(line + b"\r\n")
+        usage, model = cg.latest_usage(path, "s1")
+        self.assertEqual(cg.count_tokens(usage), 145_000)
+        self.assertEqual(model, "claude-sonnet-5")
+
     def test_empty_file_yields_nothing(self):
         path = os.path.join(self.dir, "empty.jsonl")
         open(path, "w").close()

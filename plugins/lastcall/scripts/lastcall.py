@@ -242,10 +242,15 @@ def iter_lines_reverse(path, limit=_TAIL_LIMIT_BYTES, chunk=_TAIL_CHUNK_BYTES):
             # so it is held over until the next block completes it.
             pending = parts.pop(0)
             for line in reversed(parts):
+                # rstrip the CR: a transcript written on Windows is CRLF, and
+                # splitting on LF alone leaves it dangling on every line.
+                line = line.rstrip(b"\r")
                 if line.strip():
                     yield line
-        if position == 0 and pending.strip():
-            yield pending
+        if position == 0:
+            pending = pending.rstrip(b"\r")
+            if pending.strip():
+                yield pending
 
 
 def latest_usage(transcript, session_id=None):

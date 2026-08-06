@@ -1,7 +1,7 @@
 {
   "name": "claude-lastcall",
   "owner": {
-    "name": "neo.the.lobster"
+    "name": "vy-developer"
   },
   "metadata": {
     "description": "Hooks that keep Claude Code sessions honest about how much context they have left.",
@@ -13,7 +13,7 @@
       "description": "Warns the assistant when the session's context window is filling up, so it wraps up and writes a handoff instead of silently working from a compacted memory.",
       "version": "1.0.0",
       "author": {
-        "name": "neo.the.lobster"
+        "name": "vy-developer"
       },
       "source": "./plugins/lastcall"
     }

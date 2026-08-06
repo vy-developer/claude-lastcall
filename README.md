@@ -25,7 +25,7 @@ decision — you judge what still fits.
 **As a plugin** (recommended — no absolute paths anywhere):
 
 ```
-/plugin marketplace add YOURNAME/claude-lastcall
+/plugin marketplace add vy-developer/claude-lastcall
 /plugin install lastcall@claude-lastcall
 ```
 
@@ -33,7 +33,7 @@ decision — you judge what still fits.
 where `python3` is often not on `PATH`:
 
 ```
-git clone https://github.com/YOURNAME/claude-lastcall
+git clone https://github.com/vy-developer/claude-lastcall
 cd claude-lastcall
 python3 install.py            # this project only
 python3 install.py --global   # every project

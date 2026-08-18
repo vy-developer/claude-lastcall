@@ -249,6 +249,40 @@ If that is too eager for you, `{"yellow_percent": 70, "red_percent": 85}` is one
 line. Re-check these on every model upgrade; long-context quality has moved a
 lot between adjacent releases.
 
+## Setting up handover
+
+After installing, run this once per project:
+
+```
+python3 <plugin>/scripts/lastcall.py setup
+```
+
+Two questions — how big your context window is, and whether you want a session
+to hand over to a fresh one automatically. It writes `.claude/lastcall.json`,
+creates `docs/handoff/`, and then tells you exactly what is and is not wired up:
+
+```
+automatic handover: READY
+  ok   template configured
+  ok   template invokes the relay
+  ok   relay script present
+  ok   tmux on PATH
+  ok   git on PATH
+  ok   claude CLI on PATH
+```
+
+**Handover is off until you do this,** and the tool says so rather than letting
+you find out at the worst moment. Until it is configured:
+
+- `doctor` reports `automatic handover: NOT SET UP` with a MISS beside each
+  missing piece
+- the installer prints the same warning when it finishes
+- the built-in wrap-up message tells the assistant plainly that nothing will
+  carry the work forward, and asks it to say so once. That notice disappears
+  the moment you configure a template of your own
+
+A tool whose job is to prevent silent failure has no business failing silently.
+
 ## The relay (optional, Unix + tmux only)
 
 The guard tells the assistant to wrap up. The relay is what makes a session
@@ -302,7 +336,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-91 tests, standard library only, no network. They cover the failure modes that
+100 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

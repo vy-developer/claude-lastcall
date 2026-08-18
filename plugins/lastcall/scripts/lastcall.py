@@ -114,6 +114,9 @@ _COMPACTION_DROP_RATIO = 0.6
 RELAY_SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "relay", "handoff.sh")
+RELAY_TEMPLATE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "templates", "handoff-relay.md")
 
 DEFAULT_TEMPLATE = """\
 Wrap up this session rather than starting anything new.
@@ -130,6 +133,12 @@ Wrap up this session rather than starting anything new.
   4. VERIFY that record against the actual state of the repository, not
      against your memory of the session. Your memory is the thing that is
      running out.
+
+AUTOMATIC HANDOVER IS NOT SET UP for this project, so nothing will start a
+successor session or carry this work forward — when you stop, the work stops.
+Tell the user that, once, and point them at:
+
+    python3 {setup} setup
 
 Configure this text: set "template" in .claude/lastcall.json."""
 
@@ -542,6 +551,7 @@ def render(config, zone, tokens, window):
         "zone": zone["name"],
         "at": zone["at"],
         "relay": RELAY_SCRIPT,
+        "setup": os.path.abspath(__file__),
     }
     header = (
         "LAST CALL — %s. {percent:.0f}%% of the context window is in use "
@@ -697,6 +707,146 @@ def handle_reset(config, payload):
 # doctor
 # --------------------------------------------------------------------------
 
+def handover_status(config):
+    """What would actually happen at the end of a session, as facts.
+
+    The whole point of this tool is that silent failure is the enemy. A guard
+    that tells the assistant to hand over, in a project where nothing can
+    receive the handover, is precisely that failure wearing a different hat.
+    """
+    import shutil
+
+    template = config.get("template")
+    body = None
+    if template:
+        body = read_template(config, template)
+    zone_templates = [z.get("template") for z in resolve_zones(config)]
+    for zone_template in zone_templates:
+        if zone_template and not body:
+            body = read_template(config, zone_template)
+
+    # "{relay}" counts: it is the placeholder that BECOMES the relay path at
+    # render time. Checking only for the resolved path reported a correctly
+    # configured project as broken, which is the exact false alarm this
+    # section exists to avoid.
+    wired = bool(body and ("{relay}" in body
+                           or RELAY_SCRIPT in body
+                           or "handoff.sh" in body))
+    checks = {
+        "template configured": bool(template or any(zone_templates)),
+        "template invokes the relay": wired,
+        "relay script present": os.path.isfile(RELAY_SCRIPT),
+        "tmux on PATH": bool(shutil.which("tmux")),
+        "git on PATH": bool(shutil.which("git")),
+        "claude CLI on PATH": bool(shutil.which("claude")),
+    }
+    ready = all(checks.values())
+    return ready, checks
+
+
+def setup(argv):
+    """Interactive first-run configuration.
+
+    Two questions, because two things cannot be worked out from the transcript:
+    how big the window is, and whether you want a session to hand over to a
+    successor on its own.
+    """
+    payload = {"cwd": os.getcwd()}
+    config = load_config(payload)
+    root = config["_project_dir"]
+    target = os.path.join(root, ".claude", "lastcall.json")
+    interactive = sys.stdin.isatty()
+
+    existing = {}
+    if os.path.isfile(target):
+        try:
+            with open(target, "r", encoding="utf-8") as handle:
+                existing = json.load(handle) or {}
+        except (OSError, ValueError):
+            existing = {}
+
+    def ask(question, options, default):
+        if not interactive:
+            return default
+        print("\n" + question)
+        for key, label in options:
+            print("  %s) %s" % (key, label))
+        while True:
+            try:
+                answer = input("  [%s] " % default).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return default
+            if not answer:
+                return default
+            if answer in dict(options):
+                return answer
+
+    print("Last Call setup — %s" % root)
+
+    window = ask(
+        "How big is this project's context window?",
+        [("1", "200,000 tokens (standard)"),
+         ("2", "1,000,000 tokens (extended)"),
+         ("3", "work it out automatically (install the status line)")],
+        "1")
+    if window == "1":
+        existing["context_window_tokens"] = 200_000
+    elif window == "2":
+        existing["context_window_tokens"] = 1_000_000
+    else:
+        existing["context_window_tokens"] = None
+
+    relay = ask(
+        "Hand over to a fresh session automatically when context runs low?\n"
+        "  This needs tmux, git and the claude CLI, and it is Unix-only.\n"
+        "  Without it, Last Call warns and the session simply ends.",
+        [("y", "yes — set up automatic handover"),
+         ("n", "no — just warn me")],
+        "n")
+
+    notes = []
+    if relay == "y":
+        existing["template"] = RELAY_TEMPLATE
+        handoff_dir = os.path.join(root, "docs", "handoff")
+        try:
+            os.makedirs(handoff_dir, exist_ok=True)
+            notes.append("created %s" % handoff_dir)
+        except OSError as error:
+            notes.append("could NOT create %s (%s)" % (handoff_dir, error))
+        import shutil as _sh
+        for tool in ("tmux", "git", "claude"):
+            if not _sh.which(tool):
+                notes.append("MISSING: %s is not on PATH — handover will not work"
+                             % tool)
+
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if os.path.isfile(target):
+            import shutil as _sh2
+            _sh2.copy2(target, target + ".bak")
+            notes.append("backed up the previous config to %s.bak" % target)
+        with open(target, "w", encoding="utf-8") as handle:
+            json.dump(existing, handle, indent=2)
+            handle.write("\n")
+    except OSError as error:
+        print("\ncould not write %s: %s" % (target, error))
+        return 1
+
+    print("\nwrote %s" % target)
+    for note in notes:
+        print("  %s" % note)
+
+    fresh = load_config({"cwd": root})
+    ready, checks = handover_status(fresh)
+    print("\nautomatic handover: %s" % ("READY" if ready else "NOT SET UP"))
+    for label, ok in checks.items():
+        print("  %s %s" % ("ok  " if ok else "MISS", label))
+    if not ready and relay == "y":
+        print("\nFix the MISS lines above, then re-run: lastcall.py doctor")
+    return 0
+
+
 def doctor(argv):
     """Show exactly what the guard resolves, so a silent guard is diagnosable.
 
@@ -728,6 +878,14 @@ def doctor(argv):
     print("  include output: %s" % bool(config["include_output_tokens"]))
     print("  template      : %s" % (config["template"] or "(built-in default)"))
     print("  disabled      : %s" % bool(config["disabled"]))
+
+    ready, checks = handover_status(config)
+    print("\n  automatic handover: %s" % ("READY" if ready else "NOT SET UP"))
+    for label, ok in checks.items():
+        print("    %s %s" % ("ok  " if ok else "MISS", label))
+    if not ready:
+        print("    -> Last Call will warn, but nothing will carry the work")
+        print("       forward; the session just ends. Run: lastcall.py setup")
 
     if not transcript:
         print("\nPass a transcript path to measure a real session, e.g.")
@@ -765,6 +923,8 @@ def doctor(argv):
 def main(argv):
     if argv and argv[0] in ("doctor", "--doctor"):
         return doctor(argv[1:])
+    if argv and argv[0] in ("setup", "--setup"):
+        return setup(argv[1:])
     if argv and argv[0] in ("--version", "-V"):
         print(__version__)
         return 0

@@ -729,3 +729,87 @@ class TestTemplateWhitespace(TempCase):
         config = self.config(template=path)
         self.assertEqual(cg.zone_body(config, cg.resolve_zones(config)[0]),
                          cg.DEFAULT_TEMPLATE)
+
+
+class TestHandoverReadiness(TempCase):
+    """A guard that tells the assistant to hand over, in a project where
+    nothing can receive the handover, is a silent failure wearing a hat."""
+
+    def test_unconfigured_project_reports_not_set_up(self):
+        ready, checks = cg.handover_status(self.config())
+        self.assertFalse(ready)
+        self.assertFalse(checks["template configured"])
+        self.assertFalse(checks["template invokes the relay"])
+
+    def test_the_shipped_relay_template_counts_as_wired(self):
+        """It contains {relay}, not the resolved path. Checking only for the
+        resolved path reported a correct setup as broken."""
+        config = self.config(template=cg.RELAY_TEMPLATE)
+        ready, checks = cg.handover_status(config)
+        self.assertTrue(checks["template configured"])
+        self.assertTrue(checks["template invokes the relay"])
+
+    def test_a_plain_template_is_configured_but_not_wired(self):
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w") as fh:
+            fh.write("just write some notes")
+        ready, checks = cg.handover_status(self.config(template=path))
+        self.assertTrue(checks["template configured"])
+        self.assertFalse(checks["template invokes the relay"])
+        self.assertFalse(ready)
+
+    def test_a_zone_template_counts_too(self):
+        config = self.config(zones=[
+            {"name": "closing", "at": 80, "template": cg.RELAY_TEMPLATE}])
+        _ready, checks = cg.handover_status(config)
+        self.assertTrue(checks["template invokes the relay"])
+
+    def test_relay_script_and_template_actually_ship(self):
+        self.assertTrue(os.path.isfile(cg.RELAY_SCRIPT), cg.RELAY_SCRIPT)
+        self.assertTrue(os.path.isfile(cg.RELAY_TEMPLATE), cg.RELAY_TEMPLATE)
+
+    def test_default_message_says_handover_is_not_set_up(self):
+        """With no template configured, the assistant is told the truth: the
+        work stops here unless someone wires up handover."""
+        config = self.config()
+        message = cg.render(config, cg.resolve_zones(config)[0], 150_000, 200_000)
+        self.assertIn("AUTOMATIC HANDOVER IS NOT SET UP", message)
+        self.assertIn("setup", message)
+        self.assertNotIn("{setup}", message)
+
+    def test_a_configured_template_drops_that_notice(self):
+        config = self.config(template=cg.RELAY_TEMPLATE)
+        message = cg.render(config, cg.resolve_zones(config)[0], 150_000, 200_000)
+        self.assertNotIn("AUTOMATIC HANDOVER IS NOT SET UP", message)
+
+
+class TestSetupCommand(TempCase):
+    def run_setup(self, cwd):
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = cwd
+        return subprocess.run([sys.executable, SCRIPT, "setup"],
+                              input=b"", stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, env=env, cwd=cwd)
+
+    def test_non_interactive_setup_takes_safe_defaults(self):
+        """Piped into a script with no tty it must not hang waiting for input,
+        and must not silently enable an unattended spawner."""
+        os.makedirs(os.path.join(self.dir, ".claude"))
+        result = self.run_setup(self.dir)
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        with open(os.path.join(self.dir, ".claude", "lastcall.json")) as handle:
+            written = json.load(handle)
+        self.assertEqual(written["context_window_tokens"], 200_000)
+        self.assertNotIn("template", written)
+
+    def test_setup_preserves_unrelated_existing_settings(self):
+        os.makedirs(os.path.join(self.dir, ".claude"))
+        target = os.path.join(self.dir, ".claude", "lastcall.json")
+        with open(target, "w") as fh:
+            json.dump({"mode": "advisory", "yellow_percent": 33}, fh)
+        self.run_setup(self.dir)
+        with open(target) as handle:
+            written = json.load(handle)
+        self.assertEqual(written["mode"], "advisory")
+        self.assertEqual(written["yellow_percent"], 33)
+        self.assertTrue(os.path.isfile(target + ".bak"))

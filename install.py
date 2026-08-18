@@ -173,9 +173,20 @@ def main(argv):
     print("installed Last Call into %s" % settings_path)
     print("  interpreter : %s" % " ".join(interpreter))
     print("  script      : %s" % SCRIPT)
-    print("\nVerify it resolves correctly:")
-    print("  %s %s doctor" % (" ".join(interpreter), quote(SCRIPT)))
     print("\nRestart Claude Code for the hooks to load.")
+
+    # Say plainly what is NOT configured. A guard that quietly does half its
+    # job is the failure mode this whole project exists to prevent, so the
+    # installer refuses to imply more than it has actually set up.
+    print("\n" + "-" * 68)
+    print("Last Call will now WARN when context runs low.")
+    print("It will NOT hand work over to a fresh session — that is off until")
+    print("you configure it. Without it, a session simply ends at the warning.")
+    print("\nSet it up (two questions, takes a moment):")
+    print("  %s %s setup" % (" ".join(interpreter), quote(SCRIPT)))
+    print("\nOr check what is and is not wired up:")
+    print("  %s %s doctor" % (" ".join(interpreter), quote(SCRIPT)))
+    print("-" * 68)
     return 0
 
 

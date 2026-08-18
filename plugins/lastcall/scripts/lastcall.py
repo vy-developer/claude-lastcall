@@ -493,9 +493,14 @@ def read_template(config, path):
         path = os.path.join(config["_project_dir"], path)
     try:
         with open(path, "r", encoding="utf-8") as handle:
-            return handle.read().strip()
+            text = handle.read()
     except OSError:
         return None
+    # Strip blank lines off each end, NOT whitespace. A plain .strip() eats the
+    # leading indentation of the first line, so a template that opens with an
+    # indented list item silently loses its alignment on that one line and
+    # keeps it on every other — which reads as a corrupted message.
+    return text.strip("\r\n").rstrip() or None
 
 
 def zone_body(config, zone):

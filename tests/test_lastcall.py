@@ -653,3 +653,31 @@ class TestEndToEnd(TempCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestTemplateWhitespace(TempCase):
+    """A template's own indentation is content, not padding."""
+
+    def test_leading_indentation_of_the_first_line_survives(self):
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w") as fh:
+            fh.write("\n\n  1. FINISH what is in flight.\n     continued here\n  2. THEN this.\n\n")
+        config = self.config(template=path)
+        body = cg.zone_body(config, cg.resolve_zones(config)[0])
+        self.assertEqual(
+            body, "  1. FINISH what is in flight.\n     continued here\n  2. THEN this.")
+
+    def test_surrounding_blank_lines_are_still_trimmed(self):
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w") as fh:
+            fh.write("\n\nbody\n\n\n")
+        config = self.config(template=path)
+        self.assertEqual(cg.zone_body(config, cg.resolve_zones(config)[0]), "body")
+
+    def test_whitespace_only_template_falls_back(self):
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w") as fh:
+            fh.write("\n   \n")
+        config = self.config(template=path)
+        self.assertEqual(cg.zone_body(config, cg.resolve_zones(config)[0]),
+                         cg.DEFAULT_TEMPLATE)

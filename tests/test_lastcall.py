@@ -56,7 +56,10 @@ class TempCase(unittest.TestCase):
     def config(self, **overrides):
         # An explicit window, because the guard refuses to invent one. Tests
         # that care about resolution set it back to None themselves.
-        config = dict(cg.DEFAULTS, context_window_tokens=200_000)
+        # Scenario tests pin their own ladder so they stay meaningful when the
+        # shipped defaults change; TestShippedDefaults covers those separately.
+        config = dict(cg.DEFAULTS, context_window_tokens=200_000,
+                      yellow_percent=70, red_percent=85)
         config.update(overrides)
         config["state_dir"] = self.state
         config["_project_dir"] = self.dir
@@ -117,9 +120,31 @@ class TestTokenCounting(unittest.TestCase):
         self.assertEqual(cg.count_tokens({}), 0)
 
 
+class TestShippedDefaults(unittest.TestCase):
+    """The shipped ladder is a product decision, not an accident. It comes from
+    a hook proven over ~50 unattended handoffs; changing it should require
+    changing a test that says so out loud."""
+
+    def test_default_ladder_is_40_55(self):
+        self.assertEqual(cg.DEFAULTS["yellow_percent"], 40)
+        self.assertEqual(cg.DEFAULTS["red_percent"], 55)
+
+    def test_defaults_fire_where_the_reference_hook_fires(self):
+        # The reference hook used absolute 400k/550k on a 1M window.
+        config = dict(cg.DEFAULTS)
+        for tokens, expected in ((399_999, "green"), (400_000, "yellow"),
+                                 (549_999, "yellow"), (550_001, "red")):
+            self.assertEqual(cg.band_for(tokens / 10_000.0, config), expected,
+                             "%s tokens on a 1M window" % tokens)
+
+    def test_red_blocks_by_default(self):
+        zones = cg.resolve_zones(dict(cg.DEFAULTS))
+        self.assertTrue([z for z in zones if z["name"] == "red"][0]["block"])
+
+
 class TestBands(unittest.TestCase):
     def setUp(self):
-        self.config = dict(cg.DEFAULTS)
+        self.config = dict(cg.DEFAULTS, yellow_percent=70, red_percent=85)
 
     def test_percentage_bands(self):
         self.assertEqual(cg.band_for(10, self.config), "green")
@@ -367,7 +392,7 @@ class TestZones(TempCase):
     def test_defaults_build_yellow_and_red(self):
         zones = cg.resolve_zones(dict(cg.DEFAULTS))
         self.assertEqual([z["name"] for z in zones], ["yellow", "red"])
-        self.assertEqual([z["at"] for z in zones], [70, 85])
+        self.assertEqual([z["at"] for z in zones], [40, 55])
         self.assertFalse(zones[0]["block"])
         self.assertTrue(zones[1]["block"])
 
@@ -555,6 +580,10 @@ class TestEndToEnd(TempCase):
         environment = dict(os.environ)
         environment["LASTCALL_STATE_DIR"] = self.state
         environment["LASTCALL_CONTEXT_WINDOW_TOKENS"] = "200000"
+        # Pin the ladder these scenarios were written against, so they keep
+        # testing the mechanism rather than the current default numbers.
+        environment["LASTCALL_YELLOW_PERCENT"] = "70"
+        environment["LASTCALL_RED_PERCENT"] = "85"
         environment.pop("CLAUDE_PROJECT_DIR", None)
         environment.update(env or {})
         process = subprocess.run(
@@ -666,6 +695,25 @@ class TestTemplateWhitespace(TempCase):
         body = cg.zone_body(config, cg.resolve_zones(config)[0])
         self.assertEqual(
             body, "  1. FINISH what is in flight.\n     continued here\n  2. THEN this.")
+
+    def test_relay_placeholder_resolves_to_the_shipped_script(self):
+        """A wrap-up template says "run {relay}" and must get a real path, so
+        nobody has to hand-edit one that changes with every plugin update."""
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w") as fh:
+            fh.write("step 6: run bash {relay}")
+        config = self.config(template=path)
+        message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
+        self.assertIn(cg.RELAY_SCRIPT, message)
+        self.assertTrue(os.path.isfile(cg.RELAY_SCRIPT), cg.RELAY_SCRIPT)
+
+    def test_shipped_relay_template_renders(self):
+        template = os.path.join(ROOT, "plugins", "lastcall", "templates",
+                                "handoff-relay.md")
+        config = self.config(template=template)
+        message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
+        self.assertIn("bash %s" % cg.RELAY_SCRIPT, message)
+        self.assertNotIn("{relay}", message)
 
     def test_surrounding_blank_lines_are_still_trimmed(self):
         path = os.path.join(self.dir, "wrap.md")

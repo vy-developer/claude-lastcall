@@ -2,8 +2,8 @@
   "_comment": "Copy to .claude/lastcall.json in your project. Every field is optional; these are the defaults. Override any of them per-run with LASTCALL_<FIELD> in the environment.",
 
   "_comment_zones": "Two zones named yellow and red is only the default. Set 'zones' to define your own: any number, your names, your thresholds, your instructions, and which ones hold the stop. When 'zones' is set, yellow_percent and red_percent are ignored.",
-  "yellow_percent": 70,
-  "red_percent": 85,
+  "yellow_percent": 40,
+  "red_percent": 55,
   "zones": null,
 
   "_comment_zones_example": [

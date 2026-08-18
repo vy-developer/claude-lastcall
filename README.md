@@ -103,8 +103,8 @@ to start from a commented version.
 
 | field | default | meaning |
 |---|---|---|
-| `yellow_percent` | `70` | warn once at this much of the window used |
-| `red_percent` | `85` | escalate once here |
+| `yellow_percent` | `40` | warn once at this much of the window used |
+| `red_percent` | `55` | escalate once here |
 | `zones` | `null` | your own zones instead of the two above — see below |
 | `context_window_tokens` | `null` | window size; `null` means "work it out or stay quiet" |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
@@ -124,14 +124,15 @@ to your project, so write it down and point at it:
 { "template": ".claude/wrapup.md" }
 ```
 
-Placeholders: `{percent}` `{tokens}` `{window}` `{remaining}` `{zone}`. See
-[`example-wrapup.md`](plugins/lastcall/templates/example-wrapup.md) for a
-fuller one that covers status docs, a dated handoff file, and committing before
-the session ends.
+Placeholders: `{percent}` `{tokens}` `{window}` `{remaining}` `{zone}`, and
+`{relay}` for the path to the bundled relay script. See
+[`example-wrapup.md`](plugins/lastcall/templates/example-wrapup.md), or
+[`handoff-relay.md`](plugins/lastcall/templates/handoff-relay.md) if you want
+the session to hand over to a fresh one automatically.
 
 ### Your own zones
 
-Yellow at 70% and red at 85% is just the default arrangement, not a limit. Set
+Yellow at 40% and red at 55% is just the default arrangement, not a limit. Set
 `zones` and you get as many as you like, with your names, your thresholds, your
 instructions, and your choice of which ones hold the session open:
 
@@ -233,22 +234,83 @@ Context usage is `input + cache_read + cache_creation`, matching how Claude Code
 reports it. `cache_read` dominates — reading `input_tokens` alone reports about
 `2` on a session actually holding 690,000.
 
+## Why 40% and 55%
+
+These are not round numbers picked for feel. They are the ladder from the hook
+this was rewritten from, which has driven roughly fifty unattended session
+handoffs over a fortnight, and the reasoning behind them is worth stating:
+long-context quality degrades well before the window is full, and Anthropic's
+own agent harness compacts its orchestrator at 100k while capping subagents at
+200k. Firing late is the failure that actually costs you a session — by the
+time you are at 85%, the assistant has been working from a lossy memory for a
+while. The ~15-point gap gives in-flight work room to land before red.
+
+If that is too eager for you, `{"yellow_percent": 70, "red_percent": 85}` is one
+line. Re-check these on every model upgrade; long-context quality has moved a
+lot between adjacent releases.
+
+## The relay (optional, Unix + tmux only)
+
+The guard tells the assistant to wrap up. The relay is what makes a session
+hand over to a fresh one and keep going without you.
+
+Nothing invokes it automatically — it is a script your wrap-up template tells
+the assistant to run as its last step. The bundled template does exactly that:
+
+```json
+{ "template": "<plugin>/templates/handoff-relay.md" }
+```
+
+The template's step 6 resolves the `{relay}` placeholder to the script's real
+path, so nothing needs hand-editing when the plugin updates.
+
+What the relay does, in order, refusing to continue at the first failure:
+
+- finds your newest handoff in `docs/handoff/` (configurable)
+- **refuses to spawn while that handoff is uncommitted.** This is the
+  load-bearing rule: a rule you must remember at the moment your context is
+  exhausted is a rule that gets skipped, so it is a precondition, not a habit
+- refuses on a dirty tree unless you pass `--allow-dirty`
+- spawns the successor in tmux, seeded with the handoff
+- **waits until the successor makes a real tool call** before reporting
+  success. An assistant turn is not proof of work — a refusal is an assistant
+  turn. A process sitting on a permission dialog cannot make a tool call
+- never kills anything. The successor is *asked*, in its prompt, to retire the
+  predecessor once it has proved its first step and committed. A failed spawn
+  therefore leaves the old session alive to report the failure
+
+```
+bash plugins/lastcall/relay/handoff.sh --dry-run     # resolve everything, spawn nothing
+bash plugins/lastcall/relay/handoff.sh               # hand over
+bash plugins/lastcall/relay/handoff.sh --skip-permissions   # unattended
+```
+
+Exit codes: `0` successor up and working, `1` precondition failure (nothing was
+spawned), `2` spawned but never proved itself.
+
+`--skip-permissions` starts the successor with `--dangerously-skip-permissions`.
+A genuinely unattended relay needs it, and it means the successor runs tools
+without asking. It is opt-in on purpose and never the default.
+
+Requires `bash`, `git`, `tmux`, `python3` and the `claude` CLI. The guard needs
+none of these — if you are on Windows, or you just want the alarm, ignore this
+whole section.
+
 ## Tests
 
 ```
 python3 -m unittest discover -s tests -v
 ```
 
-52 tests, standard library only, no network. They cover the failure modes that
+91 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.
 
 ## What this does not do
 
-It does not spawn a successor session. Automating the handoff itself needs a
-terminal multiplexer, which pins you to Unix and to a specific idea of how your
-project hands over. That belongs in a separate opt-in module, not here.
+The relay is Unix + tmux only, and off unless your template calls it. The
+guard itself has no such dependency and works anywhere Python does.
 
 ## Licence
 

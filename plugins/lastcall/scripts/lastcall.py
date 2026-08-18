@@ -43,8 +43,17 @@ DEFAULTS = {
     # Percentages of the context window, not absolute tokens. Absolute
     # thresholds are why the original version of this tool was a silent no-op
     # on any model that wasn't the one its author used.
-    "yellow_percent": 70,
-    "red_percent": 85,
+    #
+    # 40/55 is not a guess. It is the ladder from the hook this was rewritten
+    # from, which has run ~50 unattended session handoffs over a fortnight, and
+    # its author's reasoning is worth repeating: long-context quality degrades
+    # well before the window is full, and Anthropic's own agent harness compacts
+    # its orchestrator at 100k while capping subagents at 200k. Firing late is
+    # the failure that actually costs you a session — by the time the model is
+    # at 85% it has already been working from a lossy memory for a while.
+    # The ~15-point gap gives in-flight work room to land before red.
+    "yellow_percent": 40,
+    "red_percent": 55,
     # Define your own zones and you get full control: as many as you like, your
     # names, your thresholds, your instructions, and which ones hold the stop.
     # None means "build the standard two from the percentages above".
@@ -98,6 +107,13 @@ _TAIL_CHUNK_BYTES = 256 * 1024
 # A drop this steep can only be compaction — normal turns add tokens, they do
 # not remove three fifths of them.
 _COMPACTION_DROP_RATIO = 0.6
+
+# The optional relay ships alongside this file. Templates get its absolute path
+# as {relay} so a wrap-up can say "run this" without the user hand-editing a
+# path that changes with every plugin update.
+RELAY_SCRIPT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "relay", "handoff.sh")
 
 DEFAULT_TEMPLATE = """\
 Wrap up this session rather than starting anything new.
@@ -525,6 +541,7 @@ def render(config, zone, tokens, window):
         "band": zone["name"],
         "zone": zone["name"],
         "at": zone["at"],
+        "relay": RELAY_SCRIPT,
     }
     header = (
         "LAST CALL — %s. {percent:.0f}%% of the context window is in use "

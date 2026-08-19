@@ -354,9 +354,15 @@ class TestConfigResolution(RelayCase):
         self.assertRegex(out, r"successor:\s+amos-")
 
     def test_repo_can_come_from_the_config(self):
+        """A configured path is used as written; only the working-directory
+        fallback resolves symlinks. Accept either spelling so this asserts the
+        behaviour rather than the runner's /var -> /private/var layout."""
         parent, repo = self.parent_layout({"name_prefix": "amos"})
         result = self.run_from(parent)
-        self.assertIn("repo: %s" % os.path.realpath(repo), result.stdout.decode())
+        out = result.stdout.decode()
+        self.assertTrue(
+            ("repo: %s" % repo) in out or ("repo: %s" % os.path.realpath(repo)) in out,
+            out)
 
     def test_config_dir_flag_wins(self):
         parent, repo = self.parent_layout({"name_prefix": "fromparent"})

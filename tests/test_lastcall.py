@@ -74,9 +74,12 @@ class TestWindowResolution(unittest.TestCase):
     which is 371% of the window that identifier would imply. Inference from the
     model name is therefore not merely unreliable, it is disproven."""
 
-    def test_config_wins(self):
+    def test_config_wins_while_it_is_still_possible(self):
+        """Changed deliberately: a config claiming a window SMALLER than the
+        tokens already in use is disproven, not authoritative — see
+        TestDisprovenWindow. Below that, config is the last word."""
         config = dict(cg.DEFAULTS, context_window_tokens=500_000)
-        window, source = cg.resolve_window(config, {"max_observed": 900_000})
+        window, source = cg.resolve_window(config, {"max_observed": 400_000})
         self.assertEqual(window, 500_000)
         self.assertEqual(source, "config")
 
@@ -1263,3 +1266,54 @@ class TestSessionStartOnboarding(TempCase):
         with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
             json.dump({"disabled": True}, fh)
         self.assertEqual(self.session_start(self.dir).stdout, b"")
+
+
+class TestDisprovenWindow(unittest.TestCase):
+    """A session cannot hold more tokens than its window, so an observation
+    above the configured figure disproves the configuration. Trusting it anyway
+    produced 372% and a permanent RED — a guard shouting on an empty session,
+    which is the fastest way to get itself ignored."""
+
+    def config(self, window):
+        return dict(cg.DEFAULTS, context_window_tokens=window,
+                    _project_dir="/tmp", _config_path=None)
+
+    def test_config_is_trusted_while_it_remains_possible(self):
+        window, source = cg.resolve_window(self.config(200_000),
+                                           {"max_observed": 150_000})
+        self.assertEqual(window, 200_000)
+        self.assertEqual(source, "config")
+
+    def test_an_impossible_config_is_corrected_upward(self):
+        window, source = cg.resolve_window(self.config(200_000),
+                                           {"max_observed": 743_106})
+        self.assertEqual(window, cg.EXTENDED_WINDOW)
+        self.assertIn("config says 200,000", source)
+        self.assertIn("743,106", source)
+
+    def test_the_corrected_band_is_sane_rather_than_over_100_percent(self):
+        config = self.config(200_000)
+        window, _source = cg.resolve_window(config, {"max_observed": 743_106})
+        percent = 743_106 * 100.0 / window
+        self.assertLess(percent, 100)
+        self.assertEqual(cg.band_for(percent, config), "red")
+
+    def test_correction_only_applies_to_a_known_window(self):
+        """Beyond every window we know of, say nothing rather than invent one."""
+        window, source = cg.resolve_window(self.config(200_000),
+                                           {"max_observed": 5_000_000})
+        self.assertEqual(window, 200_000)
+        self.assertEqual(source, "config")
+
+    def test_measure_corrects_end_to_end(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "s.jsonl")
+        with open(path, "w") as fh:
+            fh.write(assistant_line(743_106, model="claude-opus-5") + "\n")
+        config = self.config(200_000)
+        tokens, window, source, _model = cg.measure(
+            config, {"transcript_path": path, "session_id": "s1"})
+        self.assertEqual(tokens, 743_106)
+        self.assertEqual(window, cg.EXTENDED_WINDOW)
+        self.assertIn("config says", source)

@@ -34,7 +34,7 @@ import string
 import sys
 import time
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 # --------------------------------------------------------------------------
 # Defaults. Every one of these is overridable by config file or environment.
@@ -538,26 +538,40 @@ def window_from_evidence(observed_peak):
 
 def resolve_window(config, state=None):
     """Exact sources first, proof second, silence third."""
+    state = state or {}
+    observed = int(state.get("max_observed") or 0)
     configured = config.get("context_window_tokens")
+
     if configured:
-        return int(configured), "config"
+        configured = int(configured)
+        # A session cannot hold more tokens than its window, so an observation
+        # above the configured figure DISPROVES it. Trusting the config anyway
+        # produced 372% and a permanent RED — the guard shouting on an empty
+        # session, which is the fastest way to get itself ignored. Correct it
+        # and say so, rather than asking the user to notice.
+        if observed > configured:
+            proven = window_from_evidence(observed)
+            if proven:
+                return proven, ("config says %s but %s tokens are in use — "
+                                "using %s" % ("{:,}".format(configured),
+                                              "{:,}".format(observed),
+                                              "{:,}".format(proven)))
+        return configured, "config"
 
     # Written by the optional status-line helper, which receives the real
     # context_window_size from Claude Code. This is the only automatic source
     # that is exact rather than deduced.
-    state = state or {}
-    observed = state.get("window_from_statusline")
-    if observed:
-        return int(observed), "statusline"
+    from_statusline = state.get("window_from_statusline")
+    if from_statusline:
+        return int(from_statusline), "statusline"
 
     # max_observed is monotonic for the life of the session. It must NOT be the
     # same counter compaction resets: compaction changes how full the window is,
     # never how big it is, and throwing the evidence away would un-learn the
     # window every time the session compacted.
-    observed_peak = state.get("max_observed")
-    proven = window_from_evidence(observed_peak)
+    proven = window_from_evidence(observed)
     if proven:
-        return proven, "proven by %s tokens observed" % "{:,}".format(observed_peak)
+        return proven, "proven by %s tokens observed" % "{:,}".format(observed)
 
     return None, "unknown"
 
@@ -1359,6 +1373,11 @@ def doctor(argv):
         return 1
     percent = (tokens * 100.0) / window
     print("  window        : %s tokens (%s)" % ("{:,}".format(window), source))
+    if source.startswith("config says"):
+        print("  PROBLEM       : context_window_tokens in your config is wrong.")
+        print("                  Set it to %s, or delete it and let the status"
+              % "{:,}".format(window))
+        print("                  line report the real figure.")
     print("  percent       : %.1f%%" % percent)
     print("  band          : %s" % band_for(percent, config).upper())
     print("  headroom      : %s tokens" % "{:,}".format(max(0, window - tokens)))

@@ -38,6 +38,7 @@ ALLOW_DIRTY=0
 DRY_RUN=0
 SKIP_PERMISSIONS=${LASTCALL_SKIP_PERMISSIONS:-0}
 REMOTE_CONTROL=${LASTCALL_REMOTE_CONTROL:-1}
+TRUST=0
 NEW=""
 
 usage() {
@@ -51,6 +52,9 @@ usage: handoff.sh [options]
   --allow-dirty          spawn even though the tree has uncommitted work
   --no-remote-control    do not pass --remote-control (on by default, names the
                          successor so you can reach it from anywhere)
+  --trust                record this folder as trusted in ~/.claude.json. Claude
+                         Code asks once per directory and skip-permissions does
+                         NOT cover it; without trust the successor never acts.
   --no-skip-permissions  force permission prompts on even if config enables them
   --skip-permissions     start the successor with --dangerously-skip-permissions.
                          REQUIRED for a genuinely unattended relay, and it means
@@ -75,6 +79,7 @@ while [ $# -gt 0 ]; do
         --skip-permissions) SKIP_PERMISSIONS=1; shift ;;
         --no-skip-permissions) SKIP_PERMISSIONS=0; shift ;;
         --no-remote-control) REMOTE_CONTROL=0; shift ;;
+        --trust)        TRUST=1; shift ;;
         --timeout)      TIMEOUT=${2:?--timeout needs seconds}; shift 2 ;;
         --dry-run)      DRY_RUN=1; shift ;;
         -h|--help)      usage; exit 0 ;;
@@ -245,6 +250,60 @@ git -C "$REPO" symbolic-ref -q HEAD >/dev/null || say "WARNING: detached HEAD"
 for m in rebase-merge rebase-apply MERGE_HEAD; do
     [ -e "$(git -C "$REPO" rev-parse --git-dir)/$m" ] && say "WARNING: $m in progress"
 done
+
+# Claude Code asks "is this a project you trust?" the first time it opens a
+# directory, and --dangerously-skip-permissions does NOT bypass it. A successor
+# spawned into an untrusted folder sits on that prompt forever: no tool call, no
+# transcript, and the launcher reports a timeout that says nothing about the
+# cause. Measured 2026-08-19. Check it BEFORE spawning so this is a precondition
+# with an actionable message rather than a mystery three minutes later.
+trust_state=$("$PYTHON_BIN" - "$REPO" "$TRUST" <<'PY'
+import json, os, sys
+
+repo, want_trust = os.path.realpath(sys.argv[1]), sys.argv[2] == "1"
+path = os.path.expanduser("~/.claude.json")
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, ValueError):
+    print("unknown")           # cannot tell; do not block on a guess
+    raise SystemExit(0)
+
+projects = data.get("projects") or {}
+entry = projects.get(repo) or projects.get(sys.argv[1]) or {}
+if entry.get("hasTrustDialogAccepted"):
+    print("trusted")
+    raise SystemExit(0)
+if not want_trust:
+    print("untrusted")
+    raise SystemExit(0)
+
+projects.setdefault(repo, {})["hasTrustDialogAccepted"] = True
+data["projects"] = projects
+tmp = path + ".lastcall.tmp"
+try:
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, path)
+except OSError:
+    print("untrusted")
+    raise SystemExit(0)
+print("granted")
+PY
+) || trust_state="unknown"
+
+case "$trust_state" in
+    untrusted)
+        say "Claude Code has not been told this folder is trusted:"
+        say "    $REPO"
+        say "A successor spawned here would stop on the trust prompt and never"
+        say "act. --dangerously-skip-permissions does not cover it."
+        die 1 "untrusted workspace — open it once and accept, or pass --trust"
+        ;;
+    granted)  say "trust: granted for $REPO (recorded in ~/.claude.json)" ;;
+    trusted)  say "trust: already accepted" ;;
+    *)        say "trust: could not read ~/.claude.json — continuing" ;;
+esac
 
 command -v "$TMUX_BIN" >/dev/null 2>&1 || die 1 "tmux not found: $TMUX_BIN — the relay is tmux-only"
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die 1 "python3 not found: $PYTHON_BIN"

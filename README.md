@@ -450,6 +450,13 @@ bash plugins/lastcall/relay/handoff.sh --no-skip-permissions # force prompts on
 Exit codes: `0` successor up and working, `1` precondition failure (nothing was
 spawned), `2` spawned but never proved itself.
 
+**Workspace trust.** Claude Code asks "is this a project you trust?" the first
+time it opens a directory, and `--dangerously-skip-permissions` does **not**
+bypass it. A successor spawned into an untrusted folder sits on that prompt
+forever: no tool call, no transcript, and a timeout that tells you nothing.
+The relay checks `~/.claude.json` before spawning and refuses with an
+actionable message, or records the trust for you with `--trust`.
+
 The relay reads its settings from `relay` in `.claude/lastcall.json`, so you
 configure it once and never pass flags:
 
@@ -475,7 +482,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-142 tests, standard library only, no network. They cover the failure modes that
+147 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

@@ -237,3 +237,71 @@ class TestInstallerSafety(unittest.TestCase):
             after = json.load(handle)
         self.assertNotIn("hooks", after)
         self.assertEqual(after["permissions"], {"allow": ["Bash"]})
+
+
+@posix_only
+class TestWorkspaceTrust(RelayCase):
+    """Measured 2026-08-19 with a real spawn: Claude Code asks "is this a
+    project you trust?" the first time it opens a directory, and
+    --dangerously-skip-permissions does NOT bypass it. The successor sat on
+    that prompt for 150 seconds, produced no transcript, and the launcher
+    reported a timeout that said nothing about the cause."""
+
+    def relay(self, repo, *args, env_extra=None):
+        # Point HOME at the sandbox so ~/.claude.json is ours, not the user's.
+        extra = {"HOME": self.tmp}
+        extra.update(env_extra or {})
+        return super(TestWorkspaceTrust, self).relay(repo, *args, env_extra=extra)
+
+    def write_claude_json(self, entries):
+        with open(os.path.join(self.tmp, ".claude.json"), "w") as handle:
+            json.dump({"projects": entries}, handle)
+
+    def test_untrusted_workspace_aborts_before_spawning(self):
+        repo = self.repo()
+        self.write_claude_json({})
+        result = self.relay(repo)
+        self.assertEqual(result.returncode, 1, result.stdout.decode())
+        self.assertIn(b"untrusted workspace", result.stdout)
+        self.assertIn(b"does not cover it", result.stdout)
+
+    def test_trusted_workspace_passes_the_check(self):
+        repo = self.repo()
+        self.write_claude_json({os.path.realpath(repo): {"hasTrustDialogAccepted": True}})
+        result = self.relay(repo, "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertIn(b"trust: already accepted", result.stdout)
+
+    def test_trust_flag_records_it(self):
+        repo = self.repo()
+        self.write_claude_json({})
+        result = self.relay(repo, "--dry-run", "--trust")
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertIn(b"trust: granted", result.stdout)
+        with open(os.path.join(self.tmp, ".claude.json")) as handle:
+            saved = json.load(handle)
+        self.assertTrue(
+            saved["projects"][os.path.realpath(repo)]["hasTrustDialogAccepted"])
+
+    def test_trust_flag_preserves_everything_else(self):
+        """~/.claude.json holds the user's entire Claude Code state. Writing one
+        key must not lose the rest."""
+        repo = self.repo()
+        with open(os.path.join(self.tmp, ".claude.json"), "w") as handle:
+            json.dump({"projects": {"/other": {"hasTrustDialogAccepted": True}},
+                       "numStartups": 42, "oauthAccount": {"x": 1}}, handle)
+        self.relay(repo, "--dry-run", "--trust")
+        with open(os.path.join(self.tmp, ".claude.json")) as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["numStartups"], 42)
+        self.assertEqual(saved["oauthAccount"], {"x": 1})
+        self.assertTrue(saved["projects"]["/other"]["hasTrustDialogAccepted"])
+
+    def test_unreadable_claude_json_does_not_block(self):
+        """Cannot tell is not the same as untrusted; do not refuse on a guess."""
+        repo = self.repo()
+        with open(os.path.join(self.tmp, ".claude.json"), "w") as handle:
+            handle.write("{not json")
+        result = self.relay(repo, "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertIn(b"could not read", result.stdout)

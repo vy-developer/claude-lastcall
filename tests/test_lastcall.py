@@ -1095,9 +1095,12 @@ class TestHandoverAcrossZones(TempCase):
     def test_relay_in_the_last_zone_is_found(self):
         config = self.layout("ease off, nothing about handing over",
                              "full wrap-up, finally: bash {relay}")
-        ready, checks = cg.handover_status(config)
+        _ready, checks = cg.handover_status(config)
         self.assertTrue(checks["template invokes the relay"])
-        self.assertTrue(ready)
+        # Deliberately NOT asserting `ready`: it also requires tmux and the
+        # claude CLI on PATH, which CI runners do not have. Asserting it here
+        # tested the machine rather than the code, and failed all nine jobs.
+        self.assertTrue(checks["template configured"])
 
     def test_relay_in_no_zone_is_still_reported_missing(self):
         config = self.layout("ease off", "wrap up, but never hand over")

@@ -139,7 +139,8 @@ class TestSetupWizardDocs(unittest.TestCase):
 
     def test_prose_question_count_matches(self):
         total = set(re.findall(r'"\d/(\d)\s+[A-Z]', self.source())).pop()
-        words = {"2": "Two", "3": "Three", "4": "Four", "5": "Five"}
+        words = {"2": "Two", "3": "Three", "4": "Four", "5": "Five",
+                 "6": "Six", "7": "Seven", "8": "Eight", "9": "Nine"}
         self.assertIn("%s questions" % words[total], readme())
 
 

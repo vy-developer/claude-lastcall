@@ -1113,3 +1113,73 @@ class TestHandoverAcrossZones(TempCase):
             {"name": "red", "at": 55, "message": "run bash {relay} now"}])
         _ready, checks = cg.handover_status(config)
         self.assertTrue(checks["template invokes the relay"])
+
+
+class TestVerifier(TempCase):
+    """A second model checking the work is the step that catches what the
+    session which wrote the code cannot see about itself."""
+
+    def test_unset_verifier_says_so_rather_than_rendering_empty(self):
+        self.assertIn("none configured", cg.format_verifier(self.config()))
+
+    def test_configured_verifier_renders_verbatim(self):
+        command = 'codex exec "check the diff against docs/plans"'
+        self.assertEqual(cg.format_verifier(self.config(verifier=command)), command)
+
+    def test_verifier_reaches_the_template(self):
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w") as fh:
+            fh.write("second opinion: {verifier}")
+        config = self.config(template=path, verifier="codex review")
+        message = cg.render(config, cg.resolve_zones(config)[0], 150_000, 200_000)
+        self.assertIn("codex review", message)
+
+    def test_detection_only_reports_tools_that_exist(self):
+        for name, command, label in cg.detect_verifiers():
+            self.assertTrue(shutil.which(name), "%s reported but not on PATH" % name)
+            self.assertIn(name, command)
+            self.assertTrue(label)
+
+    def test_every_known_verifier_has_a_non_interactive_command(self):
+        """A gate that opens an interactive REPL during wrap-up is not a gate."""
+        for name, command, _label in cg.VERIFIERS:
+            self.assertRegex(command, r"^%s (exec|review|-p) " % name)
+
+
+class TestProjectIsolation(TempCase):
+    """One machine, several projects. Config must never leak between them."""
+
+    def project(self, name, **settings):
+        root = os.path.join(self.dir, name)
+        os.makedirs(os.path.join(root, ".claude"))
+        with open(os.path.join(root, ".claude", "lastcall.json"), "w") as fh:
+            json.dump(settings, fh)
+        return root
+
+    def test_siblings_keep_their_own_settings(self):
+        a = self.project("a", yellow_percent=30, gates=["a-gate"])
+        b = self.project("b", yellow_percent=80, gates=["b-gate"])
+        self.assertEqual(cg.load_config({"cwd": a})["gates"], ["a-gate"])
+        self.assertEqual(cg.load_config({"cwd": b})["gates"], ["b-gate"])
+        self.assertEqual(cg.load_config({"cwd": a})["yellow_percent"], 30)
+        self.assertEqual(cg.load_config({"cwd": b})["yellow_percent"], 80)
+
+    def test_a_subdirectory_resolves_to_its_own_project(self):
+        a = self.project("a", gates=["a-gate"])
+        deep = os.path.join(a, "src", "deep")
+        os.makedirs(deep)
+        self.assertEqual(cg.load_config({"cwd": deep})["gates"], ["a-gate"])
+
+    def test_claude_project_dir_wins_over_the_working_directory(self):
+        a = self.project("a", gates=["a-gate"])
+        b = self.project("b", gates=["b-gate"])
+        os.environ["CLAUDE_PROJECT_DIR"] = b
+        self.addCleanup(os.environ.pop, "CLAUDE_PROJECT_DIR", None)
+        self.assertEqual(cg.load_config({"cwd": a})["gates"], ["b-gate"])
+
+    def test_state_files_are_keyed_by_session_not_by_project(self):
+        config = self.config()
+        cg.write_state(config, "session-one", {"band": "red"})
+        cg.write_state(config, "session-two", {"band": "green"})
+        self.assertEqual(cg.read_state(config, "session-one")["band"], "red")
+        self.assertEqual(cg.read_state(config, "session-two")["band"], "green")

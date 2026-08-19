@@ -14,6 +14,9 @@
   "_comment_gates": "Commands that must pass before handing over — tests, linters, a review gate. Surfaced to the assistant as {gates} in your wrap-up template. Nothing here is executed by the hook: running your test suite at Stop time would hang the session.",
   "gates": null,
 
+  "_comment_verifier": "A second model asked to check the work before it is handed over, shown to the assistant as {verifier}. A different model reading the diff against your plan documents catches what the session that wrote it cannot. Detected automatically by setup if codex or gemini is on PATH.",
+  "verifier": null,
+
   "_comment_relay": "Settings for the optional relay, read by relay/handoff.sh. handoff_dir defaults to docs/handoff. remote_control names the successor so you can reach it from anywhere. skip_permissions starts it with --dangerously-skip-permissions, which is what makes an unattended chain possible.",
   "relay": null,
 

@@ -57,7 +57,7 @@ Linux, macOS and Windows against 3.9, 3.11 and 3.13.
 ## Commands
 
 ```
-lastcall.py setup      configure this project — five questions, writes
+lastcall.py setup      configure this project — six questions, writes
                        .claude/lastcall.json and docs/handoff/TEMPLATE.md
 lastcall.py doctor     show what resolved: window, zones, handover readiness
 lastcall.py doctor <transcript.jsonl>
@@ -135,6 +135,7 @@ to start from a commented version.
 | `red_percent` | `55` | escalate once here |
 | `zones` | `null` | your own zones instead of the two above — see below |
 | `gates` | `null` | commands that must pass before handing over; shown to the assistant as `{gates}` |
+| `verifier` | `null` | a second model asked to check the work; shown as `{verifier}` |
 | `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions` |
 | `context_window_tokens` | `null` | window size; `null` means "work it out or stay quiet" |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
@@ -155,7 +156,8 @@ to your project, so write it down and point at it:
 ```
 
 Placeholders: `{percent}` `{tokens}` `{window}` `{remaining}` `{zone}`, and
-`{relay}` for the bundled relay script, `{gates}` for your gate commands, and
+`{relay}` for the bundled relay script, `{gates}` for your gate commands,
+`{verifier}` for your second-opinion command, and
 `{transcript}` for this session's raw transcript path. See
 [`example-wrapup.md`](plugins/lastcall/templates/example-wrapup.md), or
 [`handoff-relay.md`](plugins/lastcall/templates/handoff-relay.md) if you want
@@ -280,6 +282,49 @@ If that is too eager for you, `{"yellow_percent": 70, "red_percent": 85}` is one
 line. Re-check these on every model upgrade; long-context quality has moved a
 lot between adjacent releases.
 
+## Onboarding
+
+Two ways in, depending on how much you want to think about it.
+
+**Let the assistant interview you** — it reads your repo first, so it proposes
+your real test command instead of asking for it:
+
+```
+/lastcall:onboard
+```
+
+It establishes what "wrap up" means in *this* project, writes the config and a
+wrap-up template, creates `docs/handoff/TEMPLATE.md`, and then proves it by
+running `doctor` and showing you the output rather than describing it.
+
+**Or answer six questions yourself:**
+
+```
+python3 <plugin>/scripts/lastcall.py setup
+```
+
+Either way the configuration lands in `.claude/lastcall.json` **in that project
+only**. Projects never share it: the config is found by walking up from the
+working directory to the nearest `.claude/`, and `CLAUDE_PROJECT_DIR` wins when
+Claude Code sets it. Two checkouts side by side keep entirely separate
+thresholds, gates and templates, and per-session state is keyed by session id.
+
+### A second opinion
+
+If `codex` or `gemini` is on `PATH`, setup offers it as a verification gate and
+renders it into the wrap-up as `{verifier}`:
+
+```
+codex exec "Review the changes on this branch against the plan and spec
+documents in docs/. Report anything specified that was NOT implemented,
+anything implemented that was NOT specified, and any claim in the handoff
+the diff does not support."
+```
+
+This is the check that catches what the session cannot see about itself. The
+hook never runs it — it puts it in front of the assistant during wrap-up, where
+skipping it is visible.
+
 ## Setting up handover
 
 After installing, run this once per project:
@@ -288,32 +333,40 @@ After installing, run this once per project:
 python3 <plugin>/scripts/lastcall.py setup
 ```
 
-Five questions, each with a recommendation based on what is actually present
+Six questions, each with a recommendation based on what is actually present
 on your machine — whether this is a git repository, whether tmux, git and the
 `claude` CLI are on `PATH`:
 
 ```
-1/5  How big is this project's context window?
+1/6  How big is this project's context window?
   1) 200,000 tokens — standard  <- recommended
   2) 1,000,000 tokens — extended
      Getting this wrong is the one thing that makes Last Call useless,
      so it refuses to guess.
 
-2/5  Hand over to a fresh session automatically when context runs low?
+2/6  Hand over to a fresh session automatically when context runs low?
   y) yes — write a handoff, then spawn a successor in tmux  <- recommended
   n) no  — just warn me; the session ends there
      tmux, git and the claude CLI are all present.
 
-3/5  What command proves this project's environment is actually up?
+3/6  What command proves this project's environment is actually up?
   The successor runs this FIRST and must not start work until it passes.
   > npm test && curl -sf localhost:3000/health
 
-4/5  What must PASS before this project hands over?
+4/6  What must PASS before this project hands over?
   Tests, linters, a review gate — comma separated. The wrap-up shows
   these to the assistant so it cannot hand over unverified work.
   > pytest -q, ruff check
 
-5/5  Should the successor run UNATTENDED?
+5/6  Have a SECOND model check the work before handing over?
+  Found on this machine: OpenAI Codex CLI, Google Gemini CLI
+  1) use OpenAI Codex CLI  <- recommended
+  2) use Google Gemini CLI
+  n) no second opinion
+     A different model reading the diff against your plan documents
+     catches what the session that wrote them cannot.
+
+6/6  Should the successor run UNATTENDED?
   y) yes — remote control on, permission prompts skipped  <- recommended
   n) no  — successor waits for permission like a normal session
      Unattended means the successor runs tools without asking. It is
@@ -491,7 +544,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-165 tests, standard library only, no network. They cover the failure modes that
+174 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

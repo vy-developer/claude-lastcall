@@ -34,7 +34,7 @@ import string
 import sys
 import time
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # --------------------------------------------------------------------------
 # Defaults. Every one of these is overridable by config file or environment.
@@ -66,6 +66,10 @@ DEFAULTS = {
     # template; nothing here executes them, because a hook that runs your test
     # suite at Stop time is a hook that hangs your session.
     "gates": None,
+    # A second model asked to check the work before it is handed over. Rendered
+    # into the wrap-up as {verifier}. A different model reading the diff against
+    # the plan catches what the session that wrote it cannot see.
+    "verifier": None,
     # Settings for the optional relay, read by relay/handoff.sh so one file
     # drives everything: handoff_dir, name_prefix, dirty_baseline,
     # remote_control, skip_permissions.
@@ -315,6 +319,7 @@ _EXPECTED_TYPES = {
     "state_dir": (str,),
     "zones": (list, tuple),
     "gates": (list, tuple, str),
+    "verifier": (str,),
     "relay": (dict,),
     "include_output_tokens": (bool,),
     "debug": (bool,),
@@ -736,6 +741,34 @@ def fill(text, values):
         return text
 
 
+VERIFIERS = (
+    ("codex", "codex exec \"Review the changes on this branch against the plan "
+              "and spec documents in docs/. Report anything specified that was "
+              "NOT implemented, anything implemented that was NOT specified, "
+              "and any claim in the handoff the diff does not support.\"",
+     "OpenAI Codex CLI"),
+    ("gemini", "gemini -p \"Review the changes on this branch against the plan "
+               "documents in docs/ and report what was skipped or claimed "
+               "without evidence.\"",
+     "Google Gemini CLI"),
+)
+
+
+def detect_verifiers():
+    """Second-opinion CLIs available on this machine, as (name, command, label)."""
+    import shutil
+    return [(name, command, label) for name, command, label in VERIFIERS
+            if shutil.which(name)]
+
+
+def format_verifier(config):
+    verifier = config.get("verifier")
+    if not verifier:
+        return ("(none configured — a second model reading the diff against the "
+                "plan catches what you cannot)")
+    return str(verifier)
+
+
 def format_gates(config):
     gates = config.get("gates")
     if not gates:
@@ -758,6 +791,7 @@ def render(config, zone, tokens, window, transcript=None):
         "relay": RELAY_SCRIPT,
         "setup": os.path.abspath(__file__),
         "gates": format_gates(config),
+        "verifier": format_verifier(config),
         # The assistant's own raw transcript. This is what makes "audit the
         # handoff against what actually happened" a real instruction rather
         # than a pious one: it can read the file instead of trusting the
@@ -1026,7 +1060,7 @@ def setup(argv):
                       for n, ok in tools.items()))
 
     window = ask(
-        "1/5  How big is this project's context window?",
+        "1/6  How big is this project's context window?",
         [("1", "200,000 tokens — standard"),
          ("2", "1,000,000 tokens — extended"),
          ("3", "work it out automatically (needs the bundled status line)")],
@@ -1043,7 +1077,7 @@ def setup(argv):
                      [n for n, ok in tools.items() if not ok]
                      + ([] if has_git_repo else ["this is not a git repository"])))
     relay = ask(
-        "2/5  Hand over to a fresh session automatically when context runs low?",
+        "2/6  Hand over to a fresh session automatically when context runs low?",
         [("y", "yes — write a handoff, then spawn a successor in tmux"),
          ("n", "no  — just warn me; the session ends there")],
         relay_default,
@@ -1060,7 +1094,7 @@ def setup(argv):
     if relay == "y":
         existing["template"] = RELAY_TEMPLATE
         verify = ask_text(
-            "3/5  What command proves this project's environment is actually up?",
+            "3/6  What command proves this project's environment is actually up?",
             "The successor runs this FIRST and must not start work until it "
             "passes.\n  Examples: 'npm test', 'make dev && curl -sf "
             "localhost:3000/health'.\n  Leave blank to fill in later.")
@@ -1093,15 +1127,33 @@ def setup(argv):
                          "refuses to spawn without one" % root)
 
         gates = ask_text(
-            "4/5  What must PASS before this project hands over?",
+            "4/6  What must PASS before this project hands over?",
             "Tests, linters, a review gate — comma separated. The wrap-up shows\n"
             "  these to the assistant so it cannot hand over unverified work.\n"
             "  Examples: 'npm test, npm run lint'. Leave blank to fill in later.")
         if gates:
             existing["gates"] = [g.strip() for g in gates.split(",") if g.strip()]
 
+        available = detect_verifiers()
+        if available:
+            print("\nFound on this machine: %s"
+                  % ", ".join(label for _n, _c, label in available))
+            options = [(str(i + 1), "use %s" % label)
+                       for i, (_n, _c, label) in enumerate(available)]
+            options.append(("n", "no second opinion"))
+            choice = ask(
+                "5/6  Have a SECOND model check the work before handing over?",
+                options, "1",
+                why="A different model reading the diff against your plan "
+                    "documents catches what the session that wrote them cannot. "
+                    "It runs as part of the wrap-up, not automatically.")
+            if choice != "n":
+                index = int(choice) - 1
+                if 0 <= index < len(available):
+                    existing["verifier"] = available[index][1]
+
         unattended = ask(
-            "5/5  Should the successor run UNATTENDED?",
+            "6/6  Should the successor run UNATTENDED?",
             [("y", "yes — remote control on, permission prompts skipped"),
              ("n", "no  — successor waits for permission like a normal session")],
             "y",

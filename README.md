@@ -134,6 +134,7 @@ to start from a commented version.
 | `yellow_percent` | `40` | warn once at this much of the window used |
 | `red_percent` | `55` | escalate once here |
 | `zones` | `null` | your own zones instead of the two above — see below |
+| `min_window_tokens` | `null` | stay silent when the window is smaller than this |
 | `gates` | `null` | commands that must pass before handing over; shown to the assistant as `{gates}` |
 | `verifier` | `null` | a second model asked to check the work; shown as `{verifier}` |
 | `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions` |
@@ -183,10 +184,38 @@ instructions, and your choice of which ones hold the session open:
 |---|---|
 | `name` | what the zone is called, in the message and in state. Defaults to its threshold |
 | `at` | percentage of the window that triggers it |
+| `at_tokens` | absolute token count that triggers it, instead of `at` — needs no window |
 | `template` | file of instructions for this zone only |
 | `message` | inline instructions for this zone only, if you don't want a file |
 | `headline` | one line printed straight after the numbers, before the instructions |
 | `block` | hold the stop once when this zone is first entered |
+
+### Thresholds in tokens, if you would rather not think about windows
+
+The window question exists only because thresholds are percentages of it. Give
+a zone `at_tokens` instead and that question disappears:
+
+```json
+{
+  "zones": [
+    { "name": "yellow", "at_tokens": 400000 },
+    { "name": "red",    "at_tokens": 550000, "block": true }
+  ],
+  "min_window_tokens": 500000
+}
+```
+
+No `context_window_tokens`, no status line, nothing to get wrong. The message
+drops the percentage and reports what it actually knows:
+
+```
+LAST CALL — YELLOW. 420,000 tokens in use.
+```
+
+`min_window_tokens` is the safety catch. A ladder written for a 1M model would
+fire on the first turn of a 200k one, where 400,000 tokens is not a warning but
+an impossibility — so below the floor it stays completely silent. Percentage
+zones and absolute zones can be mixed; whichever is highest wins.
 
 Instructions resolve most-specific-first: this zone's `template`, then its
 `message`, then the project-wide `template`, then the built-in text. A shared
@@ -559,7 +588,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-191 tests, standard library only, no network. They cover the failure modes that
+202 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

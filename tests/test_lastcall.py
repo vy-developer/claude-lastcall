@@ -1317,3 +1317,95 @@ class TestDisprovenWindow(unittest.TestCase):
         self.assertEqual(tokens, 743_106)
         self.assertEqual(window, cg.EXTENDED_WINDOW)
         self.assertIn("config says", source)
+
+
+class TestAbsoluteZones(TempCase):
+    """Thresholds in tokens rather than percentages. If you think "wrap up at
+    400k", the window is a question you should never have to answer — and the
+    window is the question that caused the most confusion in real use."""
+
+    def zones(self):
+        return [{"name": "yellow", "at_tokens": 400_000},
+                {"name": "red", "at_tokens": 550_000, "block": True}]
+
+    def test_absolute_zones_parse(self):
+        parsed = cg.resolve_zones(self.config(zones=self.zones()))
+        self.assertEqual([z["at_tokens"] for z in parsed], [400_000, 550_000])
+        self.assertEqual([z["at"] for z in parsed], [None, None])
+
+    def test_they_fire_on_token_count_alone(self):
+        zones = cg.resolve_zones(self.config(zones=self.zones()))
+        self.assertIsNone(cg.zone_for(399_999, None, zones))
+        self.assertEqual(cg.zone_for(400_000, None, zones)["name"], "yellow")
+        self.assertEqual(cg.zone_for(600_000, None, zones)["name"], "red")
+
+    def test_they_work_with_no_window_at_all(self):
+        """The whole point: no window, no question, still fires."""
+        zones = cg.resolve_zones(self.config(zones=self.zones()))
+        self.assertEqual(cg.zone_for(500_000, None, zones)["name"], "yellow")
+
+    def test_percentage_zones_are_skipped_without_a_window(self):
+        zones = cg.resolve_zones(self.config(zones=[{"name": "y", "at": 40}]))
+        self.assertIsNone(cg.zone_for(900_000, None, zones))
+
+    def test_absolute_and_percentage_zones_can_be_mixed(self):
+        config = self.config(zones=[{"name": "yellow", "at": 40},
+                                    {"name": "red", "at_tokens": 150_000}])
+        zones = cg.resolve_zones(config)
+        self.assertEqual(cg.zone_for(90_000, 200_000, zones)["name"], "yellow")
+        self.assertEqual(cg.zone_for(160_000, 200_000, zones)["name"], "red")
+
+    def test_a_zone_with_no_name_is_named_for_its_token_count(self):
+        zones = cg.resolve_zones(self.config(zones=[{"at_tokens": 400_000}]))
+        self.assertEqual(zones[0]["name"], "400,000 tokens")
+
+    def test_a_malformed_absolute_zone_is_dropped_not_fatal(self):
+        zones = cg.resolve_zones(self.config(zones=[
+            {"name": "ok", "at_tokens": 400_000},
+            {"name": "bad", "at_tokens": "four hundred thousand"}]))
+        self.assertEqual([z["name"] for z in zones], ["ok"])
+
+    def test_the_message_omits_percentages_when_there_is_no_window(self):
+        config = self.config(zones=self.zones(), context_window_tokens=None)
+        zone = cg.resolve_zones(config)[0]
+        message = cg.render(config, zone, 420_000, None)
+        self.assertIn("420,000 tokens in use", message)
+        self.assertNotIn("%", message.split("\n")[0])
+
+
+class TestMinimumWindow(TempCase):
+    """A ladder written for the model you normally run should not fire on a
+    smaller one, where the same numbers mean something entirely different."""
+
+    def test_below_the_floor_it_stays_silent(self):
+        config = self.config(min_window_tokens=500_000,
+                             context_window_tokens=200_000)
+        path = self.transcript([assistant_line(150_000)])
+        import io
+        buffer = io.StringIO()
+        real, sys.stdout = sys.stdout, buffer
+        try:
+            cg.handle_stop(config, {"transcript_path": path, "session_id": "s1",
+                                    "hook_event_name": "Stop"})
+        finally:
+            sys.stdout = real
+        self.assertEqual(buffer.getvalue(), "")
+
+    def test_above_the_floor_it_fires(self):
+        config = self.config(min_window_tokens=500_000,
+                             context_window_tokens=1_000_000)
+        # 75% of 1M, above this fixture's pinned 70% yellow.
+        path = self.transcript([assistant_line(750_000)])
+        import io
+        buffer = io.StringIO()
+        real, sys.stdout = sys.stdout, buffer
+        try:
+            cg.handle_stop(config, {"transcript_path": path, "session_id": "s1",
+                                    "hook_event_name": "Stop"})
+        finally:
+            sys.stdout = real
+        self.assertIn("LAST CALL", buffer.getvalue())
+
+    def test_no_floor_means_no_restriction(self):
+        config = self.config(context_window_tokens=200_000)
+        self.assertIsNone(config["min_window_tokens"])

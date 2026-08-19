@@ -34,7 +34,7 @@ import string
 import sys
 import time
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 
 # --------------------------------------------------------------------------
 # Defaults. Every one of these is overridable by config file or environment.
@@ -61,6 +61,10 @@ DEFAULTS = {
     #   [{"name": "wind-down", "at": 60, "template": ".claude/winddown.md"},
     #    {"name": "closing",   "at": 85, "block": true}]
     "zones": None,
+    # Stay completely silent when the window is smaller than this. Absolute
+    # zones are written for the model you normally run; on a smaller one they
+    # would fire immediately and mean nothing. null disables the floor.
+    "min_window_tokens": None,
     # Commands that must pass before handing over — tests, linters, a review
     # gate. They are surfaced to the assistant as {gates} in your wrap-up
     # template; nothing here executes them, because a hook that runs your test
@@ -292,7 +296,8 @@ def project_dir(payload):
 # environment override like LASTCALL_STATE_DIR=/tmp/x parses as a failed
 # number and silently becomes None — the override vanishes without a word.
 _FLOAT_KEYS = frozenset(("yellow_percent", "red_percent"))
-_INT_KEYS = frozenset(("context_window_tokens", "state_ttl_days"))
+_INT_KEYS = frozenset(("context_window_tokens", "state_ttl_days",
+                       "min_window_tokens"))
 _BOOL_KEYS = frozenset(("include_output_tokens", "debug", "disabled"))
 _JSON_KEYS = frozenset(("zones", "gates", "relay"))
 
@@ -365,6 +370,7 @@ _EXPECTED_TYPES = {
     "red_percent": (int, float),
     "context_window_tokens": (int,),
     "state_ttl_days": (int,),
+    "min_window_tokens": (int,),
     "mode": (str,),
     "template": (str,),
     "state_dir": (str,),
@@ -605,14 +611,29 @@ def resolve_zones(config):
     for entry in declared:
         if not isinstance(entry, dict):
             continue
-        try:
-            at = float(entry.get("at"))
-        except (TypeError, ValueError):
-            continue  # a malformed zone is dropped, not fatal
-        name = str(entry.get("name") or ("%g%%" % at))
+        # A zone fires either at a PERCENTAGE of the window ("at") or at an
+        # absolute token count ("at_tokens"). Absolute zones need no window at
+        # all, which is the point: if you think in "wrap up at 400k", the
+        # window is a question you should never have to answer.
+        at = None
+        at_tokens = None
+        if entry.get("at_tokens") is not None:
+            try:
+                at_tokens = int(entry["at_tokens"])
+            except (TypeError, ValueError):
+                continue
+        else:
+            try:
+                at = float(entry.get("at"))
+            except (TypeError, ValueError):
+                continue  # a malformed zone is dropped, not fatal
+        name = str(entry.get("name")
+                   or ("%s tokens" % "{:,}".format(at_tokens) if at_tokens
+                       else "%g%%" % at))
         zones.append({
             "name": name,
             "at": at,
+            "at_tokens": at_tokens,
             # Replaces the generic body for this zone only. Inline text or a
             # file; the file wins if both are given.
             "message": entry.get("message"),
@@ -621,22 +642,45 @@ def resolve_zones(config):
             "headline": entry.get("headline") or _DEFAULT_HEADLINES.get(name),
             "block": bool(entry.get("block", False)),
         })
-    zones.sort(key=lambda zone: zone["at"])
+    # Absolute and relative zones sort together only once a window is known,
+    # so order by whatever each declares and let zone_for do the comparison.
+    zones.sort(key=lambda zone: (zone["at_tokens"] is None,
+                                 zone["at_tokens"] if zone["at_tokens"] is not None
+                                 else zone["at"]))
     return zones
 
 
-def zone_for(percent, zones):
-    """The highest zone this reading has reached, or None while below them all."""
-    current = None
-    for zone in zones:  # ascending, so the last match is the highest
-        if percent >= zone["at"]:
-            current = zone
-    return current
+def zone_for(tokens, window, zones):
+    """The highest zone this reading has reached, or None below them all.
+
+    A percentage zone is skipped when the window is unknown; an absolute zone
+    never needs one. So a project configured entirely in tokens works without
+    ever answering the window question.
+    """
+    reached = []
+    for zone in zones:
+        if zone["at_tokens"] is not None:
+            if tokens >= zone["at_tokens"]:
+                reached.append((zone["at_tokens"], zone))
+        elif window:
+            threshold = window * zone["at"] / 100.0
+            if tokens >= threshold:
+                reached.append((threshold, zone))
+    if not reached:
+        return None
+    reached.sort(key=lambda pair: pair[0])
+    return reached[-1][1]
 
 
-def band_for(percent, config):
-    """Zone name for a reading, or "green" below every zone."""
-    zone = zone_for(percent, resolve_zones(config))
+def band_for(percent, config, window=None):
+    """Zone name for a reading, or "green" below every zone.
+
+    Takes a percentage for backwards compatibility; absolute zones need real
+    token counts, so pass the window when you have one.
+    """
+    window = window or config.get("context_window_tokens") or 1_000_000
+    tokens = int(window * percent / 100.0)
+    zone = zone_for(tokens, window, resolve_zones(config))
     return zone["name"] if zone else "green"
 
 
@@ -864,12 +908,12 @@ def format_gates(config):
 
 
 def render(config, zone, tokens, window, transcript=None):
-    percent = (tokens * 100.0) / window
+    percent = (tokens * 100.0) / window if window else 0.0
     values = {
         "percent": percent,
         "tokens": tokens,
-        "window": window,
-        "remaining": max(0, window - tokens),
+        "window": window or 0,
+        "remaining": max(0, window - tokens) if window else 0,
         "band": zone["name"],
         "zone": zone["name"],
         "at": zone["at"],
@@ -883,11 +927,16 @@ def render(config, zone, tokens, window, transcript=None):
         # memory that is, by definition, running out.
         "transcript": transcript or "(this session's transcript)",
     }
-    header = (
-        "LAST CALL — %s. {percent:.0f}%% of the context window is in use "
-        "({tokens:,} of {window:,} tokens; {remaining:,} left)."
-        % zone["name"].upper()
-    )
+    if window:
+        header = (
+            "LAST CALL — %s. {percent:.0f}%% of the context window is in use "
+            "({tokens:,} of {window:,} tokens; {remaining:,} left)."
+            % zone["name"].upper()
+        )
+    else:
+        # An absolute zone fired without a known window. Report what is true.
+        header = ("LAST CALL — %s. {tokens:,} tokens in use."
+                  % zone["name"].upper())
     if zone.get("headline"):
         header += "\n" + zone["headline"]
 
@@ -964,15 +1013,27 @@ def handle_stop(config, payload):
 
     peak = int(state.get("peak") or 0)
     state["max_observed"] = max(int(state.get("max_observed") or 0), tokens)
-    if window is None:
-        # Size unknown, so no band can be computed. Still record the reading:
-        # it is the evidence that may resolve the window on a later turn.
+
+    zones = resolve_zones(config)
+    has_absolute = any(z["at_tokens"] is not None for z in zones)
+    if window is None and not has_absolute:
+        # Size unknown and every zone is a percentage of it, so no band can be
+        # computed. Still record the reading: it is the evidence that may
+        # resolve the window on a later turn.
         state["peak"] = max(peak, tokens)
         write_state(config, session_id, state)
         return 0
 
-    percent = (tokens * 100.0) / window
-    zone = zone_for(percent, resolve_zones(config))
+    # A floor for absolute thresholds. "Wrap up at 400k" is written for the
+    # model you normally run; on a 200k model it would fire on the first turn
+    # and mean nothing.
+    floor = config.get("min_window_tokens")
+    if floor and window and window < int(floor):
+        state["peak"] = max(peak, tokens)
+        write_state(config, session_id, state)
+        return 0
+
+    zone = zone_for(tokens, window, zones)
     band = zone["name"] if zone else "green"
     previous = state.get("band", "green")
 

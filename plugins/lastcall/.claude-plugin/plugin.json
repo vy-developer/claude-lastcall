@@ -1,6 +1,6 @@
 {
   "name": "lastcall",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Warns the assistant when the session's context window is filling up, so it wraps up and writes a handoff instead of silently working from a compacted memory.",
   "author": {
     "name": "vy-developer"

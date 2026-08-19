@@ -6,6 +6,15 @@
   "red_percent": 55,
   "zones": null,
 
+  "_comment_absolute_zones": "A zone fires either at a PERCENTAGE of the window ('at') or at an absolute token count ('at_tokens'). Absolute zones need no window at all — if you think 'wrap up at 400k', you never have to answer the window question.",
+  "_comment_absolute_example": [
+    {"name": "yellow", "at_tokens": 400000},
+    {"name": "red", "at_tokens": 550000, "block": true}
+  ],
+
+  "_comment_min_window": "Stay completely silent when the window is smaller than this. A ladder written for the model you normally run should not fire on a smaller one, where the same numbers mean something else. null disables the floor.",
+  "min_window_tokens": null,
+
   "_comment_zones_example": [
     {"name": "winddown", "at": 60, "template": ".claude/winddown.md"},
     {"name": "closing", "at": 85, "block": true, "message": "Closing time. Finish the handoff, commit, stop."}

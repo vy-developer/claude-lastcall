@@ -141,3 +141,60 @@ class TestSetupWizardDocs(unittest.TestCase):
         total = set(re.findall(r'"\d/(\d)\s+[A-Z]', self.source())).pop()
         words = {"2": "Two", "3": "Three", "4": "Four", "5": "Five"}
         self.assertIn("%s questions" % words[total], readme())
+
+
+class TestReleaseHygiene(unittest.TestCase):
+    """Three commits of fixes shipped under version 1.0.0, so `/plugin update`
+    compared version strings, saw no change, and reported "already at the
+    latest version". The fixes were upstream and unreachable."""
+
+    def versions(self):
+        with open(os.path.join(ROOT, ".claude-plugin", "marketplace.json")) as fh:
+            market = json.load(fh)
+        with open(os.path.join(ROOT, "plugins", "lastcall", ".claude-plugin",
+                               "plugin.json")) as fh:
+            plugin = json.load(fh)
+        with open(os.path.join(ROOT, "plugins", "lastcall", "scripts",
+                               "lastcall.py")) as fh:
+            code = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M).group(1)
+        return {
+            "marketplace.metadata": market["metadata"]["version"],
+            "marketplace.plugins[0]": market["plugins"][0]["version"],
+            "plugin.json": plugin["version"],
+            "lastcall.py": code,
+        }
+
+    def test_every_declared_version_agrees(self):
+        found = self.versions()
+        self.assertEqual(len(set(found.values())), 1,
+                         "version drift across declarations: %s" % found)
+
+    def test_version_looks_like_a_release(self):
+        version = self.versions()["plugin.json"]
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+
+
+class TestLineEndings(unittest.TestCase):
+    """core.autocrlf=true rewrites shell scripts with CRLF on checkout, and
+    bash dies on the first line: "$'\\r': command not found". Reported from a
+    real WSL machine after a clean clone."""
+
+    def test_gitattributes_exists(self):
+        self.assertTrue(os.path.isfile(os.path.join(ROOT, ".gitattributes")))
+
+    def test_shell_scripts_are_pinned_to_lf(self):
+        with open(os.path.join(ROOT, ".gitattributes")) as handle:
+            rules = handle.read()
+        self.assertRegex(rules, r"(?m)^\*\.sh\s+text\s+eol=lf")
+
+    def test_no_committed_shell_script_contains_a_carriage_return(self):
+        for base, _dirs, names in os.walk(ROOT):
+            if ".git" in base:
+                continue
+            for name in names:
+                if not name.endswith(".sh"):
+                    continue
+                path = os.path.join(base, name)
+                with open(path, "rb") as handle:
+                    self.assertNotIn(b"\r\n", handle.read(),
+                                     "%s has CRLF line endings" % path)

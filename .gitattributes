@@ -1,0 +1,24 @@
+# Shell scripts MUST check out with LF endings.
+#
+# With core.autocrlf=true — the default on Git for Windows, and common in WSL —
+# a checkout rewrites these with CRLF, and bash then fails on the very first
+# line of the file:
+#
+#   handoff.sh: line 20: $'\r': command not found
+#   handoff.sh: line 21: set: pipefail: invalid option name
+#
+# Reported from a real WSL machine. "text eol=lf" overrides autocrlf for these
+# paths, so the working tree gets LF no matter how the user has git configured.
+*.sh text eol=lf
+
+# The Python entry points carry a shebang and are executed directly.
+*.py text eol=lf
+
+# Config and docs: normalised in the repository, LF in the working tree, so a
+# template's line endings cannot vary by who cloned it.
+*.json text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+
+# Everything else: let git decide, but never guess at binaries.
+* text=auto

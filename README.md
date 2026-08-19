@@ -257,9 +257,29 @@ After installing, run this once per project:
 python3 <plugin>/scripts/lastcall.py setup
 ```
 
-Two questions — how big your context window is, and whether you want a session
-to hand over to a fresh one automatically. It writes `.claude/lastcall.json`,
-creates `docs/handoff/`, and then tells you exactly what is and is not wired up:
+Three questions, each with a recommendation based on what is actually present
+on your machine — whether this is a git repository, whether tmux, git and the
+`claude` CLI are on `PATH`:
+
+```
+1/3  How big is this project's context window?
+  1) 200,000 tokens — standard  <- recommended
+  2) 1,000,000 tokens — extended
+     Getting this wrong is the one thing that makes Last Call useless,
+     so it refuses to guess.
+
+2/3  Hand over to a fresh session automatically when context runs low?
+  y) yes — write a handoff, then spawn a successor in tmux  <- recommended
+  n) no  — just warn me; the session ends there
+     tmux, git and the claude CLI are all present.
+
+3/3  What command proves this project's environment is actually up?
+  The successor runs this FIRST and must not start work until it passes.
+  > npm test && curl -sf localhost:3000/health
+```
+
+It writes `.claude/lastcall.json`, creates `docs/handoff/TEMPLATE.md` seeded
+with that command, and tells you exactly what is and is not wired up:
 
 ```
 automatic handover: READY
@@ -282,6 +302,36 @@ you find out at the worst moment. Until it is configured:
   the moment you configure a template of your own
 
 A tool whose job is to prevent silent failure has no business failing silently.
+
+### The handoff document
+
+The relay spawns the successor. The *document* is what makes that successor
+useful, and no script can write it for you — so setup writes the shape instead,
+at `docs/handoff/TEMPLATE.md`:
+
+```
+0. Step 0 — bring the environment up, and PROVE it
+1. Where things stand
+2. Your first work
+3. What the last session did
+4. How to work here
+5. Decided — do not re-ask
+6. Where everything is
+```
+
+Two of those sections do most of the work.
+
+**§0 must be able to fail.** State the expected result of each command, not
+just the command. "`GET /health` returns 200" is a proof; "check the server is
+running" is not. A Step 0 that cannot fail proves nothing, and the successor
+will start work on a broken environment believing it verified one.
+
+**§5 stops the relitigating.** A fresh context has no memory of why you chose
+Postgres over SQLite, so without this it will happily reopen it. Writing the
+decisions down is what keeps a chain of sessions moving in one direction.
+
+The rest is ordinary: what is done, what is next and where, how this repository
+expects work to be done. Keep only what changes what the next session does.
 
 ## The relay (optional, Unix + tmux only)
 
@@ -336,7 +386,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-100 tests, standard library only, no network. They cover the failure modes that
+104 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

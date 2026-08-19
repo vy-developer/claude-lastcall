@@ -114,6 +114,50 @@ _COMPACTION_DROP_RATIO = 0.6
 RELAY_SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "relay", "handoff.sh")
+HANDOFF_SKELETON = """\
+# Session handoff — {date}
+
+Written for someone with ZERO context. Not a summary of what happened: the
+next session's instructions. If a line here would not change what they do,
+cut it.
+
+## 0. Step 0 — bring the environment up, and PROVE it
+
+{verify_block}
+
+State the EXPECTED result of each command, not just the command. "It should
+return 200" is a proof; "check the server is running" is not. If a check can
+pass while the system is broken, say so explicitly.
+
+## 1. Where things stand
+
+What is finished and committed. What is half-done and where. One paragraph.
+
+## 2. Your first work
+
+The single next thing to do, and WHERE. Be specific enough that they can start
+without reading anything else.
+
+## 3. What the last session did
+
+Only what changes what happens next. Include what was attempted and abandoned,
+and why — otherwise it gets attempted again.
+
+## 4. How to work here
+
+The rules of this repository: how to test, what gates a change, what must never
+be done. Point at the files rather than restating them.
+
+## 5. Decided — do not re-ask
+
+Decisions already taken, so the next session does not reopen them. This section
+is what stops a fresh context relitigating settled questions.
+
+## 6. Where everything is
+
+The handful of paths worth knowing on day one.
+"""
+
 RELAY_TEMPLATE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "templates", "handoff-relay.md")
@@ -747,10 +791,12 @@ def handover_status(config):
 def setup(argv):
     """Interactive first-run configuration.
 
-    Two questions, because two things cannot be worked out from the transcript:
-    how big the window is, and whether you want a session to hand over to a
-    successor on its own.
+    Asks only what cannot be worked out from the machine, recommends an answer
+    for each, and writes the handoff skeleton — because the document is the
+    half of a handover that no script can produce for you.
     """
+    import shutil
+
     payload = {"cwd": os.getcwd()}
     config = load_config(payload)
     root = config["_project_dir"]
@@ -765,12 +811,21 @@ def setup(argv):
         except (OSError, ValueError):
             existing = {}
 
-    def ask(question, options, default):
+    # Detect first, so the recommendations are about THIS machine.
+    has_git_repo = os.path.isdir(os.path.join(root, ".git"))
+    tools = {name: bool(shutil.which(name)) for name in ("tmux", "git", "claude")}
+    relay_possible = has_git_repo and all(tools.values())
+
+    def ask(question, options, default, why=None):
+        """options: list of (key, label). default is the recommendation."""
         if not interactive:
             return default
         print("\n" + question)
         for key, label in options:
-            print("  %s) %s" % (key, label))
+            mark = "  <- recommended" if key == default else ""
+            print("  %s) %s%s" % (key, label, mark))
+        if why:
+            print("     %s" % why)
         while True:
             try:
                 answer = input("  [%s] " % default).strip().lower()
@@ -782,49 +837,89 @@ def setup(argv):
             if answer in dict(options):
                 return answer
 
+    def ask_text(question, hint, default=""):
+        if not interactive:
+            return default
+        print("\n" + question)
+        print("  %s" % hint)
+        try:
+            return input("  > ").strip() or default
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return default
+
     print("Last Call setup — %s" % root)
+    print("  git repository : %s" % ("yes" if has_git_repo else "no"))
+    print("  tmux / git / claude on PATH : %s"
+          % ", ".join("%s %s" % (n, "ok" if ok else "MISSING")
+                      for n, ok in tools.items()))
 
     window = ask(
-        "How big is this project's context window?",
-        [("1", "200,000 tokens (standard)"),
-         ("2", "1,000,000 tokens (extended)"),
-         ("3", "work it out automatically (install the status line)")],
-        "1")
-    if window == "1":
-        existing["context_window_tokens"] = 200_000
-    elif window == "2":
-        existing["context_window_tokens"] = 1_000_000
-    else:
-        existing["context_window_tokens"] = None
+        "1/3  How big is this project's context window?",
+        [("1", "200,000 tokens — standard"),
+         ("2", "1,000,000 tokens — extended"),
+         ("3", "work it out automatically (needs the bundled status line)")],
+        "1",
+        why="Getting this wrong is the one thing that makes Last Call useless, "
+            "so it refuses to guess.")
+    existing["context_window_tokens"] = {
+        "1": 200_000, "2": 1_000_000, "3": None}[window]
 
+    relay_default = "y" if relay_possible else "n"
+    relay_why = ("tmux, git and the claude CLI are all present."
+                 if relay_possible else
+                 "Not available here: " + ", ".join(
+                     [n for n, ok in tools.items() if not ok]
+                     + ([] if has_git_repo else ["this is not a git repository"])))
     relay = ask(
-        "Hand over to a fresh session automatically when context runs low?\n"
-        "  This needs tmux, git and the claude CLI, and it is Unix-only.\n"
-        "  Without it, Last Call warns and the session simply ends.",
-        [("y", "yes — set up automatic handover"),
-         ("n", "no — just warn me")],
-        "n")
+        "2/3  Hand over to a fresh session automatically when context runs low?",
+        [("y", "yes — write a handoff, then spawn a successor in tmux"),
+         ("n", "no  — just warn me; the session ends there")],
+        relay_default,
+        why=relay_why)
+    # A recommendation is for a human to accept. With no tty there is nobody to
+    # accept it, and enabling a relay that will later launch sessions is not
+    # something a piped or scripted run gets to decide on your behalf.
+    if not interactive:
+        relay = "n"
 
     notes = []
+    handoff_dir = os.path.join(root, "docs", "handoff")
+
     if relay == "y":
         existing["template"] = RELAY_TEMPLATE
-        handoff_dir = os.path.join(root, "docs", "handoff")
+        verify = ask_text(
+            "3/3  What command proves this project's environment is actually up?",
+            "The successor runs this FIRST and must not start work until it "
+            "passes.\n  Examples: 'npm test', 'make dev && curl -sf "
+            "localhost:3000/health'.\n  Leave blank to fill in later.")
+        block = ("```\n%s\n```" % verify) if verify else (
+            "```\nTODO: the command(s) that prove this environment works.\n```")
         try:
             os.makedirs(handoff_dir, exist_ok=True)
-            notes.append("created %s" % handoff_dir)
+            skeleton = os.path.join(handoff_dir, "TEMPLATE.md")
+            if os.path.exists(skeleton):
+                notes.append("kept the existing %s" % skeleton)
+            else:
+                with open(skeleton, "w", encoding="utf-8") as handle:
+                    handle.write(HANDOFF_SKELETON.format(
+                        date="YYYY-MM-DD", verify_block=block))
+                notes.append("wrote %s — the shape each handoff should take"
+                             % skeleton)
         except OSError as error:
             notes.append("could NOT create %s (%s)" % (handoff_dir, error))
-        import shutil as _sh
-        for tool in ("tmux", "git", "claude"):
-            if not _sh.which(tool):
+        for name, ok in tools.items():
+            if not ok:
                 notes.append("MISSING: %s is not on PATH — handover will not work"
-                             % tool)
+                             % name)
+        if not has_git_repo:
+            notes.append("MISSING: %s is not a git repository — the relay "
+                         "refuses to spawn without one" % root)
 
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)
         if os.path.isfile(target):
-            import shutil as _sh2
-            _sh2.copy2(target, target + ".bak")
+            shutil.copy2(target, target + ".bak")
             notes.append("backed up the previous config to %s.bak" % target)
         with open(target, "w", encoding="utf-8") as handle:
             json.dump(existing, handle, indent=2)
@@ -842,6 +937,11 @@ def setup(argv):
     print("\nautomatic handover: %s" % ("READY" if ready else "NOT SET UP"))
     for label, ok in checks.items():
         print("  %s %s" % ("ok  " if ok else "MISS", label))
+    if relay == "y":
+        print("\nNext: fill in Step 0 of %s/TEMPLATE.md with real commands and"
+              % handoff_dir)
+        print("their EXPECTED results. A handoff whose Step 0 cannot fail is a")
+        print("handoff that proves nothing.")
     if not ready and relay == "y":
         print("\nFix the MISS lines above, then re-run: lastcall.py doctor")
     return 0

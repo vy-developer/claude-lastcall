@@ -813,3 +813,50 @@ class TestSetupCommand(TempCase):
         self.assertEqual(written["mode"], "advisory")
         self.assertEqual(written["yellow_percent"], 33)
         self.assertTrue(os.path.isfile(target + ".bak"))
+
+
+class TestSetupRecommendations(TempCase):
+    """setup asks only what the machine cannot answer, and recommends the rest."""
+
+    def git_repo(self):
+        os.makedirs(os.path.join(self.dir, ".git"))
+        os.makedirs(os.path.join(self.dir, ".claude"))
+        return self.dir
+
+    def run_setup(self, cwd, stdin=b""):
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = cwd
+        return subprocess.run([sys.executable, SCRIPT, "setup"], input=stdin,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              env=env, cwd=cwd)
+
+    def test_non_interactive_never_enables_the_relay_even_when_possible(self):
+        """The recommendation would be 'yes' here — tmux/git/claude are present
+        and it is a git repo. With no tty there is nobody to accept it."""
+        root = self.git_repo()
+        result = self.run_setup(root)
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        with open(os.path.join(root, ".claude", "lastcall.json")) as handle:
+            written = json.load(handle)
+        self.assertNotIn("template", written)
+        self.assertFalse(os.path.exists(
+            os.path.join(root, "docs", "handoff", "TEMPLATE.md")))
+
+    def test_skeleton_carries_the_documented_sections(self):
+        text = cg.HANDOFF_SKELETON
+        for heading in ("Step 0", "Where things stand", "Your first work",
+                        "What the last session did", "How to work here",
+                        "Decided — do not re-ask", "Where everything is"):
+            self.assertIn(heading, text, heading)
+
+    def test_skeleton_demands_expected_results_not_just_commands(self):
+        """The distinguishing feature of a handoff that works: Step 0 states
+        what each command should return, so it can actually fail."""
+        self.assertIn("EXPECTED result", cg.HANDOFF_SKELETON)
+
+    def test_skeleton_interpolates_a_verify_command(self):
+        rendered = cg.HANDOFF_SKELETON.format(
+            date="2026-08-19", verify_block="```\nmake check\n```")
+        self.assertIn("make check", rendered)
+        self.assertIn("2026-08-19", rendered)
+        self.assertNotIn("{verify_block}", rendered)

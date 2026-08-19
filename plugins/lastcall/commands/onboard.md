@@ -28,22 +28,37 @@ confirmation.
 
 ## What you need to establish
 
-1. **Context window.** 200,000 or 1,000,000 tokens. Last Call refuses to guess,
-   because guessing low makes it fire at 15% full and wreck good sessions.
+1. **When to warn.** Offer both ways and let them choose:
+   - **absolute token counts** — `"at_tokens": 400000` on each zone. No context
+     window needed at all, and the simplest answer for anyone who thinks in
+     tokens rather than percentages. Prefer this unless they say otherwise.
+   - **percentages** — `"at": 40`. Needs the window, so it raises a question
+     the token route does not.
 
-2. **When to warn.** Defaults are 40% and 55%. Ask whether the user wants
-   earlier or later. If they want more than two steps, use `zones` — but keep
-   the names `yellow` and `red` for the first two, because only those carry
-   built-in wording.
+   Keep the names `yellow` and `red` for the first two zones; only those carry
+   built-in wording, and any other name silently renders without a headline.
+
+2. **The context window (`context_window_tokens`) — only if they chose
+   percentages.** Accept ANY figure:
+   200000, 500000, 1000000, whatever they say. Do not argue with it; if the
+   session later holds more tokens than that, Last Call corrects it by itself.
+   If they chose token thresholds, do not ask this at all.
+
+3. **`min_window_tokens`.** If the thresholds are absolute and they sometimes
+   run a smaller-window model, set this so the guard stays silent there — a
+   400k threshold means nothing on a 200k model.
 
 3. **What "wrap up" means here.** This is the important one and the one people
    skip. Find out what this project actually requires before work can be handed
    over: which docs get updated, what must be committed, whether pushing is
    allowed. Write it into a template file rather than leaving the generic text.
 
-4. **Gates.** The commands that must PASS before handing over — tests, linters,
-   type checks. Propose what you found in the repo. These are shown to the
-   assistant; the hook never runs them itself.
+4. **Gates (`gates`).** The commands that must PASS before handing over —
+   tests, linters, type checks. These are SHELL COMMANDS, not descriptions:
+   `pytest -q`, never "run the tests". If the user describes an intention,
+   turn it into the real command, show it to them, and confirm. Propose what
+   you found in the repo. They are shown to the assistant during wrap-up; the
+   hook never runs them itself.
 
 5. **A second opinion.** If `codex` or `gemini` is on PATH, ask whether to use
    it as a verification gate: a different model reading the diff against the
@@ -52,10 +67,19 @@ confirmation.
    the session that wrote the code cannot see. If they say yes, set `verifier`.
 
 6. **Automatic handover.** Whether a fresh session should be spawned when the
-   context runs out. This needs tmux, git and the claude CLI. If the user says
-   yes, ask whether the successor should run UNATTENDED — remote control on and
-   permission prompts skipped — and be explicit that unattended means it runs
-   tools without asking. Never enable that without a clear yes.
+   context runs out. Needs tmux and the claude CLI; git is optional and only
+   used to verify the handoff is committed. If yes, settle the whole `relay`
+   block: `repo` if it is not this directory, `handoff_dir`, and `model` /
+   `fallback_model` — e.g. `"model": "opus"` with `"fallback_model":
+   "fable,sonnet"`, since Claude Code switches by itself when a model is
+   overloaded. Ask whether the successor runs UNATTENDED (`skip_permissions`),
+   be explicit that it then runs tools without asking, and never enable it
+   without a clear yes. `remote_control` is on by default so you can reach the
+   successor later.
+
+If the user does not want Last Call in this project, write
+`{"disabled": true}` to `.claude/lastcall.json` and stop. That silences it
+without uninstalling anything.
 
 ## Then write the configuration
 

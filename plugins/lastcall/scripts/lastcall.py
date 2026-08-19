@@ -34,7 +34,7 @@ import string
 import sys
 import time
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 # --------------------------------------------------------------------------
 # Defaults. Every one of these is overridable by config file or environment.
@@ -228,31 +228,46 @@ the user to confirm or correct them. Ask a few at a time, conversationally.
 
 What you need to settle:
 
-1. CONTEXT WINDOW, in tokens. Accept ANY number they give you — 200000,
-   1000000, 500000, whatever they say. This is the one thing Last Call refuses
-   to guess, because guessing low makes it fire when the session is barely full
-   and ruins good sessions.
+1. WHEN TO WARN. Offer BOTH ways and let them pick:
+   - absolute token counts, e.g. wrap up at 400k and stop at 550k. Use
+     "at_tokens" on each zone. This needs NO context window setting at all,
+     and is the simplest answer for anyone who thinks in tokens.
+   - percentages of the window, e.g. 40% and 55%, using "at". This needs the
+     window, so only take this route if they want it.
 
-2. WHEN TO WARN, as percentages. Defaults are 40 and 55. Ask if they want
-   earlier or later, and whether they want more than two steps.
+2. THE CONTEXT WINDOW ("context_window_tokens"), but ONLY if they chose
+   percentages. Accept ANY number —
+   200000, 500000, 1000000, whatever they say. Never argue with it: if the
+   session later holds more tokens than that, Last Call corrects it by itself.
+   If they chose token thresholds, do not ask this at all.
 
-3. WHAT WRAP-UP MEANS HERE. The important one. Which documents get updated,
+3. WHICH MODELS THIS PROJECT RUNS ON. If the thresholds are absolute and they
+   sometimes use a smaller-window model, set "min_window_tokens" so the guard
+   stays silent there — 400k means nothing on a 200k model.
+
+4. WHAT WRAP-UP MEANS HERE. The important one. Which documents get updated,
    what must be committed, whether pushing is allowed, what the next session
    must be told. Write it into a template file; do not leave the generic text.
 
-4. GATES: the commands that must PASS before handing over. These are SHELL
+5. GATES ("gates"): the commands that must PASS before handing over. These are SHELL
    COMMANDS, not descriptions — "pytest -q", not "run the tests". If the user
    describes an intention, turn it into the actual command, show them, and
    confirm.
 
-5. A SECOND OPINION, if codex or gemini is on PATH: a different model reading
-   the diff against the plan documents and reporting what was specified but not
-   implemented, and what was claimed without evidence. Store it as "verifier".
+6. A SECOND OPINION, if codex or gemini is on PATH: a different model reading
+   the diff against the plan documents and reporting what was specified but
+   not implemented, and what was claimed without evidence. Store as "verifier".
 
-6. AUTOMATIC HANDOVER: whether a fresh session should be spawned when context
-   runs out, and if so whether it runs UNATTENDED — remote control on and
-   permission prompts skipped. Be explicit that unattended means it runs tools
-   without asking, and never enable it without a clear yes.
+7. AUTOMATIC HANDOVER: whether a fresh session should be spawned when context
+   runs out. If yes, settle all of these under "relay":
+   - "repo": which directory to hand over, if not this one
+   - "handoff_dir": where handoffs live, default docs/handoff
+   - "model" and "fallback_model": which model drives the successor, e.g.
+     "opus" with "fable,sonnet" as fallback. Claude Code switches by itself
+     when a model is overloaded, so this is how you say "run on X, drop to Y".
+   - "skip_permissions": UNATTENDED. Be explicit that this means the successor
+     runs tools without asking, and never enable it without a clear yes.
+   - "remote_control": on by default, so you can reach the successor later.
 
 Then write .claude/lastcall.json in THIS project only — never a parent, never
 ~/.claude. Write the wrap-up template and point "template" at it. If handover

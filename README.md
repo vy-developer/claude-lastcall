@@ -324,10 +324,23 @@ nothing. Configure it WITH the user, in this conversation.
 
 The assistant reads your repo first — CLAUDE.md, README, package.json, Makefile,
 CI config — so it proposes your actual test command rather than asking for one
-that is already written down. It settles the context window (**any number you
-say**, not a menu), when to warn, what "wrap up" means here, your gates, whether
-a second model should check the work, and whether handover should be automatic.
+that is already written down. It then settles **everything** with you:
+
+| | |
+|---|---|
+| when to warn | token counts (`at_tokens`) or percentages — it offers both, and token counts skip the window question entirely |
+| the window | only if you chose percentages, and it takes **any** figure you say |
+| small models | `min_window_tokens`, so a 400k ladder stays silent on a 200k model |
+| what wrap-up means here | written into a template, not left generic |
+| gates | turned into real shell commands, not descriptions |
+| a second opinion | codex or gemini, if either is on `PATH` |
+| handover | the whole `relay` block: which directory, where handoffs live, which model drives the successor and what it falls back to, and whether it runs unattended |
+
 Then it writes the config and proves it with `doctor`.
+
+Both onboarding texts are covered by tests asserting they mention every option
+a user is actually onboarded onto — the prompt went stale once, shipping
+features the assistant could not offer because nothing told it they existed.
 
 Once configured it never asks again. If you do not want it in a project, tell
 the assistant so and it writes `{"disabled": true}`, which also silences it.
@@ -601,7 +614,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-207 tests, standard library only, no network. They cover the failure modes that
+212 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

@@ -199,3 +199,48 @@ class TestLineEndings(unittest.TestCase):
                 with open(path, "rb") as handle:
                     self.assertNotIn(b"\r\n", handle.read(),
                                      "%s has CRLF line endings" % path)
+
+
+class TestOnboardingCoversTheFeatures(unittest.TestCase):
+    """The onboarding text is what the assistant knows about this tool. It went
+    stale once already: token thresholds, the window floor and model selection
+    all shipped while the prompt still described an older, smaller tool, so the
+    assistant could not offer them."""
+
+    def texts(self):
+        sys.path.insert(0, os.path.join(ROOT, "plugins", "lastcall", "scripts"))
+        import lastcall
+        with open(os.path.join(ROOT, "plugins", "lastcall", "commands",
+                               "onboard.md"), encoding="utf-8") as handle:
+            command = handle.read()
+        return {"SessionStart prompt": lastcall.ONBOARDING,
+                "/lastcall:onboard": command}
+
+    # Only the options a user is actually onboarded onto. debug, state_dir,
+    # state_ttl_days, include_output_tokens and mode are deliberately excluded:
+    # they are troubleshooting knobs, not setup questions.
+    MUST_MENTION = ("at_tokens", "context_window_tokens", "min_window_tokens",
+                    "template", "gates", "verifier", "relay", "handoff_dir",
+                    "skip_permissions", "remote_control", "fallback_model",
+                    "disabled")
+
+    def test_both_onboarding_texts_cover_every_setup_option(self):
+        for where, text in self.texts().items():
+            for option in self.MUST_MENTION:
+                self.assertIn(option, text, "%s never mentions %r" % (where, option))
+
+    def test_they_say_gates_are_commands_not_descriptions(self):
+        for where, text in self.texts().items():
+            self.assertIn("not descriptions", text, where)
+
+    def test_they_refuse_to_argue_about_the_window(self):
+        for where, text in self.texts().items():
+            self.assertIn("ANY", text, where)
+
+    def test_they_require_explicit_consent_for_unattended(self):
+        for where, text in self.texts().items():
+            self.assertIn("without asking", text, where)
+
+    def test_they_confine_writes_to_this_project(self):
+        for where, text in self.texts().items():
+            self.assertIn("THIS project", text, where)

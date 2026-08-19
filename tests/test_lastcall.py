@@ -1183,3 +1183,83 @@ class TestProjectIsolation(TempCase):
         cg.write_state(config, "session-two", {"band": "green"})
         self.assertEqual(cg.read_state(config, "session-one")["band"], "red")
         self.assertEqual(cg.read_state(config, "session-two")["band"], "green")
+
+
+class TestAnswerParsing(unittest.TestCase):
+    """Reported from real use: the user typed "500,000" at the context-window
+    question, it was silently discarded, the default was applied, and they were
+    never told. They ended up with a window they had not chosen."""
+
+    KEYS = {"1": "a", "2": "b", "n": "no"}
+
+    def test_a_typed_number_is_accepted(self):
+        self.assertEqual(cg.parse_answer("500000", self.KEYS, True), 500_000)
+
+    def test_thousands_separators_are_accepted(self):
+        self.assertEqual(cg.parse_answer("500,000", self.KEYS, True), 500_000)
+        self.assertEqual(cg.parse_answer("1_000_000", self.KEYS, True), 1_000_000)
+        self.assertEqual(cg.parse_answer(" 250 000 ", self.KEYS, True), 250_000)
+
+    def test_a_listed_option_still_wins(self):
+        self.assertEqual(cg.parse_answer("1", self.KEYS, True), "1")
+
+    def test_empty_means_take_the_recommendation(self):
+        self.assertEqual(cg.parse_answer("", self.KEYS, True), "__default__")
+
+    def test_nonsense_is_reported_not_swallowed(self):
+        self.assertIsNone(cg.parse_answer("banana", self.KEYS, True))
+        self.assertIsNone(cg.parse_answer("banana", self.KEYS, False))
+
+    def test_a_number_is_refused_where_numbers_are_not_offered(self):
+        self.assertIsNone(cg.parse_answer("500000", {"y": "", "n": ""}, False))
+
+    def test_zero_and_negatives_are_not_windows(self):
+        self.assertIsNone(cg.parse_answer("0", self.KEYS, True))
+        self.assertIsNone(cg.parse_answer("-5", self.KEYS, True))
+
+
+class TestSessionStartOnboarding(TempCase):
+    """Installed but unconfigured is the same as not installed, except the user
+    believes they are covered."""
+
+    def session_start(self, cwd):
+        env = dict(os.environ)
+        env["LASTCALL_STATE_DIR"] = self.state
+        env["CLAUDE_PROJECT_DIR"] = cwd
+        return subprocess.run(
+            [sys.executable, SCRIPT, "SessionStart"],
+            input=json.dumps({"session_id": "s1", "cwd": cwd,
+                              "hook_event_name": "SessionStart"}).encode(),
+            stdout=subprocess.PIPE, env=env)
+
+    def test_unconfigured_project_asks_in_the_session(self):
+        result = self.session_start(self.dir)
+        payload = json.loads(result.stdout.decode())
+        text = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("NOT CONFIGURED", text)
+        self.assertIn("in this conversation", text)
+        self.assertNotIn("{setup}", text)
+
+    def test_it_tells_the_model_to_accept_any_window_number(self):
+        text = json.loads(self.session_start(self.dir).stdout.decode())
+        text = text["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Accept ANY number", text)
+
+    def test_it_tells_the_model_gates_are_commands_not_descriptions(self):
+        """The other half of the same report: a sentence was stored as a gate."""
+        text = json.loads(self.session_start(self.dir).stdout.decode())
+        text = text["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("not descriptions", text)
+        self.assertIn('"pytest -q", not "run the tests"', text)
+
+    def test_a_configured_project_is_silent(self):
+        os.makedirs(os.path.join(self.dir, ".claude"))
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"context_window_tokens": 500_000}, fh)
+        self.assertEqual(self.session_start(self.dir).stdout, b"")
+
+    def test_declining_silences_it(self):
+        os.makedirs(os.path.join(self.dir, ".claude"))
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"disabled": True}, fh)
+        self.assertEqual(self.session_start(self.dir).stdout, b"")

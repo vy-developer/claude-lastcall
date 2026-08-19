@@ -34,7 +34,7 @@ import string
 import sys
 import time
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # --------------------------------------------------------------------------
 # Defaults. Every one of these is overridable by config file or environment.
@@ -209,6 +209,57 @@ Tell the user that, once, and point them at:
     python3 {setup} setup
 
 Configure this text: set "template" in .claude/lastcall.json."""
+
+
+ONBOARDING = """\
+LAST CALL IS INSTALLED HERE BUT NOT CONFIGURED, so it is currently doing
+nothing. Configure it WITH the user, in this conversation. Do not send them to
+a terminal wizard and do not write anything until they have answered.
+
+Look first, so you ask about what is actually here rather than what might be:
+read CLAUDE.md / AGENTS.md / README, look for a test command in package.json,
+Makefile, pyproject.toml or CI config, check `git rev-parse --show-toplevel`,
+and check what is on PATH (tmux, codex, gemini). Then propose answers and ask
+the user to confirm or correct them. Ask a few at a time, conversationally.
+
+What you need to settle:
+
+1. CONTEXT WINDOW, in tokens. Accept ANY number they give you — 200000,
+   1000000, 500000, whatever they say. This is the one thing Last Call refuses
+   to guess, because guessing low makes it fire when the session is barely full
+   and ruins good sessions.
+
+2. WHEN TO WARN, as percentages. Defaults are 40 and 55. Ask if they want
+   earlier or later, and whether they want more than two steps.
+
+3. WHAT WRAP-UP MEANS HERE. The important one. Which documents get updated,
+   what must be committed, whether pushing is allowed, what the next session
+   must be told. Write it into a template file; do not leave the generic text.
+
+4. GATES: the commands that must PASS before handing over. These are SHELL
+   COMMANDS, not descriptions — "pytest -q", not "run the tests". If the user
+   describes an intention, turn it into the actual command, show them, and
+   confirm.
+
+5. A SECOND OPINION, if codex or gemini is on PATH: a different model reading
+   the diff against the plan documents and reporting what was specified but not
+   implemented, and what was claimed without evidence. Store it as "verifier".
+
+6. AUTOMATIC HANDOVER: whether a fresh session should be spawned when context
+   runs out, and if so whether it runs UNATTENDED — remote control on and
+   permission prompts skipped. Be explicit that unattended means it runs tools
+   without asking, and never enable it without a clear yes.
+
+Then write .claude/lastcall.json in THIS project only — never a parent, never
+~/.claude. Write the wrap-up template and point "template" at it. If handover
+was chosen, create the handoff directory and a TEMPLATE.md whose Step 0 states
+the EXPECTED result of each command, so it can actually fail.
+
+Finally run:  python3 {setup} doctor
+and show the user the real output. If it prints any PROBLEM line, fix it.
+
+If the user does not want Last Call here, write {{"disabled": true}} to
+.claude/lastcall.json so this stops asking."""
 
 
 # --------------------------------------------------------------------------
@@ -754,6 +805,26 @@ VERIFIERS = (
 )
 
 
+def parse_answer(answer, valid_keys, accept_number=False):
+    """One typed answer -> a key, a number, or None for "not understood".
+
+    Returning None matters: an answer that is neither a listed option nor a
+    number used to fall through to the default silently, so someone who typed
+    "500,000" got 200,000 and was never told. Say it was not understood and ask
+    again.
+    """
+    answer = (answer or "").strip().lower()
+    if not answer:
+        return "__default__"
+    if answer in valid_keys:
+        return answer
+    if accept_number:
+        digits = answer.replace(",", "").replace("_", "").replace(" ", "")
+        if digits.isdigit() and int(digits) > 0:
+            return int(digits)
+    return None
+
+
 def detect_verifiers():
     """Second-opinion CLIs available on this machine, as (name, command, label)."""
     import shutil
@@ -940,6 +1011,14 @@ def handle_reset(config, payload):
     # describe the window's SIZE, which compaction does not change.
     write_state(config, session_id, state)
     prune_state(config)
+
+    # Installed but unconfigured is the same as not installed, except the user
+    # believes they are covered. So say so at the start of a session, in the
+    # conversation, rather than leaving them to discover it at the worst moment
+    # or to answer a wizard in a second terminal.
+    event = payload.get("hook_event_name") or "SessionStart"
+    if event == "SessionStart" and not config.get("_config_path"):
+        emit(event, ONBOARDING.format(setup=os.path.abspath(__file__)))
     return 0
 
 
@@ -1021,8 +1100,13 @@ def setup(argv):
     tools = {name: bool(shutil.which(name)) for name in ("tmux", "git", "claude")}
     relay_possible = has_git_repo and all(tools.values())
 
-    def ask(question, options, default, why=None):
-        """options: list of (key, label). default is the recommendation."""
+    def ask(question, options, default, why=None, accept_number=False):
+        """options: list of (key, label). default is the recommendation.
+
+        accept_number takes any figure the user types. Silently discarding a
+        typed "500,000" and then applying the default is how someone ends up
+        with a threshold they never chose and no idea it happened.
+        """
         if not interactive:
             return default
         print("\n" + question)
@@ -1037,10 +1121,13 @@ def setup(argv):
             except (EOFError, KeyboardInterrupt):
                 print()
                 return default
-            if not answer:
+            parsed = parse_answer(answer, dict(options), accept_number)
+            if parsed == "__default__":
                 return default
-            if answer in dict(options):
-                return answer
+            if parsed is not None:
+                return parsed
+            print("  '%s' is not one of the options%s."
+                  % (answer, " and is not a number" if accept_number else ""))
 
     def ask_text(question, hint, default=""):
         if not interactive:
@@ -1065,10 +1152,15 @@ def setup(argv):
          ("2", "1,000,000 tokens — extended"),
          ("3", "work it out automatically (needs the bundled status line)")],
         "1",
-        why="Getting this wrong is the one thing that makes Last Call useless, "
-            "so it refuses to guess.")
-    existing["context_window_tokens"] = {
-        "1": 200_000, "2": 1_000_000, "3": None}[window]
+        why="Or type any number of tokens, e.g. 500000. Getting this wrong is "
+            "the one thing that makes Last Call useless, so it refuses to "
+            "guess.",
+        accept_number=True)
+    if isinstance(window, int):
+        existing["context_window_tokens"] = window
+    else:
+        existing["context_window_tokens"] = {
+            "1": 200_000, "2": 1_000_000, "3": None}[window]
 
     relay_default = "y" if relay_possible else "n"
     relay_why = ("tmux, git and the claude CLI are all present."

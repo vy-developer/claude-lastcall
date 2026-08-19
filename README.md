@@ -284,24 +284,39 @@ lot between adjacent releases.
 
 ## Onboarding
 
-Two ways in, depending on how much you want to think about it.
+**Install it, restart Claude Code, and it asks you.** No second terminal, no
+wizard. The `SessionStart` hook notices there is no configuration for this
+project and tells the assistant to set it up with you, in the conversation:
 
-**Let the assistant interview you** — it reads your repo first, so it proposes
-your real test command instead of asking for it:
+```
+LAST CALL IS INSTALLED HERE BUT NOT CONFIGURED, so it is currently doing
+nothing. Configure it WITH the user, in this conversation.
+```
+
+The assistant reads your repo first — CLAUDE.md, README, package.json, Makefile,
+CI config — so it proposes your actual test command rather than asking for one
+that is already written down. It settles the context window (**any number you
+say**, not a menu), when to warn, what "wrap up" means here, your gates, whether
+a second model should check the work, and whether handover should be automatic.
+Then it writes the config and proves it with `doctor`.
+
+Once configured it never asks again. If you do not want it in a project, tell
+the assistant so and it writes `{"disabled": true}`, which also silences it.
+
+You can trigger the same interview yourself at any time:
 
 ```
 /lastcall:onboard
 ```
 
-It establishes what "wrap up" means in *this* project, writes the config and a
-wrap-up template, creates `docs/handoff/TEMPLATE.md`, and then proves it by
-running `doctor` and showing you the output rather than describing it.
-
-**Or answer six questions yourself:**
+Or, if you would rather not converse, answer six questions in a terminal:
 
 ```
 python3 <plugin>/scripts/lastcall.py setup
 ```
+
+That path accepts any token count at the window question — type `500,000` and
+you get 500,000.
 
 Either way the configuration lands in `.claude/lastcall.json` **in that project
 only**. Projects never share it: the config is found by walking up from the
@@ -544,7 +559,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-174 tests, standard library only, no network. They cover the failure modes that
+186 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

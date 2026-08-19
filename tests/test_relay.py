@@ -453,3 +453,50 @@ class TestGitIsOptional(RelayCase):
         result = self.run_from(self.tmp, "--repo", repo)
         self.assertEqual(result.returncode, 1)
         self.assertIn(b"not committed", result.stdout)
+
+
+@posix_only
+class TestModelSelection(RelayCase):
+    """Which model drives the successor. --fallback-model is Claude Code's own
+    switching, so "run on fable, drop to opus when fable is full" needs no
+    retry logic here — only passing the flag through."""
+
+    def configured(self, **relay):
+        repo = self.repo()
+        os.makedirs(os.path.join(repo, ".claude"))
+        with open(os.path.join(repo, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"relay": relay}, fh)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True,
+                       stdout=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-qm", "cfg"], cwd=repo, check=True,
+                       stdout=subprocess.DEVNULL)
+        return repo
+
+    def test_no_model_configured_means_no_flag(self):
+        result = self.relay(self.repo(), "--dry-run")
+        self.assertNotIn(b"--model", result.stdout)
+        self.assertIn(b"<session default>", result.stdout)
+
+    def test_model_from_config_reaches_argv(self):
+        repo = self.configured(model="fable")
+        result = self.relay(repo, "--dry-run")
+        self.assertIn(b"--model fable", result.stdout)
+
+    def test_fallback_list_reaches_argv(self):
+        repo = self.configured(model="fable", fallback_model="opus,sonnet")
+        result = self.relay(repo, "--dry-run")
+        out = result.stdout.decode()
+        self.assertIn("--model fable", out)
+        self.assertRegex(out, r"--fallback-model opus\\?,sonnet")
+
+    def test_flag_overrides_the_config(self):
+        repo = self.configured(model="fable")
+        result = self.relay(repo, "--dry-run", "--model", "opus")
+        self.assertIn(b"--model opus", result.stdout)
+        self.assertNotIn(b"--model fable", result.stdout)
+
+    def test_model_is_reported_before_spawning(self):
+        repo = self.configured(model="opus", fallback_model="sonnet")
+        out = self.relay(repo, "--dry-run").stdout.decode()
+        self.assertIn("model:", out)
+        self.assertIn("fallback: sonnet", out)

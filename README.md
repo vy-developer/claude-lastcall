@@ -137,7 +137,7 @@ to start from a commented version.
 | `min_window_tokens` | `null` | stay silent when the window is smaller than this |
 | `gates` | `null` | commands that must pass before handing over; shown to the assistant as `{gates}` |
 | `verifier` | `null` | a second model asked to check the work; shown as `{verifier}` |
-| `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions` |
+| `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions`, `model`, `fallback_model` |
 | `context_window_tokens` | `null` | window size; `null` means "work it out or stay quiet" |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
 | `template` | `null` | path to your own wrap-up instructions |
@@ -563,13 +563,26 @@ configure it once and never pass flags:
 ```json
 { "relay": { "repo": "/path/to/the/repo", "handoff_dir": "docs/handoff",
              "name_prefix": "myproject", "remote_control": true,
-             "skip_permissions": true } }
+             "skip_permissions": true,
+             "model": "opus", "fallback_model": "fable,sonnet" } }
 ```
 
 The config is found by walking up from your working directory, so a session
 run from a parent folder that owns several repos still finds it — **where the
 config lives and which repo to hand over are different questions**, and `repo`
 answers the second one.
+
+`model` decides which model drives the successor — `opus`, `fable`, `sonnet`, or
+a full model name. `fallback_model` takes a comma-separated list that Claude
+Code tries in turn when the first is overloaded or unavailable, so "run on
+fable, drop to opus when fable is full" is configuration, not logic:
+
+```json
+{ "relay": { "model": "fable", "fallback_model": "opus,sonnet" } }
+```
+
+The relay only passes these through; the switching is Claude Code's, which is
+why it can react to quota and availability that a hook cannot see.
 
 `remote_control` passes `--remote-control <session-name>`, so you can reach the
 successor from anywhere rather than only from the pane it was born in.
@@ -588,7 +601,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-202 tests, standard library only, no network. They cover the failure modes that
+207 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

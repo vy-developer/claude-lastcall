@@ -41,6 +41,8 @@ DRY_RUN=0
 SKIP_PERMISSIONS=${LASTCALL_SKIP_PERMISSIONS:-0}
 REMOTE_CONTROL=${LASTCALL_REMOTE_CONTROL:-1}
 TRUST=0
+MODEL=${LASTCALL_MODEL:-}
+FALLBACK_MODEL=${LASTCALL_FALLBACK_MODEL:-}
 REQUIRE_GIT=${LASTCALL_REQUIRE_GIT:-0}
 GIT_BIN=${GIT_BIN:-git}
 NEW=""
@@ -64,6 +66,11 @@ usage: handoff.sh [options]
   --require-git          refuse unless the directory is a git worktree. Off by
                          default: without git the committed-handoff check is
                          skipped and said so, rather than blocking the handover
+  --model <name>         model for the successor: fable, opus, sonnet, or a
+                         full model name. Default: whatever the CLI would pick
+  --fallback-model <list>  comma-separated models to fall back to when the
+                         first is overloaded or unavailable. Claude Code does
+                         the switching; this only passes it through
   --trust                record this folder as trusted in ~/.claude.json. Claude
                          Code asks once per directory and skip-permissions does
                          NOT cover it; without trust the successor never acts.
@@ -92,6 +99,8 @@ while [ $# -gt 0 ]; do
         --skip-permissions) SKIP_PERMISSIONS=1; shift ;;
         --no-skip-permissions) SKIP_PERMISSIONS=0; shift ;;
         --no-remote-control) REMOTE_CONTROL=0; shift ;;
+        --model)        MODEL=${2:?--model needs a name}; shift 2 ;;
+        --fallback-model) FALLBACK_MODEL=${2:?--fallback-model needs a name}; shift 2 ;;
         --trust)        TRUST=1; shift ;;
         --require-git)  REQUIRE_GIT=1; shift ;;
         --timeout)      TIMEOUT=${2:?--timeout needs seconds}; shift 2 ;;
@@ -161,13 +170,20 @@ read_config() {
     command -v "$PYTHON_BIN" >/dev/null 2>&1 || return 0
     while IFS='=' read -r key value; do
         [ -n "$key" ] || continue
+        # Every guard ends in "|| true". Without it, a guard that evaluates
+        # FALSE — which is exactly what happens when a command-line flag has
+        # already set the value — becomes this function's exit status, and
+        # `set -e` then kills the script with no output whatsoever. Overriding
+        # a configured model from the command line died in total silence.
         case "$key" in
-            repo)              [ -z "$REPO" ] && REPO=$value ;;
-            handoff_dir)       [ "$HANDOFF_DIR" = "docs/handoff" ] && HANDOFF_DIR=$value ;;
-            name_prefix)       [ -z "$NAME_PREFIX" ] && NAME_PREFIX=$value ;;
-            dirty_baseline)    [ -z "$DIRTY_BASELINE" ] && DIRTY_BASELINE=$value ;;
-            skip_permissions)  [ -z "${LASTCALL_SKIP_PERMISSIONS:-}" ] && SKIP_PERMISSIONS=$value ;;
-            remote_control)    [ -z "${LASTCALL_REMOTE_CONTROL:-}" ] && REMOTE_CONTROL=$value ;;
+            repo)              [ -z "$REPO" ] && REPO=$value || true ;;
+            model)             [ -z "$MODEL" ] && MODEL=$value || true ;;
+            fallback_model)    [ -z "$FALLBACK_MODEL" ] && FALLBACK_MODEL=$value || true ;;
+            handoff_dir)       [ "$HANDOFF_DIR" = "docs/handoff" ] && HANDOFF_DIR=$value || true ;;
+            name_prefix)       [ -z "$NAME_PREFIX" ] && NAME_PREFIX=$value || true ;;
+            dirty_baseline)    [ -z "$DIRTY_BASELINE" ] && DIRTY_BASELINE=$value || true ;;
+            skip_permissions)  [ -z "${LASTCALL_SKIP_PERMISSIONS:-}" ] && SKIP_PERMISSIONS=$value || true ;;
+            remote_control)    [ -z "${LASTCALL_REMOTE_CONTROL:-}" ] && REMOTE_CONTROL=$value || true ;;
         esac
     done <<EOF
 $("$PYTHON_BIN" - "$CONFIG" <<'PY'
@@ -179,7 +195,8 @@ except Exception:
     raise SystemExit(0)
 if not isinstance(relay, dict):
     raise SystemExit(0)
-for key in ("repo", "handoff_dir", "name_prefix", "dirty_baseline"):
+for key in ("repo", "handoff_dir", "name_prefix", "dirty_baseline",
+            "model", "fallback_model"):
     if relay.get(key):
         print("%s=%s" % (key, relay[key]))
 for key in ("skip_permissions", "remote_control"):
@@ -188,6 +205,7 @@ for key in ("skip_permissions", "remote_control"):
 PY
 )
 EOF
+    return 0
 }
 
 read_config
@@ -454,6 +472,12 @@ fi
 # from anywhere rather than only from the pane it was born in; it is what makes
 # an unattended relay usable rather than merely alive.
 ARGS=("$CLAUDE_BIN")
+# Which model drives the successor. --fallback-model is Claude Code's own
+# switching: a comma-separated list it tries in turn when the first is
+# overloaded or unavailable, so "run on fable, drop to opus when fable is
+# full" needs no logic here at all.
+[ -n "$MODEL" ] && ARGS+=(--model "$MODEL")
+[ -n "$FALLBACK_MODEL" ] && ARGS+=(--fallback-model "$FALLBACK_MODEL")
 [ "$REMOTE_CONTROL" -eq 1 ] && ARGS+=(--remote-control "$NEW")
 ARGS+=(--session-id "$SID")
 [ "$SKIP_PERMISSIONS" -eq 1 ] && ARGS+=(--dangerously-skip-permissions)
@@ -465,6 +489,7 @@ say "session-id: $SID"
 say "transcript: $TRANSCRIPT"
 say "permissions: $([ "$SKIP_PERMISSIONS" -eq 1 ] && echo "SKIPPED (unattended)" || echo "normal (successor may block on a prompt)")"
 say "remote control: $([ "$REMOTE_CONTROL" -eq 1 ] && echo "on as $NEW" || echo off)"
+say "model:      ${MODEL:-<session default>}${FALLBACK_MODEL:+  fallback: $FALLBACK_MODEL}"
 say "argv:       $CMD"
 
 # Absolute and quoted — this line gets copied into a shell, possibly from a

@@ -1,6 +1,7 @@
 Wrap up this session rather than starting anything new.
 
-Available placeholders: {percent} {tokens} {window} {remaining} {band}
+Available placeholders: {percent} {tokens} {window} {remaining} {zone}
+{gates} {transcript} {relay}
 Currently at {percent:.0f}% — {remaining:,} tokens of headroom left.
 
   1. FINISH what is already in flight. Your judgment on what is small enough
@@ -12,9 +13,9 @@ Currently at {percent:.0f}% — {remaining:,} tokens of headroom left.
      with zero context. It must carry: how to bring the env up and PROVE it;
      what was done; what was left out and why; what to do next and WHERE; the
      decisions already taken so they are not re-asked; and how to work here.
-  4. AUDIT it against the raw session transcript, not against your memory of
-     the session. Ask a second model what the transcript shows that the docs
-     do not.
+  4. AUDIT it against the raw session transcript at {transcript}, not against
+     your memory of the session. Ask a second model what the transcript shows
+     that the docs do not.
   5. COMMIT everything. The handoff must be durable before the session ends.
 
 Copy this file, edit it for your project, and point at it:

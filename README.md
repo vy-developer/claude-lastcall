@@ -14,11 +14,19 @@ and if you let it, holds the session open until the handoff is actually
 written.
 
 ```
-LAST CALL — YELLOW. 74% of the context window is in use
-(743,106 of 1,000,000 tokens; 256,894 left).
+LAST CALL — YELLOW. 43% of the context window is in use
+(430,000 of 1,000,000 tokens; 570,000 left).
 Finish what is in flight; start nothing new. This is an alarm, not a
 decision — you judge what still fits.
 ```
+
+## Contents
+
+- [Install](#install) · [Setting up handover](#setting-up-handover) · [Commands](#commands)
+- [Tell it how big your window is](#tell-it-how-big-your-window-is)
+- [Configuration](#configuration) · [zones](#your-own-zones) · [gates and the self-audit](#the-wrap-up-sequence)
+- [What the assistant actually receives](#what-the-assistant-actually-receives)
+- [The relay](#the-relay-optional-unix--tmux-only) · [Why 40% and 55%](#why-40-and-55)
 
 ## Install
 
@@ -45,6 +53,25 @@ hooks into `.claude/settings.json`, and backs up whatever was there first.
 
 Requires Python 3.9+. No third-party packages, ever. CI runs the suite on
 Linux, macOS and Windows against 3.9, 3.11 and 3.13.
+
+## Commands
+
+```
+lastcall.py setup      configure this project — four questions, writes
+                       .claude/lastcall.json and docs/handoff/TEMPLATE.md
+lastcall.py doctor     show what resolved: window, zones, handover readiness
+lastcall.py doctor <transcript.jsonl>
+                       measure a real session and report its zone
+lastcall.py --version
+
+relay/handoff.sh --dry-run    resolve everything, spawn nothing
+relay/handoff.sh              hand over to a fresh session
+relay/handoff.sh --help       every flag
+```
+
+`doctor` is the answer to "is this thing even working?". It never guesses: if
+it cannot resolve the window or handover is half-configured, it says so and
+tells you which piece is missing.
 
 ## Tell it how big your window is
 
@@ -79,7 +106,7 @@ telling again:
 }
 ```
 
-It prints a normal status line too: `Opus 5 | myrepo | ctx [#######---] 74% YELLOW`.
+It prints a normal status line too: `Opus 5 | myrepo | ctx [####------] 43% YELLOW`.
 If your Claude Code version names those fields differently, `statusline.py --dump`
 prints the raw payload so you can check.
 
@@ -188,7 +215,7 @@ zone's `headline` — and you own the second entirely:
 
 ```
 LAST CALL — WINDDOWN. 74% of the context window is in use
-(743,106 of 1,000,000 tokens; 256,894 left).
+(740,000 of 1,000,000 tokens; 260,000 left).
 Finish what is in flight; start nothing new.
 
 <everything from here down is your template>
@@ -424,7 +451,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-112 tests, standard library only, no network. They cover the failure modes that
+119 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

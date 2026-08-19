@@ -1060,6 +1060,17 @@ def doctor(argv):
 # --------------------------------------------------------------------------
 
 def main(argv):
+    # setup and doctor print em dashes and arrows. A Windows console running
+    # cp437 cannot encode those, and print() would raise UnicodeEncodeError —
+    # turning "show me what is configured" into a crash. Degrade the character
+    # instead of the command. The hook path is unaffected: json.dumps escapes
+    # non-ASCII, so the payload Claude Code receives is pure ASCII regardless.
+    if argv and argv[0] in ("doctor", "--doctor", "setup", "--setup"):
+        try:
+            sys.stdout.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
     if argv and argv[0] in ("doctor", "--doctor"):
         return doctor(argv[1:])
     if argv and argv[0] in ("setup", "--setup"):

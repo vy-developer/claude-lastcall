@@ -796,7 +796,8 @@ class TestSetupCommand(TempCase):
         and must not silently enable an unattended spawner."""
         os.makedirs(os.path.join(self.dir, ".claude"))
         result = self.run_setup(self.dir)
-        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertEqual(result.returncode, 0,
+                         result.stdout.decode("utf-8", "replace"))
         with open(os.path.join(self.dir, ".claude", "lastcall.json")) as handle:
             written = json.load(handle)
         self.assertEqual(written["context_window_tokens"], 200_000)
@@ -835,7 +836,8 @@ class TestSetupRecommendations(TempCase):
         and it is a git repo. With no tty there is nobody to accept it."""
         root = self.git_repo()
         result = self.run_setup(root)
-        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertEqual(result.returncode, 0,
+                         result.stdout.decode("utf-8", "replace"))
         with open(os.path.join(root, ".claude", "lastcall.json")) as handle:
             written = json.load(handle)
         self.assertNotIn("template", written)
@@ -919,3 +921,25 @@ class TestGatesAndTranscript(TempCase):
         for step in ("update", "gates", "audit", "commit", "hand over",
                      "subagent", "teammate", "workflow", "no user prompt"):
             self.assertIn(step, text, step)
+
+
+class TestOutputEncoding(TempCase):
+    """Windows consoles are not UTF-8, and this tool must not care."""
+
+    def test_hook_payload_is_pure_ascii(self):
+        """The message contains em dashes. json.dumps escapes them, so what
+        reaches Claude Code is ASCII on every platform and console encoding."""
+        path = self.transcript([assistant_line(150_000)])
+        env = dict(os.environ)
+        env["LASTCALL_STATE_DIR"] = self.state
+        env["LASTCALL_CONTEXT_WINDOW_TOKENS"] = "200000"
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "Stop"],
+            input=json.dumps({"transcript_path": path, "session_id": "s1",
+                              "hook_event_name": "Stop", "cwd": self.dir}).encode(),
+            stdout=subprocess.PIPE, env=env)
+        self.assertTrue(result.stdout.strip())
+        result.stdout.decode("ascii")  # raises if anything slipped through
+        payload = json.loads(result.stdout.decode("ascii"))
+        self.assertIn("—", payload["hookSpecificOutput"]["additionalContext"])

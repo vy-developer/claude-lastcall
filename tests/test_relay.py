@@ -356,7 +356,7 @@ class TestConfigResolution(RelayCase):
     def test_repo_can_come_from_the_config(self):
         parent, repo = self.parent_layout({"name_prefix": "amos"})
         result = self.run_from(parent)
-        self.assertIn("repo: %s" % repo, result.stdout.decode())
+        self.assertIn("repo: %s" % os.path.realpath(repo), result.stdout.decode())
 
     def test_config_dir_flag_wins(self):
         parent, repo = self.parent_layout({"name_prefix": "fromparent"})
@@ -431,7 +431,10 @@ class TestGitIsOptional(RelayCase):
         """The obvious case: hand over the folder you are sitting in."""
         path = self.plain_dir()
         result = self.run_from(path)
-        self.assertIn("repo: %s" % path, result.stdout.decode())
+        # realpath, because the relay resolves the physical directory and macOS
+        # symlinks /var to /private/var. Resolving is correct; comparing the
+        # unresolved path is what was wrong.
+        self.assertIn("repo: %s" % os.path.realpath(path), result.stdout.decode())
 
     def test_require_git_restores_the_strict_behaviour(self):
         result = self.run_from(self.plain_dir(), "--require-git")

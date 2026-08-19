@@ -21,6 +21,7 @@ must re-run it.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "plugins", "lastcall", "scripts", "lastcall.py")
 
 EVENTS = (("Stop", 15), ("SessionStart", 10), ("PostCompact", 10))
-MARKER = "lastcall.py"
+# Matching the bare string "lastcall.py" would strip any unrelated hook whose
+# command happened to contain it. Ours always ends with the script followed by
+# one of our event names, so require that shape.
+MARKER = re.compile(r"lastcall\.py[\"']?\s+(?:%s)\s*$"
+                    % "|".join(name for name, _ in EVENTS))
 
 
 def find_interpreter():
@@ -87,7 +92,15 @@ def save_settings(path, settings):
     them."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if os.path.isfile(path):
-        shutil.copy2(path, path + ".lastcall.bak")
+        backup = path + ".lastcall.bak"
+        shutil.copy2(path, backup)
+        # settings.json routinely holds API keys, and --global targets the file
+        # most likely to. Copying it with the original 644 would put a second
+        # world-readable copy of a live secret on disk. Owner-only, always.
+        try:
+            os.chmod(backup, 0o600)
+        except OSError:
+            pass
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(settings, handle, indent=2)
@@ -115,7 +128,8 @@ def strip_existing(settings):
                 continue
             kept = [
                 entry for entry in entries
-                if not (isinstance(entry, dict) and MARKER in str(entry.get("command", "")))
+                if not (isinstance(entry, dict)
+                        and MARKER.search(str(entry.get("command", ""))))
             ]
             if kept:
                 group["hooks"] = kept

@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -943,3 +944,132 @@ class TestOutputEncoding(TempCase):
         result.stdout.decode("ascii")  # raises if anything slipped through
         payload = json.loads(result.stdout.decode("ascii"))
         self.assertIn("—", payload["hookSpecificOutput"]["additionalContext"])
+
+
+class TestPlaceholderFormatting(TempCase):
+    """Reported from real use: a template saying {percent} rendered 87.8746 and
+    {tokens} rendered 439373, while the generated header alongside them showed
+    88% and 439,373. Two formatters, one polished."""
+
+    def body(self, template_text, tokens=439_373, window=500_000):
+        path = os.path.join(self.dir, "t.md")
+        with open(path, "w") as fh:
+            fh.write(template_text)
+        config = self.config(template=path)
+        rendered = cg.render(config, cg.resolve_zones(config)[0], tokens, window)
+        return rendered.split("\n\n", 1)[1]
+
+    def test_bare_percent_is_rounded(self):
+        self.assertEqual(self.body("{percent}"), "88")
+
+    def test_bare_token_counts_are_grouped(self):
+        self.assertEqual(self.body("{tokens}"), "439,373")
+        self.assertEqual(self.body("{remaining}"), "60,627")
+        self.assertEqual(self.body("{window}"), "500,000")
+
+    def test_explicit_specs_still_win(self):
+        self.assertEqual(self.body("{percent:.2f}"), "87.87")
+        self.assertEqual(self.body("{tokens:,}"), "439,373")
+
+    def test_strings_are_untouched(self):
+        self.assertEqual(self.body("{zone}"), "yellow")
+
+    def test_malformed_template_is_left_intact_not_dropped(self):
+        self.assertEqual(self.body("a {bogus} b"), "a {bogus} b")
+
+
+class TestEnvironmentCase(TempCase):
+    """The config table documents field names in lowercase, so people copy them
+    into the environment in lowercase. That used to be ignored in silence."""
+
+    def test_uppercase_works(self):
+        os.environ["LASTCALL_RED_PERCENT"] = "91"
+        self.addCleanup(os.environ.pop, "LASTCALL_RED_PERCENT", None)
+        self.assertEqual(cg.load_config({"cwd": self.dir})["red_percent"], 91)
+
+    def test_lowercase_works_too(self):
+        os.environ["LASTCALL_red_percent"] = "92"
+        self.addCleanup(os.environ.pop, "LASTCALL_red_percent", None)
+        self.assertEqual(cg.load_config({"cwd": self.dir})["red_percent"], 92)
+
+
+class TestConfigValidation(TempCase):
+    """A misconfigured guard that goes quiet is indistinguishable from a healthy
+    one with nothing to report."""
+
+    def load(self, raw):
+        os.makedirs(os.path.join(self.dir, ".claude"), exist_ok=True)
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+            json.dump(raw, fh)
+        return cg.load_config({"cwd": self.dir})
+
+    def test_wrong_type_falls_back_and_is_reported(self):
+        config = self.load({"yellow_percent": "quite full"})
+        self.assertEqual(config["yellow_percent"], cg.DEFAULTS["yellow_percent"])
+        self.assertTrue(any("yellow_percent" in p for p in config["_problems"]))
+
+    def test_token_count_in_a_percentage_field_is_caught(self):
+        """The most likely mistake for anyone migrating from absolute bands."""
+        config = self.load({"yellow_percent": 400_000})
+        self.assertEqual(config["yellow_percent"], cg.DEFAULTS["yellow_percent"])
+        self.assertTrue(any("PERCENTAGE" in p for p in config["_problems"]))
+
+    def test_unknown_mode_is_caught(self):
+        config = self.load({"mode": "blocking"})
+        self.assertEqual(config["mode"], "block_once")
+        self.assertTrue(any("mode" in p for p in config["_problems"]))
+
+    def test_missing_template_is_reported_not_silently_ignored(self):
+        config = self.load({"template": ".claude/nope.md"})
+        self.assertTrue(any("does not exist" in p for p in config["_problems"]))
+
+    def test_zone_named_off_the_builtin_list_without_its_own_copy(self):
+        """resolve_zones only has built-in wording for yellow and red, so any
+        other name silently renders with no headline at all."""
+        config = self.load({"zones": [{"name": "winddown", "at": 50}]})
+        self.assertTrue(any("winddown" in p for p in config["_problems"]))
+
+    def test_a_zone_with_its_own_copy_is_fine(self):
+        config = self.load({"zones": [
+            {"name": "winddown", "at": 50, "message": "ease off"}]})
+        self.assertFalse([p for p in config["_problems"] if "winddown" in p])
+
+    def test_a_good_config_reports_no_problems(self):
+        config = self.load({"yellow_percent": 50, "red_percent": 80,
+                            "mode": "advisory"})
+        self.assertEqual(config["_problems"], [])
+
+
+class TestPruneOwnership(TempCase):
+    """state_dir is user-settable. Pointing it at ~/.claude used to mean
+    settings.json was deleted after the TTL, because pruning matched on the
+    file extension rather than on who wrote the file."""
+
+    def aged(self, name, content):
+        os.makedirs(self.state, exist_ok=True)
+        path = os.path.join(self.state, name)
+        with open(path, "w") as fh:
+            json.dump(content, fh)
+        old = time.time() - (400 * 86400)
+        os.utime(path, (old, old))
+        return path
+
+    def test_our_own_stale_state_is_pruned(self):
+        path = self.aged("session.json", {"band": "red", "peak": 1})
+        cg.prune_state(self.config())
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_foreign_json_file_is_never_touched(self):
+        path = self.aged("settings.json", {"env": {"OPENAI_API_KEY": "sk-live"}})
+        cg.prune_state(self.config())
+        self.assertTrue(os.path.exists(path), "deleted a file it did not write")
+
+    def test_unparseable_json_is_left_alone(self):
+        os.makedirs(self.state, exist_ok=True)
+        path = os.path.join(self.state, "broken.json")
+        with open(path, "w") as fh:
+            fh.write("{not json")
+        old = time.time() - (400 * 86400)
+        os.utime(path, (old, old))
+        cg.prune_state(self.config())
+        self.assertTrue(os.path.exists(path))

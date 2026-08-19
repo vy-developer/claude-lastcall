@@ -30,6 +30,7 @@ No third-party dependencies. Python 3.9+.
 import json
 import os
 import re
+import string
 import sys
 import time
 
@@ -279,15 +280,90 @@ def load_config(payload):
             pass
 
     # Environment overrides individual fields rather than replacing the whole
-    # config, so LASTCALL_RED=90 for one run keeps everything else.
+    # config, so LASTCALL_RED_PERCENT=90 for one run keeps everything else.
+    #
+    # Both cases are accepted. The config table documents field names in
+    # lowercase, so someone copying a name straight out of it gets
+    # LASTCALL_red_percent — which used to be ignored in silence, costing a
+    # real user three rounds of debugging. For a tool whose whole value is
+    # speaking up, silently dropping an override is the worst available
+    # behaviour.
     for key in config:
         env_value = os.environ.get(ENV_PREFIX + key.upper())
+        if env_value is None:
+            env_value = os.environ.get(ENV_PREFIX + key)
         if env_value is not None:
             config[key] = _coerce(key, env_value)
 
     config["_project_dir"] = root
     config["_config_path"] = path if os.path.isfile(path) else None
+    config["_problems"] = validate(config)
     return config
+
+
+_EXPECTED_TYPES = {
+    "yellow_percent": (int, float),
+    "red_percent": (int, float),
+    "context_window_tokens": (int,),
+    "state_ttl_days": (int,),
+    "mode": (str,),
+    "template": (str,),
+    "state_dir": (str,),
+    "zones": (list, tuple),
+    "gates": (list, tuple, str),
+    "include_output_tokens": (bool,),
+    "debug": (bool,),
+    "disabled": (bool,),
+}
+
+
+def validate(config):
+    """Replace unusable values with their defaults and say what was wrong.
+
+    A misconfigured guard that goes silent is indistinguishable from a healthy
+    one with nothing to report. Every problem found here is surfaced by doctor.
+    """
+    problems = []
+    for key, types in _EXPECTED_TYPES.items():
+        value = config.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) and bool not in types:
+            problems.append("%s should be %s, got a boolean" % (key, types[0].__name__))
+            config[key] = DEFAULTS[key]
+        elif not isinstance(value, types):
+            problems.append("%s should be %s, got %s"
+                            % (key, types[0].__name__, type(value).__name__))
+            config[key] = DEFAULTS[key]
+
+    for key in ("yellow_percent", "red_percent"):
+        value = config.get(key)
+        if isinstance(value, (int, float)) and not 0 <= value <= 100:
+            problems.append("%s is %s; it is a PERCENTAGE of the window, not a "
+                            "token count" % (key, value))
+            config[key] = DEFAULTS[key]
+
+    if config.get("mode") not in ("advisory", "block_once"):
+        problems.append('mode should be "advisory" or "block_once", got %r'
+                        % config.get("mode"))
+        config["mode"] = DEFAULTS["mode"]
+
+    template = config.get("template")
+    if template:
+        resolved = template if os.path.isabs(template) else os.path.join(
+            config["_project_dir"], template)
+        if not os.path.isfile(resolved):
+            problems.append("template does not exist: %s" % resolved)
+
+    for zone in (config.get("zones") or []):
+        if isinstance(zone, dict) and zone.get("name") not in _DEFAULT_HEADLINES \
+                and not zone.get("headline") and not zone.get("message") \
+                and not zone.get("template"):
+            problems.append('zone "%s" has no headline, message or template of '
+                            "its own, and only the names %s carry built-in "
+                            "wording" % (zone.get("name"),
+                                         "/".join(sorted(_DEFAULT_HEADLINES))))
+    return problems
 
 
 def state_dir(config):
@@ -539,10 +615,32 @@ def prune_state(config):
             continue
         target = os.path.join(directory, name)
         try:
-            if os.path.getmtime(target) < cutoff:
-                os.remove(target)
+            if os.path.getmtime(target) >= cutoff:
+                continue
+            # Delete only what this tool wrote. state_dir is user-settable, and
+            # pointing it at ~/.claude used to mean settings.json was removed
+            # after the TTL. Extension is not ownership.
+            if not _is_our_state(target):
+                continue
+            os.remove(target)
         except OSError:
             pass
+
+
+_STATE_KEYS = frozenset(("band", "peak", "max_observed", "epoch", "updated",
+                        "window_from_statusline"))
+
+
+def _is_our_state(path):
+    """True only for a file this tool created."""
+    if os.path.basename(path) == "last-payload.json":
+        return True
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and bool(_STATE_KEYS & set(data))
 
 
 def write_debug(config, payload):
@@ -599,6 +697,40 @@ def zone_body(config, zone):
             or DEFAULT_TEMPLATE)
 
 
+class _Sensible(string.Formatter):
+    """Format numbers the way a reader expects when no spec is given.
+
+    A template that says "{percent}" wants "88", not "87.8746", and "{tokens}"
+    wants "439,373", not "439373". Explicit specs still win, so "{percent:.1f}"
+    and "{tokens:,}" keep working exactly as before.
+    """
+
+    def format_field(self, value, format_spec):
+        if not format_spec:
+            if isinstance(value, bool):
+                pass
+            elif isinstance(value, float):
+                return format(value, ".0f")
+            elif isinstance(value, int):
+                return format(value, ",")
+        return super(_Sensible, self).format_field(value, format_spec)
+
+
+_FORMATTER = _Sensible()
+
+
+def fill(text, values):
+    """Interpolate a template, leaving it intact if the template is malformed.
+
+    A stray brace in someone's wrap-up is their problem to fix; it is never a
+    reason to withhold the warning entirely.
+    """
+    try:
+        return _FORMATTER.vformat(text, (), values)
+    except (KeyError, IndexError, ValueError, AttributeError):
+        return text
+
+
 def format_gates(config):
     gates = config.get("gates")
     if not gates:
@@ -635,14 +767,8 @@ def render(config, zone, tokens, window, transcript=None):
     if zone.get("headline"):
         header += "\n" + zone["headline"]
 
-    body = zone_body(config, zone)
-    try:
-        body = body.format(**values)
-    except (KeyError, IndexError, ValueError):
-        # A template with a stray brace is the user's problem to fix, not a
-        # reason to withhold the warning entirely.
-        pass
-    return header.format(**values) + "\n\n" + body
+    body = fill(zone_body(config, zone), values)
+    return fill(header, values) + "\n\n" + body
 
 
 def emit(event, message, block_reason=None):
@@ -1003,6 +1129,9 @@ def doctor(argv):
     print("  project dir   : %s" % config["_project_dir"])
     print("  config file   : %s" % (config["_config_path"] or "(none — using defaults)"))
     print("  state dir     : %s" % state_dir(config))
+    for problem in config.get("_problems") or []:
+        print("  PROBLEM       : %s" % problem)
+
     zones = resolve_zones(config)
     if zones:
         print("  zones         : %s" % ("  ".join(

@@ -113,3 +113,31 @@ class TestReadmeMatchesTheCode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestSetupWizardDocs(unittest.TestCase):
+    """The README's wizard transcript drifted from the code once already: it
+    showed 1/3..3/3 after a fourth question was added, and none of the existing
+    doc tests looked at the numbering."""
+
+    def source(self):
+        with open(os.path.join(ROOT, "plugins", "lastcall", "scripts",
+                               "lastcall.py"), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_readme_shows_every_question_the_wizard_asks(self):
+        asked = sorted(set(re.findall(r'"(\d)/(\d)\s+[A-Z]', self.source())))
+        self.assertTrue(asked, "no numbered prompts found in setup()")
+        totals = {total for _n, total in asked}
+        self.assertEqual(len(totals), 1, "wizard prompts disagree on the total")
+        total = totals.pop()
+        shown = sorted(set(re.findall(r"^(\d)/(\d)\s+[A-Z]", readme(), re.M)))
+        self.assertEqual(len(shown), int(total),
+                         "README shows %d of the wizard's %s questions"
+                         % (len(shown), total))
+        self.assertEqual([n for n, _t in shown], [n for n, _t in asked])
+
+    def test_prose_question_count_matches(self):
+        total = set(re.findall(r'"\d/(\d)\s+[A-Z]', self.source())).pop()
+        words = {"2": "Two", "3": "Three", "4": "Four", "5": "Five"}
+        self.assertIn("%s questions" % words[total], readme())

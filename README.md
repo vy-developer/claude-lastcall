@@ -124,7 +124,8 @@ only helps 1M users, and only after they are already deep into a session.
 ## Configuration
 
 `.claude/lastcall.json` in your project. Every field is optional, and every one
-can be overridden per-run with `LASTCALL_<FIELD>` in the environment. Copy
+can be overridden per-run with `LASTCALL_<FIELD>` in the environment —
+`LASTCALL_RED_PERCENT=70` or `LASTCALL_red_percent=70`, both work. Copy
 [`plugins/lastcall/lastcall.example.json`](plugins/lastcall/lastcall.example.json)
 to start from a commented version.
 
@@ -286,25 +287,30 @@ After installing, run this once per project:
 python3 <plugin>/scripts/lastcall.py setup
 ```
 
-Three questions, each with a recommendation based on what is actually present
+Four questions, each with a recommendation based on what is actually present
 on your machine — whether this is a git repository, whether tmux, git and the
 `claude` CLI are on `PATH`:
 
 ```
-1/3  How big is this project's context window?
+1/4  How big is this project's context window?
   1) 200,000 tokens — standard  <- recommended
   2) 1,000,000 tokens — extended
      Getting this wrong is the one thing that makes Last Call useless,
      so it refuses to guess.
 
-2/3  Hand over to a fresh session automatically when context runs low?
+2/4  Hand over to a fresh session automatically when context runs low?
   y) yes — write a handoff, then spawn a successor in tmux  <- recommended
   n) no  — just warn me; the session ends there
      tmux, git and the claude CLI are all present.
 
-3/3  What command proves this project's environment is actually up?
+3/4  What command proves this project's environment is actually up?
   The successor runs this FIRST and must not start work until it passes.
   > npm test && curl -sf localhost:3000/health
+
+4/4  What must PASS before this project hands over?
+  Tests, linters, a review gate — comma separated. The wrap-up shows
+  these to the assistant so it cannot hand over unverified work.
+  > pytest -q, ruff check
 ```
 
 It writes `.claude/lastcall.json`, creates `docs/handoff/TEMPLATE.md` seeded
@@ -451,7 +457,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-120 tests, standard library only, no network. They cover the failure modes that
+142 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

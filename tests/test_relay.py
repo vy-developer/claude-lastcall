@@ -7,6 +7,8 @@ tests drive the precondition logic, which is the part that protects you from
 handing over work that was never committed.
 """
 
+import json
+import stat
 import os
 import shutil
 import subprocess
@@ -180,3 +182,58 @@ class TestResolution(RelayCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+@posix_only
+class TestInstallerSafety(unittest.TestCase):
+    """Both reported from real use against a settings.json holding a live key."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="install-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        os.makedirs(os.path.join(self.tmp, ".claude"))
+        self.settings = os.path.join(self.tmp, ".claude", "settings.json")
+
+    def write(self, data):
+        with open(self.settings, "w") as handle:
+            json.dump(data, handle)
+        os.chmod(self.settings, 0o644)
+
+    def install(self, *args):
+        return subprocess.run(
+            [sys.executable, os.path.join(ROOT, "install.py"), "--dir", self.tmp]
+            + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def test_backup_of_a_secret_bearing_settings_is_owner_only(self):
+        """--global targets the file most likely to hold an API key. Copying it
+        at 644 would leave a second world-readable copy of a live secret."""
+        self.write({"env": {"OPENAI_API_KEY": "sk-live-example"}})
+        self.install()
+        backup = self.settings + ".lastcall.bak"
+        self.assertTrue(os.path.isfile(backup))
+        mode = stat.S_IMODE(os.stat(backup).st_mode)
+        self.assertEqual(mode & 0o077, 0, "backup is readable by others: %o" % mode)
+
+    def test_an_unrelated_hook_mentioning_the_script_name_survives(self):
+        """Matching the bare string 'lastcall.py' stripped any hook containing
+        it, including someone else's wrapper."""
+        foreign = "/opt/tools/my-lastcall.py-wrapper --verbose"
+        self.write({"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": foreign}]}]}})
+        self.install()
+        self.install("--uninstall")
+        with open(self.settings) as handle:
+            after = json.load(handle)
+        commands = [entry["command"]
+                    for groups in after.get("hooks", {}).values()
+                    for group in groups for entry in group["hooks"]]
+        self.assertIn(foreign, commands)
+
+    def test_install_then_uninstall_leaves_no_trace_of_ours(self):
+        self.write({"permissions": {"allow": ["Bash"]}})
+        self.install()
+        self.install("--uninstall")
+        with open(self.settings) as handle:
+            after = json.load(handle)
+        self.assertNotIn("hooks", after)
+        self.assertEqual(after["permissions"], {"allow": ["Bash"]})

@@ -66,6 +66,10 @@ DEFAULTS = {
     # template; nothing here executes them, because a hook that runs your test
     # suite at Stop time is a hook that hangs your session.
     "gates": None,
+    # Settings for the optional relay, read by relay/handoff.sh so one file
+    # drives everything: handoff_dir, name_prefix, dirty_baseline,
+    # remote_control, skip_permissions.
+    "relay": None,
     # None means "work it out from an exact source, or stay silent". Setting it
     # explicitly is the escape hatch when no exact source is available — see
     # resolve_window for why this is never inferred from the model name.
@@ -235,7 +239,7 @@ def project_dir(payload):
 _FLOAT_KEYS = frozenset(("yellow_percent", "red_percent"))
 _INT_KEYS = frozenset(("context_window_tokens", "state_ttl_days"))
 _BOOL_KEYS = frozenset(("include_output_tokens", "debug", "disabled"))
-_JSON_KEYS = frozenset(("zones", "gates"))
+_JSON_KEYS = frozenset(("zones", "gates", "relay"))
 
 
 def _coerce(key, value):
@@ -311,6 +315,7 @@ _EXPECTED_TYPES = {
     "state_dir": (str,),
     "zones": (list, tuple),
     "gates": (list, tuple, str),
+    "relay": (dict,),
     "include_output_tokens": (bool,),
     "debug": (bool,),
     "disabled": (bool,),
@@ -1012,7 +1017,7 @@ def setup(argv):
                       for n, ok in tools.items()))
 
     window = ask(
-        "1/4  How big is this project's context window?",
+        "1/5  How big is this project's context window?",
         [("1", "200,000 tokens — standard"),
          ("2", "1,000,000 tokens — extended"),
          ("3", "work it out automatically (needs the bundled status line)")],
@@ -1029,7 +1034,7 @@ def setup(argv):
                      [n for n, ok in tools.items() if not ok]
                      + ([] if has_git_repo else ["this is not a git repository"])))
     relay = ask(
-        "2/4  Hand over to a fresh session automatically when context runs low?",
+        "2/5  Hand over to a fresh session automatically when context runs low?",
         [("y", "yes — write a handoff, then spawn a successor in tmux"),
          ("n", "no  — just warn me; the session ends there")],
         relay_default,
@@ -1046,7 +1051,7 @@ def setup(argv):
     if relay == "y":
         existing["template"] = RELAY_TEMPLATE
         verify = ask_text(
-            "3/4  What command proves this project's environment is actually up?",
+            "3/5  What command proves this project's environment is actually up?",
             "The successor runs this FIRST and must not start work until it "
             "passes.\n  Examples: 'npm test', 'make dev && curl -sf "
             "localhost:3000/health'.\n  Leave blank to fill in later.")
@@ -1065,21 +1070,42 @@ def setup(argv):
                              % skeleton)
         except OSError as error:
             notes.append("could NOT create %s (%s)" % (handoff_dir, error))
+        installers = {
+            "tmux": "sudo apt install tmux   (or: brew install tmux)",
+            "git": "sudo apt install git     (or: brew install git)",
+            "claude": "see https://claude.com/claude-code for the CLI",
+        }
         for name, ok in tools.items():
             if not ok:
-                notes.append("MISSING: %s is not on PATH — handover will not work"
-                             % name)
+                notes.append("MISSING: %s — install it with: %s"
+                             % (name, installers[name]))
         if not has_git_repo:
             notes.append("MISSING: %s is not a git repository — the relay "
                          "refuses to spawn without one" % root)
 
         gates = ask_text(
-            "4/4  What must PASS before this project hands over?",
+            "4/5  What must PASS before this project hands over?",
             "Tests, linters, a review gate — comma separated. The wrap-up shows\n"
             "  these to the assistant so it cannot hand over unverified work.\n"
             "  Examples: 'npm test, npm run lint'. Leave blank to fill in later.")
         if gates:
             existing["gates"] = [g.strip() for g in gates.split(",") if g.strip()]
+
+        unattended = ask(
+            "5/5  Should the successor run UNATTENDED?",
+            [("y", "yes — remote control on, permission prompts skipped"),
+             ("n", "no  — successor waits for permission like a normal session")],
+            "y",
+            why="Unattended means the successor runs tools without asking. It is "
+                "what lets a chain of sessions continue while you are away.")
+        relay_cfg = dict(existing.get("relay") or {})
+        relay_cfg["handoff_dir"] = "docs/handoff"
+        relay_cfg["remote_control"] = True
+        relay_cfg["skip_permissions"] = (unattended == "y")
+        prefix = os.path.basename(root.rstrip("/"))
+        if prefix:
+            relay_cfg["name_prefix"] = re.sub(r"[^A-Za-z0-9_-]", "-", prefix)
+        existing["relay"] = relay_cfg
 
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)

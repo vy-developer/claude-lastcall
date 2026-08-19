@@ -57,7 +57,7 @@ Linux, macOS and Windows against 3.9, 3.11 and 3.13.
 ## Commands
 
 ```
-lastcall.py setup      configure this project — four questions, writes
+lastcall.py setup      configure this project — five questions, writes
                        .claude/lastcall.json and docs/handoff/TEMPLATE.md
 lastcall.py doctor     show what resolved: window, zones, handover readiness
 lastcall.py doctor <transcript.jsonl>
@@ -135,6 +135,7 @@ to start from a commented version.
 | `red_percent` | `55` | escalate once here |
 | `zones` | `null` | your own zones instead of the two above — see below |
 | `gates` | `null` | commands that must pass before handing over; shown to the assistant as `{gates}` |
+| `relay` | `null` | relay settings: `handoff_dir`, `name_prefix`, `remote_control`, `skip_permissions` |
 | `context_window_tokens` | `null` | window size; `null` means "work it out or stay quiet" |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
 | `template` | `null` | path to your own wrap-up instructions |
@@ -287,30 +288,36 @@ After installing, run this once per project:
 python3 <plugin>/scripts/lastcall.py setup
 ```
 
-Four questions, each with a recommendation based on what is actually present
+Five questions, each with a recommendation based on what is actually present
 on your machine — whether this is a git repository, whether tmux, git and the
 `claude` CLI are on `PATH`:
 
 ```
-1/4  How big is this project's context window?
+1/5  How big is this project's context window?
   1) 200,000 tokens — standard  <- recommended
   2) 1,000,000 tokens — extended
      Getting this wrong is the one thing that makes Last Call useless,
      so it refuses to guess.
 
-2/4  Hand over to a fresh session automatically when context runs low?
+2/5  Hand over to a fresh session automatically when context runs low?
   y) yes — write a handoff, then spawn a successor in tmux  <- recommended
   n) no  — just warn me; the session ends there
      tmux, git and the claude CLI are all present.
 
-3/4  What command proves this project's environment is actually up?
+3/5  What command proves this project's environment is actually up?
   The successor runs this FIRST and must not start work until it passes.
   > npm test && curl -sf localhost:3000/health
 
-4/4  What must PASS before this project hands over?
+4/5  What must PASS before this project hands over?
   Tests, linters, a review gate — comma separated. The wrap-up shows
   these to the assistant so it cannot hand over unverified work.
   > pytest -q, ruff check
+
+5/5  Should the successor run UNATTENDED?
+  y) yes — remote control on, permission prompts skipped  <- recommended
+  n) no  — successor waits for permission like a normal session
+     Unattended means the successor runs tools without asking. It is
+     what lets a chain of sessions continue while you are away.
 ```
 
 It writes `.claude/lastcall.json`, creates `docs/handoff/TEMPLATE.md` seeded
@@ -437,15 +444,26 @@ What the relay does, in order, refusing to continue at the first failure:
 ```
 bash plugins/lastcall/relay/handoff.sh --dry-run     # resolve everything, spawn nothing
 bash plugins/lastcall/relay/handoff.sh               # hand over
-bash plugins/lastcall/relay/handoff.sh --skip-permissions   # unattended
+bash plugins/lastcall/relay/handoff.sh --no-skip-permissions # force prompts on
 ```
 
 Exit codes: `0` successor up and working, `1` precondition failure (nothing was
 spawned), `2` spawned but never proved itself.
 
-`--skip-permissions` starts the successor with `--dangerously-skip-permissions`.
-A genuinely unattended relay needs it, and it means the successor runs tools
-without asking. It is opt-in on purpose and never the default.
+The relay reads its settings from `relay` in `.claude/lastcall.json`, so you
+configure it once and never pass flags:
+
+```json
+{ "relay": { "handoff_dir": "docs/handoff", "name_prefix": "myproject",
+             "remote_control": true, "skip_permissions": true } }
+```
+
+`remote_control` passes `--remote-control <session-name>`, so you can reach the
+successor from anywhere rather than only from the pane it was born in.
+`skip_permissions` passes `--dangerously-skip-permissions`, which is what lets
+the chain continue while you are away — it means the successor runs tools
+without asking, so `setup` asks before enabling it and `--no-skip-permissions`
+turns it off for one run.
 
 Requires `bash`, `git`, `tmux`, `python3` and the `claude` CLI. The guard needs
 none of these — if you are on Windows, or you just want the alarm, ignore this

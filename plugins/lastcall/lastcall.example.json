@@ -14,6 +14,11 @@
   "_comment_gates": "Commands that must pass before handing over — tests, linters, a review gate. Surfaced to the assistant as {gates} in your wrap-up template. Nothing here is executed by the hook: running your test suite at Stop time would hang the session.",
   "gates": null,
 
+  "_comment_relay": "Settings for the optional relay, read by relay/handoff.sh. handoff_dir defaults to docs/handoff. remote_control names the successor so you can reach it from anywhere. skip_permissions starts it with --dangerously-skip-permissions, which is what makes an unattended chain possible.",
+  "relay": null,
+
+  "_comment_relay_example": {"handoff_dir": "docs/handoff", "name_prefix": "myproject", "remote_control": true, "skip_permissions": true},
+
   "_comment_window": "The one thing Last Call will not guess. null means 'use an exact source or stay silent'. Set it to 200000 or 1000000 if you are not using the bundled status line.",
   "context_window_tokens": null,
 

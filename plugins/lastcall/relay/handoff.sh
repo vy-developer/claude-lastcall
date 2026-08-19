@@ -36,7 +36,8 @@ DIRTY_BASELINE=${LASTCALL_DIRTY_BASELINE:-}
 HANDOFF=""
 ALLOW_DIRTY=0
 DRY_RUN=0
-SKIP_PERMISSIONS=0
+SKIP_PERMISSIONS=${LASTCALL_SKIP_PERMISSIONS:-0}
+REMOTE_CONTROL=${LASTCALL_REMOTE_CONTROL:-1}
 NEW=""
 
 usage() {
@@ -48,6 +49,9 @@ usage: handoff.sh [options]
   --handoff <path>       use this handoff instead of the newest
   --handoff-dir <path>   where handoffs live, repo-relative (default docs/handoff)
   --allow-dirty          spawn even though the tree has uncommitted work
+  --no-remote-control    do not pass --remote-control (on by default, names the
+                         successor so you can reach it from anywhere)
+  --no-skip-permissions  force permission prompts on even if config enables them
   --skip-permissions     start the successor with --dangerously-skip-permissions.
                          REQUIRED for a genuinely unattended relay, and it means
                          the successor runs tools without asking. Opt in
@@ -69,6 +73,8 @@ while [ $# -gt 0 ]; do
         --handoff-dir)  HANDOFF_DIR=${2:?--handoff-dir needs a path}; shift 2 ;;
         --allow-dirty)  ALLOW_DIRTY=1; shift ;;
         --skip-permissions) SKIP_PERMISSIONS=1; shift ;;
+        --no-skip-permissions) SKIP_PERMISSIONS=0; shift ;;
+        --no-remote-control) REMOTE_CONTROL=0; shift ;;
         --timeout)      TIMEOUT=${2:?--timeout needs seconds}; shift 2 ;;
         --dry-run)      DRY_RUN=1; shift ;;
         -h|--help)      usage; exit 0 ;;
@@ -104,6 +110,40 @@ if [ -z "$REPO" ]; then
     REPO=$(git rev-parse --show-toplevel 2>/dev/null || true)
 fi
 [ -n "$REPO" ] || { echo "cannot work out which repo to hand over — pass --repo" >&2; exit 1; }
+
+# One config file drives the whole thing. Anything already set on the command
+# line or in the environment wins, so a flag still overrides the file.
+CONFIG="$REPO/.claude/lastcall.json"
+if [ -f "$CONFIG" ] && command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    while IFS='=' read -r key value; do
+        [ -n "$key" ] || continue
+        case "$key" in
+            handoff_dir)       [ "$HANDOFF_DIR" = "docs/handoff" ] && HANDOFF_DIR=$value ;;
+            name_prefix)       [ -z "$NAME_PREFIX" ] && NAME_PREFIX=$value ;;
+            dirty_baseline)    [ -z "$DIRTY_BASELINE" ] && DIRTY_BASELINE=$value ;;
+            skip_permissions)  [ -z "${LASTCALL_SKIP_PERMISSIONS:-}" ] && SKIP_PERMISSIONS=$value ;;
+            remote_control)    [ -z "${LASTCALL_REMOTE_CONTROL:-}" ] && REMOTE_CONTROL=$value ;;
+        esac
+    done <<EOF
+$("$PYTHON_BIN" - "$CONFIG" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        relay = (json.load(fh) or {}).get("relay") or {}
+except Exception:
+    raise SystemExit(0)
+if not isinstance(relay, dict):
+    raise SystemExit(0)
+for key in ("handoff_dir", "name_prefix", "dirty_baseline"):
+    if relay.get(key):
+        print("%s=%s" % (key, relay[key]))
+for key in ("skip_permissions", "remote_control"):
+    if key in relay:
+        print("%s=%d" % (key, 1 if relay[key] else 0))
+PY
+)
+EOF
+fi
 
 # Fall back rather than abort. An unwritable log directory is a reason to log
 # somewhere else, never a reason to refuse a handover — and after the spawn it
@@ -258,17 +298,21 @@ fi
 
 # Quote per argument. Hand-concatenating this is how the prompt arrives split
 # across several argv slots, or how a backtick in a path gets executed.
-if [ "$SKIP_PERMISSIONS" -eq 1 ]; then
-    CMD=$(printf '%q ' "$CLAUDE_BIN" --session-id "$SID" \
-        --dangerously-skip-permissions "$PROMPT")
-else
-    CMD=$(printf '%q ' "$CLAUDE_BIN" --session-id "$SID" "$PROMPT")
-fi
+# Build argv piecewise. --remote-control names the successor so you can reach it
+# from anywhere rather than only from the pane it was born in; it is what makes
+# an unattended relay usable rather than merely alive.
+ARGS=("$CLAUDE_BIN")
+[ "$REMOTE_CONTROL" -eq 1 ] && ARGS+=(--remote-control "$NEW")
+ARGS+=(--session-id "$SID")
+[ "$SKIP_PERMISSIONS" -eq 1 ] && ARGS+=(--dangerously-skip-permissions)
+ARGS+=("$PROMPT")
+CMD=$(printf '%q ' "${ARGS[@]}")
 
 say "successor:  $NEW"
 say "session-id: $SID"
 say "transcript: $TRANSCRIPT"
-say "permissions: $([ "$SKIP_PERMISSIONS" -eq 1 ] && echo skipped || echo "normal (successor may block on a prompt)")"
+say "permissions: $([ "$SKIP_PERMISSIONS" -eq 1 ] && echo "SKIPPED (unattended)" || echo "normal (successor may block on a prompt)")"
+say "remote control: $([ "$REMOTE_CONTROL" -eq 1 ] && echo "on as $NEW" || echo off)"
 say "argv:       $CMD"
 
 # Absolute and quoted — this line gets copied into a shell, possibly from a

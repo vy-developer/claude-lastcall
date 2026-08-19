@@ -159,7 +159,7 @@ class TestResolution(RelayCase):
 
     def test_skip_permissions_is_opt_in_and_visible(self):
         result = self.relay(self.repo(), "--dry-run", "--skip-permissions")
-        self.assertIn(b"permissions: skipped", result.stdout)
+        self.assertIn(b"permissions: SKIPPED", result.stdout)
         self.assertIn(b"--dangerously-skip-permissions", result.stdout)
 
     def test_custom_handoff_dir(self):

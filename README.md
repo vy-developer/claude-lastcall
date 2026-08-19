@@ -106,6 +106,7 @@ to start from a commented version.
 | `yellow_percent` | `40` | warn once at this much of the window used |
 | `red_percent` | `55` | escalate once here |
 | `zones` | `null` | your own zones instead of the two above — see below |
+| `gates` | `null` | commands that must pass before handing over; shown to the assistant as `{gates}` |
 | `context_window_tokens` | `null` | window size; `null` means "work it out or stay quiet" |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
 | `template` | `null` | path to your own wrap-up instructions |
@@ -125,7 +126,8 @@ to your project, so write it down and point at it:
 ```
 
 Placeholders: `{percent}` `{tokens}` `{window}` `{remaining}` `{zone}`, and
-`{relay}` for the path to the bundled relay script. See
+`{relay}` for the bundled relay script, `{gates}` for your gate commands, and
+`{transcript}` for this session's raw transcript path. See
 [`example-wrapup.md`](plugins/lastcall/templates/example-wrapup.md), or
 [`handoff-relay.md`](plugins/lastcall/templates/handoff-relay.md) if you want
 the session to hand over to a fresh one automatically.
@@ -303,6 +305,42 @@ you find out at the worst moment. Until it is configured:
 
 A tool whose job is to prevent silent failure has no business failing silently.
 
+### The wrap-up sequence
+
+The bundled template walks the assistant through the whole handover, and two of
+its steps are the ones that make the difference between a chain that works and
+one that quietly degrades:
+
+**Gates.** `{gates}` renders the commands you listed in config. Nothing hands
+over on unverified work, and a failing gate must be fixed or written down — not
+quietly omitted:
+
+```
+  4. RUN THE GATES. Nothing hands over on unverified work:
+
+       pytest -q
+       ruff check
+```
+
+**The self-audit.** `{transcript}` renders the path to the session's own raw
+transcript, which turns "verify before handing over" from a pious instruction
+into something the assistant can actually do — read what happened instead of
+trusting the memory that is, by definition, running out:
+
+```
+  5. AUDIT the handoff against what ACTUALLY happened, not against your memory
+     of it. Your raw transcript is at:
+
+       /home/you/.claude/projects/-home-you-myrepo/<session>.jsonl
+```
+
+That is where stale rows and wrong numbers get caught. A second model reading
+the transcript against the handoff catches more than one model alone.
+
+The successor is started with `read <handoff> and follow it.` — so work resumes
+**without you typing a first prompt.** Everything the next session needs has to
+be in that document.
+
 ### The handoff document
 
 The relay spawns the successor. The *document* is what makes that successor
@@ -386,7 +424,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-104 tests, standard library only, no network. They cover the failure modes that
+112 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

@@ -60,6 +60,11 @@ DEFAULTS = {
     #   [{"name": "wind-down", "at": 60, "template": ".claude/winddown.md"},
     #    {"name": "closing",   "at": 85, "block": true}]
     "zones": None,
+    # Commands that must pass before handing over — tests, linters, a review
+    # gate. They are surfaced to the assistant as {gates} in your wrap-up
+    # template; nothing here executes them, because a hook that runs your test
+    # suite at Stop time is a hook that hangs your session.
+    "gates": None,
     # None means "work it out from an exact source, or stay silent". Setting it
     # explicitly is the escape hatch when no exact source is available — see
     # resolve_window for why this is never inferred from the model name.
@@ -148,6 +153,16 @@ and why — otherwise it gets attempted again.
 The rules of this repository: how to test, what gates a change, what must never
 be done. Point at the files rather than restating them.
 
+Include how work should be PARALLELISED here, because a fresh session will
+otherwise do everything sequentially in one context and decay:
+
+  - a subagent for a one-shot task — run it, return the result, context
+    discarded. Use it to keep exploration and research out of the main window.
+  - a teammate when the context must persist and you will come back to it.
+  - a workflow when many things run in parallel across distinct stages.
+
+Name the concrete gates a change must pass, and who runs them.
+
 ## 5. Decided — do not re-ask
 
 Decisions already taken, so the next session does not reopen them. This section
@@ -219,7 +234,7 @@ def project_dir(payload):
 _FLOAT_KEYS = frozenset(("yellow_percent", "red_percent"))
 _INT_KEYS = frozenset(("context_window_tokens", "state_ttl_days"))
 _BOOL_KEYS = frozenset(("include_output_tokens", "debug", "disabled"))
-_JSON_KEYS = frozenset(("zones",))
+_JSON_KEYS = frozenset(("zones", "gates"))
 
 
 def _coerce(key, value):
@@ -584,7 +599,16 @@ def zone_body(config, zone):
             or DEFAULT_TEMPLATE)
 
 
-def render(config, zone, tokens, window):
+def format_gates(config):
+    gates = config.get("gates")
+    if not gates:
+        return "(none configured — set \"gates\" in .claude/lastcall.json)"
+    if isinstance(gates, str):
+        gates = [gates]
+    return "\n".join("       %s" % str(gate) for gate in gates)
+
+
+def render(config, zone, tokens, window, transcript=None):
     percent = (tokens * 100.0) / window
     values = {
         "percent": percent,
@@ -596,6 +620,12 @@ def render(config, zone, tokens, window):
         "at": zone["at"],
         "relay": RELAY_SCRIPT,
         "setup": os.path.abspath(__file__),
+        "gates": format_gates(config),
+        # The assistant's own raw transcript. This is what makes "audit the
+        # handoff against what actually happened" a real instruction rather
+        # than a pious one: it can read the file instead of trusting the
+        # memory that is, by definition, running out.
+        "transcript": transcript or "(this session's transcript)",
     }
     header = (
         "LAST CALL — %s. {percent:.0f}%% of the context window is in use "
@@ -718,7 +748,8 @@ def handle_stop(config, payload):
         write_state(config, session_id, state)
         return 0  # already said this; do not repeat it every turn
 
-    message = render(config, zone, tokens, window)
+    message = render(config, zone, tokens, window,
+                     transcript=payload.get("transcript_path"))
     reason = None
     if zone.get("block") and config.get("mode") == "block_once":
         reason = ("Context has reached the %s zone — write the handoff before "
@@ -855,7 +886,7 @@ def setup(argv):
                       for n, ok in tools.items()))
 
     window = ask(
-        "1/3  How big is this project's context window?",
+        "1/4  How big is this project's context window?",
         [("1", "200,000 tokens — standard"),
          ("2", "1,000,000 tokens — extended"),
          ("3", "work it out automatically (needs the bundled status line)")],
@@ -872,7 +903,7 @@ def setup(argv):
                      [n for n, ok in tools.items() if not ok]
                      + ([] if has_git_repo else ["this is not a git repository"])))
     relay = ask(
-        "2/3  Hand over to a fresh session automatically when context runs low?",
+        "2/4  Hand over to a fresh session automatically when context runs low?",
         [("y", "yes — write a handoff, then spawn a successor in tmux"),
          ("n", "no  — just warn me; the session ends there")],
         relay_default,
@@ -889,7 +920,7 @@ def setup(argv):
     if relay == "y":
         existing["template"] = RELAY_TEMPLATE
         verify = ask_text(
-            "3/3  What command proves this project's environment is actually up?",
+            "3/4  What command proves this project's environment is actually up?",
             "The successor runs this FIRST and must not start work until it "
             "passes.\n  Examples: 'npm test', 'make dev && curl -sf "
             "localhost:3000/health'.\n  Leave blank to fill in later.")
@@ -915,6 +946,14 @@ def setup(argv):
         if not has_git_repo:
             notes.append("MISSING: %s is not a git repository — the relay "
                          "refuses to spawn without one" % root)
+
+        gates = ask_text(
+            "4/4  What must PASS before this project hands over?",
+            "Tests, linters, a review gate — comma separated. The wrap-up shows\n"
+            "  these to the assistant so it cannot hand over unverified work.\n"
+            "  Examples: 'npm test, npm run lint'. Leave blank to fill in later.")
+        if gates:
+            existing["gates"] = [g.strip() for g in gates.split(",") if g.strip()]
 
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)

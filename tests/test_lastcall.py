@@ -860,3 +860,62 @@ class TestSetupRecommendations(TempCase):
         self.assertIn("make check", rendered)
         self.assertIn("2026-08-19", rendered)
         self.assertNotIn("{verify_block}", rendered)
+
+
+class TestGatesAndTranscript(TempCase):
+    """The wrap-up has to name the project's gates and point at the raw
+    transcript, or "verify before handing over" stays a pious instruction."""
+
+    def test_unset_gates_say_so_rather_than_rendering_empty(self):
+        self.assertIn("none configured", cg.format_gates(self.config()))
+
+    def test_gates_are_listed_one_per_line(self):
+        text = cg.format_gates(self.config(gates=["npm test", "npm run lint"]))
+        self.assertIn("npm test", text)
+        self.assertIn("npm run lint", text)
+        self.assertEqual(len(text.strip().split("\n")), 2)
+
+    def test_a_single_gate_string_is_accepted(self):
+        self.assertIn("make check", cg.format_gates(self.config(gates="make check")))
+
+    def test_gates_from_environment_as_json(self):
+        os.environ["LASTCALL_GATES"] = json.dumps(["pytest -q"])
+        self.addCleanup(os.environ.pop, "LASTCALL_GATES", None)
+        config = cg.load_config({"cwd": self.dir})
+        self.assertIn("pytest -q", cg.format_gates(config))
+
+    def test_transcript_path_reaches_the_template(self):
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w") as fh:
+            fh.write("audit against {transcript}")
+        config = self.config(template=path)
+        message = cg.render(config, cg.resolve_zones(config)[0],
+                            150_000, 200_000, transcript="/tmp/session.jsonl")
+        self.assertIn("/tmp/session.jsonl", message)
+
+    def test_transcript_placeholder_degrades_without_a_path(self):
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w") as fh:
+            fh.write("audit against {transcript}")
+        config = self.config(template=path)
+        message = cg.render(config, cg.resolve_zones(config)[0], 150_000, 200_000)
+        self.assertNotIn("{transcript}", message)
+
+    def test_shipped_relay_template_renders_every_placeholder(self):
+        template = os.path.join(ROOT, "plugins", "lastcall", "templates",
+                                "handoff-relay.md")
+        config = self.config(template=template, gates=["make test"])
+        message = cg.render(config, cg.resolve_zones(config)[0], 150_000,
+                            200_000, transcript="/tmp/s.jsonl")
+        for leftover in ("{relay}", "{gates}", "{transcript}", "{percent}"):
+            self.assertNotIn(leftover, message, leftover)
+        self.assertIn("make test", message)
+        self.assertIn("/tmp/s.jsonl", message)
+
+    def test_relay_template_covers_the_full_sequence(self):
+        with open(os.path.join(ROOT, "plugins", "lastcall", "templates",
+                               "handoff-relay.md")) as handle:
+            text = handle.read().lower()
+        for step in ("update", "gates", "audit", "commit", "hand over",
+                     "subagent", "teammate", "workflow", "no user prompt"):
+            self.assertIn(step, text, step)

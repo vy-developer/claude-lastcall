@@ -11,13 +11,16 @@
     {"name": "closing", "at": 85, "block": true, "message": "Closing time. Finish the handoff, commit, stop."}
   ],
 
+  "_comment_gates": "Commands that must pass before handing over — tests, linters, a review gate. Surfaced to the assistant as {gates} in your wrap-up template. Nothing here is executed by the hook: running your test suite at Stop time would hang the session.",
+  "gates": null,
+
   "_comment_window": "The one thing Last Call will not guess. null means 'use an exact source or stay silent'. Set it to 200000 or 1000000 if you are not using the bundled status line.",
   "context_window_tokens": null,
 
   "_comment_mode": "block_once holds the stop a single time at red so the handoff actually gets written. advisory never blocks.",
   "mode": "block_once",
 
-  "_comment_template": "Path to your own wrap-up instructions, absolute or relative to the project. Placeholders: {percent} {tokens} {window} {remaining} {band}",
+  "_comment_template": "Path to your own wrap-up instructions, absolute or relative to the project. Placeholders: {percent} {tokens} {window} {remaining} {zone} {gates} {transcript} {relay}",
   "template": null,
 
   "include_output_tokens": false,

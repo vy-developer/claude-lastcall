@@ -108,12 +108,17 @@ class TestPreconditions(RelayCase):
                             env_extra={"LASTCALL_DIRTY_BASELINE": "README.md"})
         self.assertEqual(result.returncode, 0, result.stdout.decode())
 
-    def test_refuses_a_non_git_directory(self):
+    def test_a_non_git_directory_is_no_longer_refused_outright(self):
+        """Changed deliberately: git is how the handoff is verified durable, not
+        a requirement to hand over at all. A plain directory now proceeds with a
+        loud warning, and fails only for a real reason — here, no handoff."""
         plain = os.path.join(self.tmp, "plain")
         os.makedirs(plain)
         result = self.relay(plain, "--dry-run")
         self.assertEqual(result.returncode, 1)
-        self.assertIn(b"not a git worktree", result.stdout)
+        self.assertNotIn(b"not a git worktree", result.stdout)
+        self.assertIn(b"no handoff files", result.stdout)
+        self.assertIn(b"not a git repository", result.stdout)
 
     def test_refuses_when_tmux_is_missing(self):
         os.remove(os.path.join(self.bin, "tmux"))
@@ -305,3 +310,137 @@ class TestWorkspaceTrust(RelayCase):
         result = self.relay(repo, "--dry-run")
         self.assertEqual(result.returncode, 0, result.stdout.decode())
         self.assertIn(b"could not read", result.stdout)
+
+
+@posix_only
+class TestConfigResolution(RelayCase):
+    """Where the config lives and which repo to hand over are DIFFERENT
+    questions. Deriving one from the other meant a session run from a parent
+    directory holding two repos read no config at all — and because
+    remote_control defaults to on, the dry run still printed "remote control:
+    on" and looked correct. Reported from real use."""
+
+    def parent_layout(self, config):
+        parent = os.path.join(self.tmp, "workspace")
+        os.makedirs(os.path.join(parent, ".claude"))
+        repo = self.repo("frontend")
+        os.rename(repo, os.path.join(parent, "frontend"))
+        repo = os.path.join(parent, "frontend")
+        config.setdefault("repo", repo)
+        with open(os.path.join(parent, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"relay": config}, fh)
+        return parent, repo
+
+    def run_from(self, cwd, *args):
+        env = dict(os.environ)
+        env["PATH"] = self.bin + os.pathsep + env["PATH"]
+        env["HOME"] = self.tmp
+        env.pop("TMUX_PANE", None)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        with open(os.path.join(self.tmp, ".claude.json"), "w") as handle:
+            json.dump({"projects": {}}, handle)
+        return subprocess.run(["bash", RELAY, "--dry-run", "--trust"] + list(args),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              env=env, cwd=cwd)
+
+    def test_config_is_found_by_walking_up_from_the_working_directory(self):
+        parent, repo = self.parent_layout(
+            {"name_prefix": "amos", "skip_permissions": True})
+        result = self.run_from(parent)
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        out = result.stdout.decode()
+        self.assertIn("workspace/.claude/lastcall.json", out)
+        self.assertIn("permissions: SKIPPED", out)
+        self.assertRegex(out, r"successor:\s+amos-")
+
+    def test_repo_can_come_from_the_config(self):
+        parent, repo = self.parent_layout({"name_prefix": "amos"})
+        result = self.run_from(parent)
+        self.assertIn("repo: %s" % repo, result.stdout.decode())
+
+    def test_config_dir_flag_wins(self):
+        parent, repo = self.parent_layout({"name_prefix": "fromparent"})
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(os.path.join(elsewhere, ".claude"))
+        with open(os.path.join(elsewhere, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"relay": {"repo": repo, "name_prefix": "fromflag"}}, fh)
+        result = self.run_from(parent, "--config-dir", elsewhere)
+        self.assertRegex(result.stdout.decode(), r"successor:\s+fromflag-")
+
+    def test_config_beside_the_repo_still_works(self):
+        """Backwards compatibility with the layout the old code assumed."""
+        repo = self.repo()
+        os.makedirs(os.path.join(repo, ".claude"))
+        with open(os.path.join(repo, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"relay": {"name_prefix": "besiderepo"}}, fh)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True,
+                       stdout=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-qm", "cfg"], cwd=repo, check=True,
+                       stdout=subprocess.DEVNULL)
+        result = self.run_from(self.tmp, "--repo", repo)
+        self.assertRegex(result.stdout.decode(), r"successor:\s+besiderepo-")
+
+    def test_no_config_anywhere_still_runs_on_defaults(self):
+        repo = self.repo()
+        result = self.run_from(self.tmp, "--repo", repo)
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertIn("<none found>", result.stdout.decode())
+
+
+@posix_only
+class TestGitIsOptional(RelayCase):
+    """Requiring a git worktree turned "I cannot verify this" into "you may not
+    proceed". A session run from a plain directory — the common case when one
+    session owns several repos — could not hand over at all."""
+
+    def plain_dir(self, name="workspace"):
+        path = os.path.join(self.tmp, name)
+        os.makedirs(os.path.join(path, "docs", "handoff"))
+        os.makedirs(os.path.join(path, ".claude"))
+        with open(os.path.join(path, "docs", "handoff", "2026-08-19.md"), "w") as fh:
+            fh.write("next steps\n")
+        with open(os.path.join(path, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"relay": {"name_prefix": "plain"}}, fh)
+        return path
+
+    def run_from(self, cwd, *args):
+        env = dict(os.environ)
+        env["PATH"] = self.bin + os.pathsep + env["PATH"]
+        env["HOME"] = self.tmp
+        env.pop("TMUX_PANE", None)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        with open(os.path.join(self.tmp, ".claude.json"), "w") as handle:
+            json.dump({"projects": {}}, handle)
+        return subprocess.run(["bash", RELAY, "--dry-run", "--trust"] + list(args),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              env=env, cwd=cwd)
+
+    def test_a_plain_directory_can_hand_over(self):
+        path = self.plain_dir()
+        result = self.run_from(path)
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertRegex(result.stdout.decode(), r"successor:\s+plain-")
+
+    def test_it_says_loudly_what_it_could_not_verify(self):
+        result = self.run_from(self.plain_dir())
+        out = result.stdout.decode()
+        self.assertIn("not a git repository", out)
+        self.assertIn("SKIPPED", out)
+
+    def test_running_from_the_directory_needs_no_flags(self):
+        """The obvious case: hand over the folder you are sitting in."""
+        path = self.plain_dir()
+        result = self.run_from(path)
+        self.assertIn("repo: %s" % path, result.stdout.decode())
+
+    def test_require_git_restores_the_strict_behaviour(self):
+        result = self.run_from(self.plain_dir(), "--require-git")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"not a git worktree", result.stdout)
+
+    def test_a_git_repo_still_enforces_the_committed_handoff_rule(self):
+        """Making git optional must not weaken the guarantee where git exists."""
+        repo = self.repo(commit=False)
+        result = self.run_from(self.tmp, "--repo", repo)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"not committed", result.stdout)

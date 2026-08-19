@@ -34,7 +34,7 @@ import string
 import sys
 import time
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # --------------------------------------------------------------------------
 # Defaults. Every one of these is overridable by config file or environment.
@@ -922,24 +922,33 @@ def handover_status(config):
     """
     import shutil
 
+    # EVERY body the session could be shown, not the first one found. Zones sort
+    # ascending, so stopping at the first readable template only ever inspected
+    # the lowest zone — which is deliberately an alarm and deliberately has no
+    # relay in it. A project whose RED zone invoked the relay perfectly well was
+    # reported as NOT SET UP. Reported from real use; the relay was working.
     template = config.get("template")
-    body = None
+    bodies = []
     if template:
-        body = read_template(config, template)
-    zone_templates = [z.get("template") for z in resolve_zones(config)]
-    for zone_template in zone_templates:
-        if zone_template and not body:
-            body = read_template(config, zone_template)
+        bodies.append(read_template(config, template))
+    for zone in resolve_zones(config):
+        if zone.get("template"):
+            bodies.append(read_template(config, zone["template"]))
+        if zone.get("message"):
+            bodies.append(zone["message"])
+    bodies = [b for b in bodies if b]
 
-    # "{relay}" counts: it is the placeholder that BECOMES the relay path at
-    # render time. Checking only for the resolved path reported a correctly
-    # configured project as broken, which is the exact false alarm this
-    # section exists to avoid.
-    wired = bool(body and ("{relay}" in body
-                           or RELAY_SCRIPT in body
-                           or "handoff.sh" in body))
+    def invokes_relay(text):
+        # "{relay}" counts: it is the placeholder that BECOMES the relay path at
+        # render time. Checking only for the resolved path reported a correctly
+        # configured project as broken.
+        return ("{relay}" in text or RELAY_SCRIPT in text
+                or "handoff.sh" in text)
+
+    wired = any(invokes_relay(b) for b in bodies)
+    body = bodies[0] if bodies else None
     checks = {
-        "template configured": bool(template or any(zone_templates)),
+        "template configured": bool(bodies),
         "template invokes the relay": wired,
         "relay script present": os.path.isfile(RELAY_SCRIPT),
         "tmux on PATH": bool(shutil.which("tmux")),

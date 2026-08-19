@@ -1073,3 +1073,40 @@ class TestPruneOwnership(TempCase):
         os.utime(path, (old, old))
         cg.prune_state(self.config())
         self.assertTrue(os.path.exists(path))
+
+
+class TestHandoverAcrossZones(TempCase):
+    """Reported from real use: a project whose RED zone invoked the relay was
+    reported NOT SET UP, because the check stopped at the first readable
+    template and zones sort ascending — so it only ever inspected yellow, which
+    deliberately has no relay in it."""
+
+    def layout(self, yellow_text, red_text):
+        for name, text in (("winddown.md", yellow_text), ("wrapup.md", red_text)):
+            with open(os.path.join(self.dir, name), "w") as fh:
+                fh.write(text)
+        return self.config(zones=[
+            {"name": "yellow", "at": 40,
+             "template": os.path.join(self.dir, "winddown.md")},
+            {"name": "red", "at": 55, "block": True,
+             "template": os.path.join(self.dir, "wrapup.md")},
+        ])
+
+    def test_relay_in_the_last_zone_is_found(self):
+        config = self.layout("ease off, nothing about handing over",
+                             "full wrap-up, finally: bash {relay}")
+        ready, checks = cg.handover_status(config)
+        self.assertTrue(checks["template invokes the relay"])
+        self.assertTrue(ready)
+
+    def test_relay_in_no_zone_is_still_reported_missing(self):
+        config = self.layout("ease off", "wrap up, but never hand over")
+        _ready, checks = cg.handover_status(config)
+        self.assertFalse(checks["template invokes the relay"])
+
+    def test_an_inline_zone_message_counts(self):
+        config = self.config(zones=[
+            {"name": "yellow", "at": 40, "message": "ease off"},
+            {"name": "red", "at": 55, "message": "run bash {relay} now"}])
+        _ready, checks = cg.handover_status(config)
+        self.assertTrue(checks["template invokes the relay"])

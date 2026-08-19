@@ -12,7 +12,9 @@
 # template, so the assistant runs it as the last step of winding down. See
 # templates/handoff-relay.md.
 #
-# Requires: bash, git, tmux, python3, and the `claude` CLI.
+# Requires: bash, tmux, python3 and the `claude` CLI. Git is optional — with
+# it, the handoff is verified committed before anything is spawned; without it,
+# that check is skipped loudly.
 #
 # Exit codes: 0 successor up and working
 #             1 precondition failure (nothing was spawned)
@@ -39,19 +41,29 @@ DRY_RUN=0
 SKIP_PERMISSIONS=${LASTCALL_SKIP_PERMISSIONS:-0}
 REMOTE_CONTROL=${LASTCALL_REMOTE_CONTROL:-1}
 TRUST=0
+REQUIRE_GIT=${LASTCALL_REQUIRE_GIT:-0}
+GIT_BIN=${GIT_BIN:-git}
 NEW=""
 
 usage() {
     cat <<'EOF'
 usage: handoff.sh [options]
 
-  --repo <path>          repository to hand over (default: $CLAUDE_PROJECT_DIR,
-                         else the git toplevel of the working directory)
+  --repo <path>          repository to hand over. Default: "repo" in
+                         .claude/lastcall.json, else $CLAUDE_PROJECT_DIR, else
+                         the git toplevel of the working directory
+  --config-dir <path>    where to read .claude/lastcall.json from. Default:
+                         $CLAUDE_PROJECT_DIR, else the nearest ancestor of the
+                         working directory that has one. This is NOT the same
+                         question as --repo: one session can own several repos
   --handoff <path>       use this handoff instead of the newest
   --handoff-dir <path>   where handoffs live, repo-relative (default docs/handoff)
   --allow-dirty          spawn even though the tree has uncommitted work
   --no-remote-control    do not pass --remote-control (on by default, names the
                          successor so you can reach it from anywhere)
+  --require-git          refuse unless the directory is a git worktree. Off by
+                         default: without git the committed-handoff check is
+                         skipped and said so, rather than blocking the handover
   --trust                record this folder as trusted in ~/.claude.json. Claude
                          Code asks once per directory and skip-permissions does
                          NOT cover it; without trust the successor never acts.
@@ -73,6 +85,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --repo)         REPO=${2:?--repo needs a path}; shift 2 ;;
+        --config-dir)   CONFIG_DIR=${2:?--config-dir needs a path}; shift 2 ;;
         --handoff)      HANDOFF=${2:?--handoff needs a path}; shift 2 ;;
         --handoff-dir)  HANDOFF_DIR=${2:?--handoff-dir needs a path}; shift 2 ;;
         --allow-dirty)  ALLOW_DIRTY=1; shift ;;
@@ -80,6 +93,7 @@ while [ $# -gt 0 ]; do
         --no-skip-permissions) SKIP_PERMISSIONS=0; shift ;;
         --no-remote-control) REMOTE_CONTROL=0; shift ;;
         --trust)        TRUST=1; shift ;;
+        --require-git)  REQUIRE_GIT=1; shift ;;
         --timeout)      TIMEOUT=${2:?--timeout needs seconds}; shift 2 ;;
         --dry-run)      DRY_RUN=1; shift ;;
         -h|--help)      usage; exit 0 ;;
@@ -107,22 +121,48 @@ for var in TIMEOUT SETTLE; do
 done
 [ "$TIMEOUT" -gt 0 ] || { echo "TIMEOUT must be at least 1 second" >&2; exit 1; }
 
-# Resolve the repo before anything else needs it.
-if [ -z "$REPO" ]; then
-    REPO=${CLAUDE_PROJECT_DIR:-}
-fi
-if [ -z "$REPO" ]; then
-    REPO=$(git rev-parse --show-toplevel 2>/dev/null || true)
-fi
-[ -n "$REPO" ] || { echo "cannot work out which repo to hand over — pass --repo" >&2; exit 1; }
+# ------------------------------------------------------- config, then repo
+# ORDER MATTERS. The config says which repo to hand over, so the config has to
+# be found WITHOUT knowing the repo.
+#
+# This used to derive the config path from $REPO, which conflated two different
+# questions: where the user's config lives, and which repository to hand over.
+# They are the same directory only when a session owns exactly one repo. A
+# session run from a parent directory holding two repos read no config at all
+# and silently used defaults — and because remote_control defaults to on, the
+# dry run still printed "remote control: on" and looked like the config had
+# applied. Reported from real use. A default that matches the value you were
+# trying to set is how a broken config path looks like a working one.
+find_config_dir() {
+    if [ -n "${LASTCALL_CONFIG_DIR:-}" ]; then
+        printf '%s' "$LASTCALL_CONFIG_DIR"; return
+    fi
+    if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/.claude/lastcall.json" ]; then
+        printf '%s' "$CLAUDE_PROJECT_DIR"; return
+    fi
+    # Walk up from the working directory, the same way the hook's project_dir()
+    # does, because CLAUDE_PROJECT_DIR is not set in a plain shell.
+    local dir; dir=$(pwd -P)
+    while :; do
+        [ -f "$dir/.claude/lastcall.json" ] && { printf '%s' "$dir"; return; }
+        [ "$dir" = "/" ] && break
+        dir=$(dirname "$dir")
+    done
+    [ -n "${CLAUDE_PROJECT_DIR:-}" ] && { printf '%s' "$CLAUDE_PROJECT_DIR"; return; }
+    printf '%s' ""
+}
 
-# One config file drives the whole thing. Anything already set on the command
-# line or in the environment wins, so a flag still overrides the file.
-CONFIG="$REPO/.claude/lastcall.json"
-if [ -f "$CONFIG" ] && command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+CONFIG_DIR=${CONFIG_DIR:-$(find_config_dir)}
+CONFIG=""
+[ -n "$CONFIG_DIR" ] && CONFIG="$CONFIG_DIR/.claude/lastcall.json"
+
+read_config() {
+    [ -f "$CONFIG" ] || return 0
+    command -v "$PYTHON_BIN" >/dev/null 2>&1 || return 0
     while IFS='=' read -r key value; do
         [ -n "$key" ] || continue
         case "$key" in
+            repo)              [ -z "$REPO" ] && REPO=$value ;;
             handoff_dir)       [ "$HANDOFF_DIR" = "docs/handoff" ] && HANDOFF_DIR=$value ;;
             name_prefix)       [ -z "$NAME_PREFIX" ] && NAME_PREFIX=$value ;;
             dirty_baseline)    [ -z "$DIRTY_BASELINE" ] && DIRTY_BASELINE=$value ;;
@@ -139,7 +179,7 @@ except Exception:
     raise SystemExit(0)
 if not isinstance(relay, dict):
     raise SystemExit(0)
-for key in ("handoff_dir", "name_prefix", "dirty_baseline"):
+for key in ("repo", "handoff_dir", "name_prefix", "dirty_baseline"):
     if relay.get(key):
         print("%s=%s" % (key, relay[key]))
 for key in ("skip_permissions", "remote_control"):
@@ -148,6 +188,34 @@ for key in ("skip_permissions", "remote_control"):
 PY
 )
 EOF
+}
+
+read_config
+
+# Now the repo: --repo wins, then the config, then the session's project dir,
+# then the git worktree containing the working directory.
+if [ -z "$REPO" ]; then
+    REPO=${CLAUDE_PROJECT_DIR:-}
+fi
+if [ -z "$REPO" ]; then
+    REPO=$(git rev-parse --show-toplevel 2>/dev/null || true)
+fi
+# Last resorts, in order: where the config was found, then simply here. Running
+# from the directory you want handed over is the obvious case, and it used to
+# fail with "cannot work out which repo" purely because that directory was not
+# a git worktree.
+[ -z "$REPO" ] && [ -n "$CONFIG_DIR" ] && REPO=$CONFIG_DIR
+[ -z "$REPO" ] && REPO=$(pwd -P)
+[ -n "$REPO" ] || { echo "cannot work out which directory to hand over — pass --repo" >&2; exit 1; }
+
+# Backwards compatibility: a project that put its config beside the repo rather
+# than beside the session still works.
+if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then
+    if [ -f "$REPO/.claude/lastcall.json" ]; then
+        CONFIG_DIR=$REPO
+        CONFIG="$REPO/.claude/lastcall.json"
+        read_config
+    fi
 fi
 
 # Fall back rather than abort. An unwritable log directory is a reason to log
@@ -189,8 +257,28 @@ say "lastcall handoff starting (pid $$)"
 # ---------------------------------------------------------------- preconditions
 # Nothing is created until every one of these has passed.
 
-[ -d "$REPO" ] || die 1 "no such repo: $REPO"
-git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die 1 "not a git worktree: $REPO"
+[ -d "$REPO" ] || die 1 "no such directory: $REPO"
+
+# Git is how this checks that the handoff is DURABLE — that it will still exist
+# after this session ends. That is the load-bearing rule of the whole design.
+#
+# But it is the check, not the requirement. A directory that is not a git
+# worktree still has the handoff sitting on disk, which is durable enough for
+# plenty of people, and refusing to hand over at all was the wrong trade: it
+# turned "I cannot verify this" into "you may not proceed". Say what cannot be
+# verified, and carry on. --require-git restores the strict behaviour.
+HAVE_GIT=1
+if ! git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
+    if [ "$REQUIRE_GIT" -eq 1 ]; then
+        die 1 "not a git worktree: $REPO (--require-git is set)"
+    fi
+    HAVE_GIT=0
+    say "WARNING: $REPO is not a git repository."
+    say "         Cannot verify the handoff is committed, so that check is"
+    say "         SKIPPED. The file exists on disk; if something deletes it,"
+    say "         the successor gets nothing. Use a git repo, or accept this."
+fi
+say "config: ${CONFIG:-<none found>}"
 say "repo: $REPO"
 
 if [ -z "$HANDOFF" ]; then
@@ -203,6 +291,7 @@ say "handoff: $HANDOFF"
 # The load-bearing ordering property of the whole design: never spawn before the
 # handoff is durable. A rule you must remember at the moment your context is
 # exhausted is a rule that gets skipped, so it is a precondition, not a habit.
+if [ "$HAVE_GIT" -eq 1 ]; then
 handoff_status=$(git -C "$REPO" status --porcelain -- "$HANDOFF") \
     || die 1 "cannot read git status for the handoff — refusing to assume it is committed"
 if [ -n "$handoff_status" ]; then
@@ -214,8 +303,9 @@ if [ -n "$handoff_status" ]; then
     fi
     die 1 "handoff is not committed: $HANDOFF — commit it first"
 fi
+fi
 
-if [ "$ALLOW_DIRTY" -eq 0 ]; then
+if [ "$HAVE_GIT" -eq 1 ] && [ "$ALLOW_DIRTY" -eq 0 ]; then
     # --ignore-submodules=dirty drops submodule *content* noise while still
     # reporting a real gitlink bump.
     dirty=$(git -C "$REPO" status --porcelain --ignore-submodules=dirty)
@@ -246,10 +336,12 @@ if [ "$ALLOW_DIRTY" -eq 0 ]; then
 fi
 
 # Odd, not wrong — say so and carry on.
-git -C "$REPO" symbolic-ref -q HEAD >/dev/null || say "WARNING: detached HEAD"
-for m in rebase-merge rebase-apply MERGE_HEAD; do
-    [ -e "$(git -C "$REPO" rev-parse --git-dir)/$m" ] && say "WARNING: $m in progress"
-done
+if [ "$HAVE_GIT" -eq 1 ]; then
+    git -C "$REPO" symbolic-ref -q HEAD >/dev/null || say "WARNING: detached HEAD"
+    for m in rebase-merge rebase-apply MERGE_HEAD; do
+        [ -e "$(git -C "$REPO" rev-parse --git-dir)/$m" ] && say "WARNING: $m in progress"
+    done
+fi
 
 # Claude Code asks "is this a project you trust?" the first time it opens a
 # directory, and --dangerously-skip-permissions does NOT bypass it. A successor
@@ -305,6 +397,7 @@ case "$trust_state" in
     *)        say "trust: could not read ~/.claude.json — continuing" ;;
 esac
 
+command -v "$GIT_BIN" >/dev/null 2>&1 || HAVE_GIT=0
 command -v "$TMUX_BIN" >/dev/null 2>&1 || die 1 "tmux not found: $TMUX_BIN — the relay is tmux-only"
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die 1 "python3 not found: $PYTHON_BIN"
 command -v "$CLAUDE_BIN" >/dev/null 2>&1 || die 1 "claude CLI not found: $CLAUDE_BIN"

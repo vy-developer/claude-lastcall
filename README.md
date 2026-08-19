@@ -135,7 +135,7 @@ to start from a commented version.
 | `red_percent` | `55` | escalate once here |
 | `zones` | `null` | your own zones instead of the two above — see below |
 | `gates` | `null` | commands that must pass before handing over; shown to the assistant as `{gates}` |
-| `relay` | `null` | relay settings: `handoff_dir`, `name_prefix`, `remote_control`, `skip_permissions` |
+| `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions` |
 | `context_window_tokens` | `null` | window size; `null` means "work it out or stay quiet" |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
 | `template` | `null` | path to your own wrap-up instructions |
@@ -433,6 +433,9 @@ What the relay does, in order, refusing to continue at the first failure:
   load-bearing rule: a rule you must remember at the moment your context is
   exhausted is a rule that gets skipped, so it is a precondition, not a habit
 - refuses on a dirty tree unless you pass `--allow-dirty`
+- **works without git.** Git is how "committed" is checked, not a requirement
+  to hand over. A plain directory proceeds with a loud warning saying the
+  durability check was skipped; `--require-git` restores the strict behaviour
 - spawns the successor in tmux, seeded with the handoff
 - **waits until the successor makes a real tool call** before reporting
   success. An assistant turn is not proof of work — a refusal is an assistant
@@ -461,9 +464,15 @@ The relay reads its settings from `relay` in `.claude/lastcall.json`, so you
 configure it once and never pass flags:
 
 ```json
-{ "relay": { "handoff_dir": "docs/handoff", "name_prefix": "myproject",
-             "remote_control": true, "skip_permissions": true } }
+{ "relay": { "repo": "/path/to/the/repo", "handoff_dir": "docs/handoff",
+             "name_prefix": "myproject", "remote_control": true,
+             "skip_permissions": true } }
 ```
+
+The config is found by walking up from your working directory, so a session
+run from a parent folder that owns several repos still finds it — **where the
+config lives and which repo to hand over are different questions**, and `repo`
+answers the second one.
 
 `remote_control` passes `--remote-control <session-name>`, so you can reach the
 successor from anywhere rather than only from the pane it was born in.
@@ -472,7 +481,7 @@ the chain continue while you are away — it means the successor runs tools
 without asking, so `setup` asks before enabling it and `--no-skip-permissions`
 turns it off for one run.
 
-Requires `bash`, `git`, `tmux`, `python3` and the `claude` CLI. The guard needs
+Requires `bash`, `tmux`, `python3` and the `claude` CLI. Git is optional. The guard needs
 none of these — if you are on Windows, or you just want the alarm, ignore this
 whole section.
 
@@ -482,7 +491,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-152 tests, standard library only, no network. They cover the failure modes that
+165 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

@@ -10,6 +10,29 @@ user has answered them. Ask them conversationally, a few at a time, not as a
 wall of text. Recommend an answer for each and say why in one line. If the user
 says "you decide", take your recommendation and tell them what you chose.
 
+## If this project is ALREADY configured, do not start over
+
+Read `.claude/lastcall.json` first. If it exists, this is an update, not a
+first run. Show the user what is currently set, in a short table, and then ask
+only about what is missing or what they want changed. Do not re-ask settled
+questions.
+
+Pay attention to what the current config does NOT use, because those are
+usually the things worth offering:
+
+- still on percentages and a `context_window_tokens`? Offer absolute
+  `at_tokens` thresholds instead, which remove the window question entirely.
+- no `min_window_tokens`? Offer it if they ever run a smaller-window model.
+- no `model` / `fallback_model` under `relay`? Offer to pick which model drives
+  the successor and what it falls back to.
+- no `verifier`, but `codex` or `gemini` is on PATH? Offer it.
+
+Then also check for workarounds that newer versions made unnecessary, and offer
+to remove them: a duplicated `lastcall.json` inside a subdirectory (the relay
+now finds the config by walking up from the working directory), and a git
+repository created only to satisfy the old requirement that the target be a
+worktree (git is now optional and its absence is merely reported).
+
 ## First, gather facts — do not ask the user things you can check
 
 Run these and use the answers to shape your questions:

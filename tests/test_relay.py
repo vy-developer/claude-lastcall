@@ -500,3 +500,49 @@ class TestModelSelection(RelayCase):
         out = self.relay(repo, "--dry-run").stdout.decode()
         self.assertIn("model:", out)
         self.assertIn("fallback: sonnet", out)
+
+
+@posix_only
+class TestPredecessorRetirement(RelayCase):
+    """Asking the successor to kill the predecessor is an instruction to a
+    model, not a guarantee. Doing it in the launcher is — but only ever AFTER
+    the successor has proved itself, and only detached, because this script
+    runs inside the session it retires."""
+
+    def configured(self, **relay):
+        repo = self.repo()
+        os.makedirs(os.path.join(repo, ".claude"))
+        with open(os.path.join(repo, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"relay": relay}, fh)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True,
+                       stdout=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-qm", "cfg"], cwd=repo, check=True,
+                       stdout=subprocess.DEVNULL)
+        return repo
+
+    def test_off_by_default(self):
+        out = self.relay(self.repo(), "--dry-run").stdout.decode()
+        self.assertIn("this session stays", out)
+
+    def test_config_turns_it_on(self):
+        out = self.relay(self.configured(kill_predecessor=True),
+                         "--dry-run").stdout.decode()
+        self.assertIn("after the successor proves itself", out)
+
+    def test_flag_can_turn_it_back_off(self):
+        out = self.relay(self.configured(kill_predecessor=True), "--dry-run",
+                         "--no-kill-predecessor").stdout.decode()
+        self.assertIn("this session stays", out)
+
+    def test_the_successor_is_not_also_asked_to_kill(self):
+        """Two things racing to kill one session is confusing to read and
+        pointless. When the launcher does it, the prompt says so instead."""
+        out = self.relay(self.configured(kill_predecessor=True),
+                         "--dry-run").stdout.decode()
+        self.assertNotIn("tmux kill-session", out)
+
+    def test_nothing_is_retired_on_a_dry_run(self):
+        out = self.relay(self.configured(kill_predecessor=True),
+                         "--dry-run").stdout.decode()
+        self.assertNotIn("retiring", out)
+        self.assertIn("nothing spawned", out)

@@ -98,7 +98,9 @@ confirmation.
    overloaded. Ask whether the successor runs UNATTENDED (`skip_permissions`),
    be explicit that it then runs tools without asking, and never enable it
    without a clear yes. `remote_control` is on by default so you can reach the
-   successor later.
+   successor later. Offer `kill_predecessor` too — it retires the old session
+   once the successor has proved itself, and without it every handover leaves
+   another session running forever.
 
 If the user does not want Last Call in this project, write
 `{"disabled": true}` to `.claude/lastcall.json` and stop. That silences it

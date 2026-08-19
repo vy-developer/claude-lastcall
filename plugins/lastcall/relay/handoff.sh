@@ -41,6 +41,15 @@ DRY_RUN=0
 SKIP_PERMISSIONS=${LASTCALL_SKIP_PERMISSIONS:-0}
 REMOTE_CONTROL=${LASTCALL_REMOTE_CONTROL:-1}
 TRUST=0
+# "the flag said 0" and "nobody said anything" are different states, and a
+# boolean cannot hold both. Without these, --no-kill-predecessor set the value
+# to 0 and the config then set it straight back to 1, because the guard could
+# only ask whether the value was empty.
+SKIP_PERMISSIONS_SET=""
+REMOTE_CONTROL_SET=""
+KILL_PREDECESSOR_SET=""
+KILL_PREDECESSOR=${LASTCALL_KILL_PREDECESSOR:-0}
+KILL_DELAY=${LASTCALL_KILL_DELAY:-5}
 MODEL=${LASTCALL_MODEL:-}
 FALLBACK_MODEL=${LASTCALL_FALLBACK_MODEL:-}
 REQUIRE_GIT=${LASTCALL_REQUIRE_GIT:-0}
@@ -71,6 +80,10 @@ usage: handoff.sh [options]
   --fallback-model <list>  comma-separated models to fall back to when the
                          first is overloaded or unavailable. Claude Code does
                          the switching; this only passes it through
+  --kill-predecessor     retire THIS session once the successor has proved
+                         itself. Detached and delayed, because this script runs
+                         inside the session it kills. Off by default
+  --no-kill-predecessor  keep this session alive (the default)
   --trust                record this folder as trusted in ~/.claude.json. Claude
                          Code asks once per directory and skip-permissions does
                          NOT cover it; without trust the successor never acts.
@@ -96,11 +109,13 @@ while [ $# -gt 0 ]; do
         --handoff)      HANDOFF=${2:?--handoff needs a path}; shift 2 ;;
         --handoff-dir)  HANDOFF_DIR=${2:?--handoff-dir needs a path}; shift 2 ;;
         --allow-dirty)  ALLOW_DIRTY=1; shift ;;
-        --skip-permissions) SKIP_PERMISSIONS=1; shift ;;
-        --no-skip-permissions) SKIP_PERMISSIONS=0; shift ;;
-        --no-remote-control) REMOTE_CONTROL=0; shift ;;
+        --skip-permissions) SKIP_PERMISSIONS=1; SKIP_PERMISSIONS_SET=1; shift ;;
+        --no-skip-permissions) SKIP_PERMISSIONS=0; SKIP_PERMISSIONS_SET=1; shift ;;
+        --no-remote-control) REMOTE_CONTROL=0; REMOTE_CONTROL_SET=1; shift ;;
         --model)        MODEL=${2:?--model needs a name}; shift 2 ;;
         --fallback-model) FALLBACK_MODEL=${2:?--fallback-model needs a name}; shift 2 ;;
+        --kill-predecessor)    KILL_PREDECESSOR=1; KILL_PREDECESSOR_SET=1; shift ;;
+        --no-kill-predecessor) KILL_PREDECESSOR=0; KILL_PREDECESSOR_SET=1; shift ;;
         --trust)        TRUST=1; shift ;;
         --require-git)  REQUIRE_GIT=1; shift ;;
         --timeout)      TIMEOUT=${2:?--timeout needs seconds}; shift 2 ;;
@@ -182,8 +197,9 @@ read_config() {
             handoff_dir)       [ "$HANDOFF_DIR" = "docs/handoff" ] && HANDOFF_DIR=$value || true ;;
             name_prefix)       [ -z "$NAME_PREFIX" ] && NAME_PREFIX=$value || true ;;
             dirty_baseline)    [ -z "$DIRTY_BASELINE" ] && DIRTY_BASELINE=$value || true ;;
-            skip_permissions)  [ -z "${LASTCALL_SKIP_PERMISSIONS:-}" ] && SKIP_PERMISSIONS=$value || true ;;
-            remote_control)    [ -z "${LASTCALL_REMOTE_CONTROL:-}" ] && REMOTE_CONTROL=$value || true ;;
+            skip_permissions)  [ -z "${LASTCALL_SKIP_PERMISSIONS:-}$SKIP_PERMISSIONS_SET" ] && SKIP_PERMISSIONS=$value || true ;;
+            remote_control)    [ -z "${LASTCALL_REMOTE_CONTROL:-}$REMOTE_CONTROL_SET" ] && REMOTE_CONTROL=$value || true ;;
+            kill_predecessor)  [ -z "${LASTCALL_KILL_PREDECESSOR:-}$KILL_PREDECESSOR_SET" ] && KILL_PREDECESSOR=$value || true ;;
         esac
     done <<EOF
 $("$PYTHON_BIN" - "$CONFIG" <<'PY'
@@ -199,7 +215,7 @@ for key in ("repo", "handoff_dir", "name_prefix", "dirty_baseline",
             "model", "fallback_model"):
     if relay.get(key):
         print("%s=%s" % (key, relay[key]))
-for key in ("skip_permissions", "remote_control"):
+for key in ("skip_permissions", "remote_control", "kill_predecessor"):
     if key in relay:
         print("%s=%d" % (key, 1 if relay[key] else 0))
 PY
@@ -460,7 +476,12 @@ PROJECTS_DIR=${PROJECTS_DIR:-$HOME/.claude/projects/$SLUG}
 TRANSCRIPT="$PROJECTS_DIR/$SID.jsonl"
 
 PROMPT="read $HANDOFF and follow it."
-if [ -n "$OLD" ]; then
+if [ -n "$OLD" ] && [ "$KILL_PREDECESSOR" -eq 1 ]; then
+    # The launcher retires the predecessor itself, so do not also ask the
+    # successor to. Two things racing to kill the same session is confusing to
+    # read in a transcript and pointless.
+    PROMPT="$PROMPT The previous session is being retired automatically once you have started work; you do not need to kill it."
+elif [ -n "$OLD" ]; then
     # $OLD is quoted inside the instruction: the successor pastes this into a
     # shell, and a session name it cannot quote is a command it cannot run.
     PROMPT="$PROMPT When you have finished the first step and confirmed the environment is up: commit a checkpoint recording that it passed and carrying anything you have changed (use --allow-empty if nothing has), and only then run: tmux kill-session -t $(printf '%q' "$OLD") . If that first step fails, do NOT kill it — report instead."
@@ -489,6 +510,7 @@ say "session-id: $SID"
 say "transcript: $TRANSCRIPT"
 say "permissions: $([ "$SKIP_PERMISSIONS" -eq 1 ] && echo "SKIPPED (unattended)" || echo "normal (successor may block on a prompt)")"
 say "remote control: $([ "$REMOTE_CONTROL" -eq 1 ] && echo "on as $NEW" || echo off)"
+say "retire old:  $([ "$KILL_PREDECESSOR" -eq 1 ] && echo "yes, after the successor proves itself" || echo "no, this session stays")"
 say "model:      ${MODEL:-<session default>}${FALLBACK_MODEL:+  fallback: $FALLBACK_MODEL}"
 say "argv:       $CMD"
 
@@ -584,6 +606,23 @@ if ! pane_alive; then
 fi
 
 say "OK — $NEW is up and working"
-[ -n "$OLD" ] && say "it will retire $OLD once it has proved its first step and committed a checkpoint"
+
+if [ -n "$OLD" ] && [ "$KILL_PREDECESSOR" -eq 1 ]; then
+    # Detached, and only from here: this point is reached only after the
+    # successor made a real tool call AND survived the settle, so the session
+    # being retired is being replaced by one proven to work.
+    #
+    # It has to be detached because this script is RUNNING INSIDE the session
+    # it is about to kill. Killing it inline would take the launcher with it
+    # mid-write: no final log, no exit status, no report. The delay lets this
+    # process finish reporting and exit first.
+    say "retiring $OLD in ${KILL_DELAY}s (successor proved itself)"
+    setsid nohup sh -c \
+        "sleep $KILL_DELAY; $TMUX_BIN kill-session -t '=$OLD' >/dev/null 2>&1" \
+        >/dev/null 2>&1 </dev/null &
+    disown 2>/dev/null || true
+elif [ -n "$OLD" ]; then
+    say "it will retire $OLD once it has proved its first step and committed a checkpoint"
+fi
 report_respawn
 exit 0

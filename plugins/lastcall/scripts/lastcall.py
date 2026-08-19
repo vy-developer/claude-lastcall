@@ -34,7 +34,7 @@ import string
 import sys
 import time
 
-__version__ = "1.6.2"
+__version__ = "1.7.0"
 
 # --------------------------------------------------------------------------
 # Defaults. Every one of these is overridable by config file or environment.
@@ -268,6 +268,9 @@ What you need to settle:
    - "skip_permissions": UNATTENDED. Be explicit that this means the successor
      runs tools without asking, and never enable it without a clear yes.
    - "remote_control": on by default, so you can reach the successor later.
+   - "kill_predecessor": retire the OLD session once the successor has proved
+     itself. Off by default. Recommend it whenever the handover is unattended,
+     because otherwise every handover leaves another session running forever.
 
 Then write .claude/lastcall.json in THIS project only — never a parent, never
 ~/.claude. Write the wrap-up template and point "template" at it. If handover

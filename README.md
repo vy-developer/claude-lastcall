@@ -137,7 +137,7 @@ to start from a commented version.
 | `min_window_tokens` | `null` | stay silent when the window is smaller than this |
 | `gates` | `null` | commands that must pass before handing over; shown to the assistant as `{gates}` |
 | `verifier` | `null` | a second model asked to check the work; shown as `{verifier}` |
-| `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions`, `model`, `fallback_model` |
+| `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions`, `model`, `fallback_model`, `kill_predecessor` |
 | `context_window_tokens` | `null` | window size; `null` means "work it out or stay quiet" |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
 | `template` | `null` | path to your own wrap-up instructions |
@@ -550,9 +550,14 @@ What the relay does, in order, refusing to continue at the first failure:
 - **waits until the successor makes a real tool call** before reporting
   success. An assistant turn is not proof of work — a refusal is an assistant
   turn. A process sitting on a permission dialog cannot make a tool call
-- never kills anything. The successor is *asked*, in its prompt, to retire the
-  predecessor once it has proved its first step and committed. A failed spawn
-  therefore leaves the old session alive to report the failure
+- **retires the predecessor**, if you set `"kill_predecessor": true` — and only
+  after the successor has made a real tool call and survived the settle. The
+  kill is detached and delayed a few seconds, because the launcher is running
+  *inside* the session it is retiring: killing it inline would take the
+  launcher with it mid-write, leaving no log and no exit status. Off by
+  default; without it the successor is merely *asked* to retire the
+  predecessor, which is an instruction to a model, not a guarantee. Either way
+  a failed spawn leaves the old session alive to report the failure
 
 ```
 bash plugins/lastcall/relay/handoff.sh --dry-run     # resolve everything, spawn nothing
@@ -614,7 +619,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-212 tests, standard library only, no network. They cover the failure modes that
+217 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

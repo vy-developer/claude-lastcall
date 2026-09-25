@@ -17,7 +17,23 @@ SCRIPT_PATH = os.path.join(PLUGIN_ROOT, "scripts", "lastcall.py")
 # and relay/handoff.sh is a deprecated shim that execs relay.py.
 RELAY_SCRIPT = os.path.join(PLUGIN_ROOT, "lib", "lastcall_core", "relay.py")
 RELAY_LAUNCHER = os.path.join(PLUGIN_ROOT, "bin", "lastcall")
-RELAY_COMMAND = "python3 %s relay" % shlex.quote(RELAY_LAUNCHER)
+
+
+def shell_quote(word, nt=None):
+    """``word`` quoted for the shell a person will paste it into. POSIX gets
+    shlex.quote; Windows gets double quotes, and only when needed, because
+    cmd.exe keeps single quotes as part of the path (Windows paths cannot
+    contain a double quote, so there is nothing to escape)."""
+    if nt is None:
+        nt = os.name == "nt"
+    if not nt:
+        return shlex.quote(word)
+    if word and not any(c in word for c in " \t&|<>^()%!;,'"):
+        return word
+    return '"%s"' % word
+
+
+RELAY_COMMAND = "python3 %s relay" % shell_quote(RELAY_LAUNCHER)
 
 
 def lastcall_linked(which=None):
@@ -48,7 +64,7 @@ def cli_command(subcommand, which=None):
         return "lastcall %s" % subcommand
     word = subcommand.split(" ", 1)[0]
     target = SCRIPT_PATH if word in ("setup", "doctor") else RELAY_LAUNCHER
-    return "python3 %s %s" % (shlex.quote(target), subcommand)
+    return "python3 %s %s" % (shell_quote(target), subcommand)
 LEGACY_RELAY_SCRIPT = os.path.join(PLUGIN_ROOT, "relay", "handoff.sh")
 _SHELL_BEFORE_RELAY = re.compile(r"\b(?:bash|sh)[ \t]+(?=\{relay\})")
 RELAY_TEMPLATE = os.path.join(PLUGIN_ROOT, "templates", "handoff-relay.md")

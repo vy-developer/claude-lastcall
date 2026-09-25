@@ -594,7 +594,9 @@ class TestHooksMethod(Sandbox):
     def test_reinstall_replaces_every_older_command_shape(self):
         old_shapes = [
             '/usr/local/bin/python3 "/old/place/plugins/lastcall/scripts/lastcall.py" Stop',
-            'python3 "%s" SessionStart' % HOOK_SCRIPT,
+            # Not the interpreter the reinstall below pins (python3): on
+            # Windows that command is exactly what gets written back.
+            'python "%s" SessionStart' % HOOK_SCRIPT,
             '"C:\\Program Files\\Python\\python.exe" "C:\\lc\\scripts\\lastcall.py" PostToolUse',
             'sh "/old/place/plugins/lastcall/scripts/lastcall-hook" PostCompact',
             "LASTCALL_PYTHON='/x y/python3' sh \"%s\" UserPromptSubmit" % HOOK_LAUNCHER,
@@ -942,6 +944,16 @@ class TestCommandHints(unittest.TestCase):
                          "python3 %s doctor" % HOOK_SCRIPT)
         self.assertEqual(render.cli_command("install --codex", other),
                          "python3 %s install --codex" % LAUNCHER)
+
+    def test_paths_are_quoted_for_the_shell_of_the_platform(self):
+        """CI finding: shlex.quote gave Windows users 'D:\\...\\lastcall.py',
+        which cmd.exe reads as a path that starts with a quote."""
+        from lastcall_core.render import shell_quote
+        self.assertEqual(shell_quote(r"D:\a\lastcall.py", nt=True), r"D:\a\lastcall.py")
+        self.assertEqual(shell_quote(r"C:\Program Files\lc\lastcall.py", nt=True),
+                         r'"C:\Program Files\lc\lastcall.py"')
+        self.assertEqual(shell_quote("/opt/lc/lastcall.py", nt=False), "/opt/lc/lastcall.py")
+        self.assertEqual(shell_quote("/my lc/lastcall.py", nt=False), "'/my lc/lastcall.py'")
 
     def test_the_session_texts_use_it(self):
         from lastcall_core import render

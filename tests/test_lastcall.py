@@ -1618,8 +1618,9 @@ class TestProjectIsolation(TempCase):
         """~/.claude always exists, so it matched every directory without a
         .claude/ of its own and they all resolved to $HOME."""
         home, project = self.fake_home()
-        self.addCleanup(os.environ.__setitem__, "HOME", os.environ["HOME"])
-        os.environ["HOME"] = home
+        for name in ("HOME", "USERPROFILE"):   # expanduser reads USERPROFILE on Windows
+            self.addCleanup(_restore_env, name, os.environ.get(name))
+            os.environ[name] = home
         project_env = os.environ.pop("CLAUDE_PROJECT_DIR", None)
         if project_env is not None:
             self.addCleanup(os.environ.__setitem__, "CLAUDE_PROJECT_DIR",
@@ -1628,7 +1629,7 @@ class TestProjectIsolation(TempCase):
 
     def test_setup_never_writes_into_the_home_claude_directory(self):
         home, project = self.fake_home()
-        env = dict(os.environ, HOME=home)
+        env = dict(os.environ, HOME=home, USERPROFILE=home)
         env.pop("CLAUDE_PROJECT_DIR", None)
         for cwd in (project, home):
             subprocess.run([sys.executable, SCRIPT, "setup"], input=b"",
@@ -2023,9 +2024,9 @@ class TestConfigSearch(TempCase):
         self.write(os.path.join(home, ".claude", "lastcall.json"), {"red_percent": 99})
         project = os.path.join(home, "code", "project")
         os.makedirs(project)
-        original = os.environ.get("HOME")
-        os.environ["HOME"] = home
-        self.addCleanup(_restore_env, "HOME", original)
+        for name in ("HOME", "USERPROFILE"):   # expanduser reads USERPROFILE on Windows
+            self.addCleanup(_restore_env, name, os.environ.get(name))
+            os.environ[name] = home
         config = lc_config.load_config({"cwd": project}, self.env)
         self.assertEqual(config["_project_dir"], project)
         self.assertIsNone(config["_config_path"])

@@ -797,7 +797,10 @@ class TestLibraryHygiene(unittest.TestCase):
             origin = getattr(spec, "origin", None) or ""
             if origin in ("built-in", "frozen"):
                 return True
-            stdlib = sysconfig.get_paths()["stdlib"]
+            # normcase: on Windows the spec says ...\\lib\\argparse.py where
+            # sysconfig says ...\\Lib
+            stdlib = os.path.normcase(sysconfig.get_paths()["stdlib"])
+            origin = os.path.normcase(origin)
             return origin.startswith(stdlib) and "site-packages" not in origin
         for folder, _dirs, files in os.walk(package):
             for name in files:

@@ -11,7 +11,7 @@ import re
 import shutil
 import sys
 
-from .config import PROJECT_CONFIG_NAME, find_project_config, home_dir, load_config
+from .config import PROJECT_CONFIG_NAME, find_project_config, is_home, load_config
 from .doctor import handover_status
 from .render import (HANDOFF_SKELETON, ONBOARDING_QUESTIONS, ONBOARDING_RECOMMENDED,
                      RELAY_TEMPLATE, WRAPUP_STEPS, cli_command)
@@ -136,7 +136,7 @@ def setup(argv):
     # project_dir() never walks up TO home, but run from home itself, or with
     # CLAUDE_PROJECT_DIR pointing there, it still lands on it. A config there
     # would apply to everything below it; refuse rather than write it.
-    if os.path.realpath(root) == home_dir():
+    if is_home(root):
         print("Last Call setup refuses to configure your home directory:")
         print("  %s would apply to every directory below it, not to one" % target)
         print("  project. cd into the project you want to configure and run")

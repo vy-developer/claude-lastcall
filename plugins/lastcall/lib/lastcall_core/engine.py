@@ -34,7 +34,7 @@ import sys
 import time
 
 from .agents import detect_agent
-from .config import home_dir, load_config
+from .config import is_home, load_config
 from .render import (block_reason, compaction_message, onboarding_message,
                      render)
 from .state import (SessionState, mark_onboarded, note_permission_mode,
@@ -399,7 +399,7 @@ def on_session_start(agent, config, payload, env=None, out=None):
         # Installed but unconfigured still works (the defaults run), so this
         # is an offer, made once per project rather than every session.
         if (not config.get("_configured") and project
-                and os.path.realpath(project) != home_dir()
+                and not is_home(project)
                 and not was_onboarded(config, project)):
             messages.append(onboarding_message())
             onboard_project = project

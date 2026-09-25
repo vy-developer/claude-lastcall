@@ -157,6 +157,8 @@ def _env(env):
 
 
 def home_dir():
+    """The user's home: $HOME on POSIX, %USERPROFILE% on Windows (where
+    expanduser has ignored HOME since Python 3.8)."""
     return os.path.realpath(os.path.expanduser("~"))
 
 
@@ -183,9 +185,11 @@ def state_dir(config, env=None):
     return os.path.join(lastcall_home(env), "state")
 
 
-def _is_home(path):
+def is_home(path):
+    """``path`` is the home directory (case-insensitively where the file
+    system is: normcase)."""
     try:
-        return os.path.realpath(path) == home_dir()
+        return os.path.normcase(os.path.realpath(path)) == os.path.normcase(home_dir())
     except (OSError, ValueError):
         return False
 
@@ -212,7 +216,7 @@ def find_project_config(start):
     ``start`` that holds a project config, skipping $HOME. (None, []) when
     there is none."""
     for path in _walk_up(start):
-        if _is_home(path):
+        if is_home(path):
             continue
         found = project_configs_in(path)
         if found:
@@ -241,7 +245,7 @@ def project_dir(payload=None, env=None):
     if directory:
         return directory
     for path in _walk_up(start):
-        if _is_home(path):
+        if is_home(path):
             continue
         # os.path.exists, not isdir: in a git worktree or submodule .git is a
         # file pointing at the real repository.

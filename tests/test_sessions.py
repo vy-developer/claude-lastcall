@@ -251,9 +251,10 @@ class TestHelpers(unittest.TestCase):
     def test_homes_follow_env(self):
         with mock.patch.dict(os.environ, {"LASTCALL_CLAUDE_HOME": "/x/c",
                                           "LASTCALL_CODEX_HOME": "/x/o"}):
-            self.assertEqual(S.claude_home(), "/x/c")
-            self.assertEqual(S.codex_home(), "/x/o")
-            self.assertEqual(S.claude_home("/y"), "/y")
+            # abspath: on Windows "/x/c" is "D:\\x\\c", on the current drive
+            self.assertEqual(S.claude_home(), os.path.abspath("/x/c"))
+            self.assertEqual(S.codex_home(), os.path.abspath("/x/o"))
+            self.assertEqual(S.claude_home("/y"), os.path.abspath("/y"))
 
 
 class TestProjectRoot(Homes):

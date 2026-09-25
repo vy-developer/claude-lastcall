@@ -719,9 +719,16 @@ class TestPluginManifests(unittest.TestCase):
         for event, groups in hooks.items():
             for group in groups:
                 for hook in group["hooks"]:
+                    # Through the launcher, which finds a working Python
+                    # under a desktop app's minimal PATH.
                     self.assertEqual(
                         hook["command"],
-                        'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py" %s' % event)
+                        'sh "${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook" %s' % event)
+                    # Codex on Windows runs commandWindows instead (Claude
+                    # Code ignores the field).
+                    self.assertEqual(
+                        hook["commandWindows"],
+                        'py -3 "${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py" %s' % event)
         for event in ("PostToolUse", "UserPromptSubmit"):
             self.assertLessEqual(hooks[event][0]["hooks"][0]["timeout"], 5)
 

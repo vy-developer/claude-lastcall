@@ -296,6 +296,51 @@ def codex_surface(originator: Optional[str]) -> str:
     return "unknown"
 
 
+_NT_STILL_ACTIVE = 259                        # GetExitCodeProcess: still running
+_NT_QUERY_LIMITED_INFORMATION = 0x1000        # PROCESS_QUERY_LIMITED_INFORMATION
+_NT_ERROR_ACCESS_DENIED = 5
+
+
+def _pid_alive_nt(pid: int) -> bool:
+    """Windows: ask the kernel, never signal. os.kill(pid, 0) there sends
+    CTRL_C_EVENT (signal 0) to the pid's console process group."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except (ImportError, OSError, AttributeError):
+        return _pid_alive_tasklist(pid)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(_NT_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # Exists but belongs to someone we may not inspect: alive, like EPERM.
+        return ctypes.get_last_error() == _NT_ERROR_ACCESS_DENIED
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == _NT_STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _pid_alive_tasklist(pid: int) -> bool:
+    """Fallback when ctypes is unavailable: tasklist prints a CSV row for a
+    live pid and an INFO line otherwise."""
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", "PID eq %d" % pid, "/NH", "/FO", "CSV"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
+        ).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return ('"%d"' % pid) in out
+
+
 def pid_alive(pid) -> bool:
     try:
         pid = int(pid)
@@ -303,6 +348,8 @@ def pid_alive(pid) -> bool:
         return False
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _pid_alive_nt(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

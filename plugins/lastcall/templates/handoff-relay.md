@@ -41,18 +41,25 @@ your handoff with NO user prompt, so anything you leave out is lost.
 
   7. HAND OVER: run
 
-         bash {relay}
+         {relay}
 
-     It spawns the successor in tmux seeded with the newest handoff and waits
-     until that session has actually MADE A TOOL CALL before reporting success
-     — not merely that a process exists. Nothing is killed before then. After
-     that, THIS session is retired one of two ways: if "kill_predecessor" is
-     set, the launcher itself kills it a few seconds after reporting success;
-     otherwise the successor is ASKED, in its prompt, to retire it once it has
-     proved Step 0 and committed a checkpoint — an instruction, not a
-     guarantee. Either way, start nothing after the relay succeeds, and do not
-     assume this session will end.
+     It refuses unless the handoff is committed, then starts the successor
+     detached — Claude Code as a `claude --bg` session with Remote Control,
+     Codex through `codex app-server` so the thread shows in the Codex app —
+     seeded with the newest handoff, and reports success only once that
+     session has CHECKED IN from its own SessionStart hook, not merely because
+     a process exists. The successor is the same agent as you unless you add
+     `--agent codex` or `--agent claude`, which hands over ACROSS agents
+     (the handoff is plain Markdown either way). Nothing is killed before the
+     check-in. After it, THIS session is retired only if "kill_predecessor"
+     is set (or you pass --retire-predecessor): the relay then retires it a
+     few seconds after reporting success — but never a desktop-app session.
+     Otherwise nobody retires it and it stays open; the successor is NOT
+     ASKED to stop it. Either way, start nothing after the relay succeeds,
+     and do not assume this session will end.
 
-     Non-zero exit means THIS session is still alive and must report the
-     failure; the launcher prints where its log ended up. Add --skip-permissions
-     if the successor should run unattended without permission prompts.
+     Exit 1 means nothing was spawned; exit 2 means a successor was started
+     but never checked in. Either way THIS session is still alive and must
+     report the failure. Add --dry-run to see every command first, and
+     --skip-permissions if the successor should run unattended without
+     permission prompts.

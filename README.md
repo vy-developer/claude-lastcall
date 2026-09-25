@@ -26,7 +26,7 @@ decision — you judge what still fits.
 - [Tell it how big your window is](#tell-it-how-big-your-window-is)
 - [Configuration](#configuration) · [zones](#your-own-zones) · [gates and the self-audit](#the-wrap-up-sequence)
 - [What the assistant actually receives](#what-the-assistant-actually-receives)
-- [The relay](#the-relay-optional-unix--tmux-only) · [Why 40% and 55%](#why-40-and-55)
+- [The relay](#the-relay-optional-unix) · [Why 40% and 55%](#why-40-and-55)
 
 ## Install
 
@@ -92,9 +92,10 @@ lastcall.py doctor <transcript.jsonl>
                        report its agent, window, zone and compaction
 lastcall.py --version
 
-relay/handoff.sh --dry-run    resolve everything, spawn nothing
-relay/handoff.sh              hand over to a fresh session
-relay/handoff.sh --help       every flag
+lastcall relay --dry-run      resolve everything, spawn nothing
+lastcall relay                hand over to a fresh session (same agent)
+lastcall relay --agent codex  hand over to Codex (or --agent claude)
+lastcall relay --help         every flag
 ```
 
 `doctor` is the answer to "is this thing even working?". It never guesses: if
@@ -197,7 +198,7 @@ to start from a commented version.
 | `min_window_tokens` | `null` | stay silent when the window is smaller than this |
 | `gates` | `null` | commands that must pass before handing over; shown to the assistant as `{gates}` |
 | `verifier` | `null` | a second model asked to check the work; shown as `{verifier}` |
-| `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions`, `model`, `fallback_model`, `kill_predecessor` |
+| `relay` | `null` | relay settings: `agent`, `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions`, `model`, `fallback_model`, `codex_model`, `codex_mode`, `kill_predecessor`, `kill_delay`, `require_git` |
 | `context_window_tokens` | `null` | window size; `null` means "work it out" (Codex reports it; on Claude Code see above) |
 | `windows` | `null` | model → window map, e.g. `{"claude-opus-5-5": 1000000, "claude-sonnet-*": 200000}` — see [Tell it how big your window is](#tell-it-how-big-your-window-is) |
 | `fallback_window_tokens` | `200000` | Claude Code with no exact window: assume this one, warn but never block; `null` stays silent instead |
@@ -220,7 +221,7 @@ to your project, so write it down and point at it:
 ```
 
 Placeholders: `{percent}` `{tokens}` `{window}` `{remaining}` `{zone}`, and
-`{relay}` for the bundled relay script, `{gates}` for your gate commands,
+`{relay}` for the bundled relay command, `{gates}` for your gate commands,
 `{verifier}` for your second-opinion command, and
 `{transcript}` for this session's raw transcript path. See
 [`example-wrapup.md`](plugins/lastcall/templates/example-wrapup.md), or
@@ -473,8 +474,8 @@ python3 <plugin>/scripts/lastcall.py setup
 ```
 
 Six questions, each with a recommendation based on what is actually present
-on your machine — whether this is a git repository, whether tmux, git and the
-`claude` CLI are on `PATH`:
+on your machine — whether this is a git repository, whether git and the
+`claude` or `codex` CLI are on `PATH`:
 
 ```
 1/6  How big is this project's context window (Claude Code)?
@@ -484,9 +485,9 @@ on your machine — whether this is a git repository, whether tmux, git and the
      window, so this only matters for Claude Code sessions.
 
 2/6  Hand over to a fresh session automatically when context runs low?
-  y) yes — write a handoff, then spawn a successor in tmux  <- recommended
+  y) yes — write a handoff, then start a successor session  <- recommended
   n) no  — just warn me; the session ends there
-     tmux, git and the claude CLI are all present.
+     git and the claude/codex CLI are present.
 
 3/6  What command proves this project's environment is actually up?
   The successor runs this FIRST and must not start work until it passes.
@@ -520,9 +521,8 @@ automatic handover: READY
   ok   template configured
   ok   template invokes the relay
   ok   relay script present
-  ok   tmux on PATH
   ok   git on PATH
-  ok   claude CLI on PATH
+  ok   claude or codex CLI on PATH
 ```
 
 **Handover is off until you do this,** and the tool says so rather than letting
@@ -603,126 +603,85 @@ decisions down is what keeps a chain of sessions moving in one direction.
 The rest is ordinary: what is done, what is next and where, how this repository
 expects work to be done. Keep only what changes what the next session does.
 
-## The relay (optional, Unix + tmux only)
+## The relay (optional, Unix)
 
 The guard tells the assistant to wrap up. The relay is what makes a session
-hand over to a fresh one and keep going without you.
+hand over to a fresh one and keep going without you — to **Claude Code or
+Codex**, with no tmux and no TTY needed, so a desktop-app session can hand over
+too.
 
-Nothing invokes it automatically — it is a script your wrap-up template tells
+Nothing invokes it automatically — it is a command your wrap-up template tells
 the assistant to run as its last step. The bundled template does exactly that:
 
 ```json
 { "template": "<plugin>/templates/handoff-relay.md" }
 ```
 
-The template's step 6 resolves the `{relay}` placeholder to the script's real
-path, so nothing needs hand-editing when the plugin updates.
+The template's step 7 resolves the `{relay}` placeholder to the real command,
+`python3 <plugin>/bin/lastcall relay`, so nothing needs hand-editing when the
+plugin updates. (A 1.x template that says `bash {relay}` still renders a
+runnable command.) The relay is
+[`plugins/lastcall/lib/lastcall_core/relay.py`](plugins/lastcall/lib/lastcall_core/relay.py);
+`lastcall relay` runs it.
 
 What the relay does, in order, refusing to continue at the first failure:
 
 - finds your newest handoff in `docs/handoff/` (configurable), skipping
   `TEMPLATE.md`, which is the shape of a handoff rather than one
-- **refuses to spawn while that handoff is uncommitted.** This is the
-  load-bearing rule: a rule you must remember at the moment your context is
-  exhausted is a rule that gets skipped, so it is a precondition, not a habit
+- **refuses to spawn while that handoff is uncommitted**, and names the newest
+  committed one you could use instead. This is the load-bearing rule: a rule
+  you must remember at the moment your context is exhausted is a rule that
+  gets skipped, so it is a precondition, not a habit
 - refuses on a dirty tree unless you pass `--allow-dirty`
 - **works without git.** Git is how "committed" is checked, not a requirement
   to hand over. A plain directory proceeds with a loud warning saying the
   durability check was skipped; `--require-git` restores the strict behaviour
-- spawns the successor in tmux, seeded with the handoff
-- **waits until the successor makes a real tool call** before reporting
-  success. An assistant turn is not proof of work — a refusal is an assistant
-  turn. A process sitting on a permission dialog cannot make a tool call
-- **retires the predecessor**, if you set `"kill_predecessor": true` — and only
-  after the successor has made a real tool call and survived the settle. The
-  kill is detached and delayed a few seconds, because the launcher is running
-  *inside* the session it is retiring: killing it inline would take the
-  launcher with it mid-write, leaving no log and no exit status. Whether the
-  kill succeeded is written to `retire-<successor>.log` beside the spawn log,
-  and if it cannot even be scheduled the launcher says so and prints the
-  command to do it by hand. Off by default; without it the successor is merely *asked* to retire the
-  predecessor, which is an instruction to a model, not a guarantee. Either way
-  a failed spawn leaves the old session alive to report the failure
+- names the successor `<prefix> · handoff N · <topic>` (prefix: the repo name;
+  topic: the handoff's first heading; N carries along the chain) and starts it
+  detached, seeded with `read <handoff> and follow it.`
+- **waits for the successor to check in** on a ledger,
+  `~/.lastcall/relay/<chain>.jsonl`, matched by chain + generation, before
+  reporting success — not merely that a process exists
+- **retires the predecessor**, if you set `"kill_predecessor": true` (or pass
+  `--retire-predecessor`) — and only after the check-in, detached and a few
+  seconds later, because the relay is running *inside* the session it retires.
+  A `--bg` session is ended with `claude stop <short>`, a tmux pane with
+  `tmux kill-session`, a plain CLI process with a delayed SIGTERM. A
+  desktop-app session is **never** killed: the relay says so. Whether the
+  retirement worked is written to the ledger (`retired` / `retire-failed`).
+  Off by default; a failed spawn always leaves the old session alive to
+  report the failure
 
 ```
-bash plugins/lastcall/relay/handoff.sh --dry-run     # resolve everything, spawn nothing
-bash plugins/lastcall/relay/handoff.sh               # hand over
-bash plugins/lastcall/relay/handoff.sh --no-skip-permissions # force prompts on
+lastcall relay --dry-run             # print every command, spawn nothing
+lastcall relay                       # hand over to the same agent
+lastcall relay --agent codex         # hand over from Claude Code to Codex
+lastcall relay --agent claude        # ... or from Codex to Claude Code
 ```
 
-Exit codes: `0` successor up and working, `1` precondition failure (nothing was
-spawned), `2` spawned but never proved itself.
+Exit codes: `0` successor checked in, `1` precondition failure (nothing was
+spawned), `2` spawned but never checked in.
 
-**Workspace trust.** Claude Code asks "is this a project you trust?" the first
-time it opens a directory, and `--dangerously-skip-permissions` does **not**
-bypass it. A successor spawned into an untrusted folder sits on that prompt
-forever: no tool call, no transcript, and a timeout that tells you nothing.
-The relay checks `~/.claude.json` before spawning and refuses with an
-actionable message, or records the trust for you with `--trust`.
-
-The relay reads its settings from `relay` in `.claude/lastcall.json` (it does
-not yet look in `.lastcall.json` or `~/.lastcall/config.json`), so you
-configure it once and never pass flags:
-
-```json
-{ "relay": { "repo": "/path/to/the/repo", "handoff_dir": "docs/handoff",
-             "name_prefix": "myproject", "remote_control": true,
-             "skip_permissions": true,
-             "model": "opus", "fallback_model": "fable,sonnet" } }
-```
-
-The config is found by walking up from your working directory, so a session
-run from a parent folder that owns several repos still finds it — **where the
-config lives and which repo to hand over are different questions**, and `repo`
-answers the second one.
-
-`model` decides which model drives the successor — `opus`, `fable`, `sonnet`, or
-a full model name. `fallback_model` takes a comma-separated list that Claude
-Code tries in turn when the first is overloaded or unavailable, so "run on
-fable, drop to opus when fable is full" is configuration, not logic:
-
-```json
-{ "relay": { "model": "fable", "fallback_model": "opus,sonnet" } }
-```
-
-The relay only passes these through; the switching is Claude Code's, which is
-why it can react to quota and availability that a hook cannot see.
-
-`remote_control` passes `--remote-control <session-name>`, so you can reach the
-successor from anywhere rather than only from the pane it was born in.
-`skip_permissions` passes `--dangerously-skip-permissions`, which is what lets
-the chain continue while you are away — it means the successor runs tools
-without asking, so `setup` asks before enabling it and `--no-skip-permissions`
-turns it off for one run.
-
-Requires `bash`, `tmux`, `python3` and the `claude` CLI. Git is optional. The guard needs
-none of these — if you are on Windows, or you just want the alarm, ignore this
-whole section.
-
-### Relay v2 (preview, not wired in yet)
-
-[`plugins/lastcall/lib/lastcall_core/relay.py`](plugins/lastcall/lib/lastcall_core/relay.py)
-is the terminal-free successor to `handoff.sh`. It hands over to **Claude Code
-or Codex** (`--agent claude|codex`), needs neither tmux nor a TTY (so a
-desktop-app session can hand over too), and refuses unless the handoff is
-committed. It proves the successor started by a **check-in** on a ledger,
-`~/.lastcall/relay/<chain>.jsonl`, matched by chain + generation rather than by
-guessing a transcript path. The hooks do not call it yet.
+**Which agent.** By default the successor is the agent running the
+predecessor (Claude Code if `CLAUDE_CODE_SESSION_ID` is set, Codex if its
+session variables are). `"agent"` in the config or `--agent` overrides that,
+which is a cross-agent handover: the handoff is plain Markdown either way.
 
 **Claude**: `claude --bg -n NAME --remote-control NAME --settings JSON PROMPT`.
 
-- No `--session-id`: `--bg` picks the id itself and ignores that flag. The
-  relay reads the short id from the `backgrounded · <short> · <name>` line
-  (falling back to `claude agents --json`)
+- No `--session-id`: `--bg` picks the id itself. The relay reads the short id
+  from the `backgrounded · <short> · <name>` line (falling back to
+  `claude agents --json`)
 - the inline `--settings` adds a SessionStart hook that runs `relay.py checkin`,
   which writes the session id and transcript path to the ledger
 - Remote Control is checked in `~/.claude/jobs/<short>/state.json`
   (`bridgeSessionId`), then in a `bridge-session` transcript entry, then in
-  `~/.claude/sessions`. If none is found, it prints `remote control did NOT connect`,
-  and `--require-remote-control` makes that exit 2
-- `claude --bg` will not start in a folder you have not trusted ("Workspace not
-  trusted"). Run `claude` once in the repo and accept the prompt. The relay
-  reports this and never edits `~/.claude.json`
+  `~/.claude/sessions`. If none is found it prints `remote control did NOT
+  connect`, and `--require-remote-control` makes that exit 2
+- **Workspace trust.** `claude --bg` will not start in a folder you have not
+  trusted ("Workspace not trusted"), and `--dangerously-skip-permissions` does
+  not cover it. Run `claude` once in the repo and accept the prompt. The relay
+  reports this as a precondition failure and never edits `~/.claude.json`
 
 **Codex**: `--codex-mode app` (the default) starts a detached runner
 (`relay.py codex-app-runner`) that drives `codex app-server` over stdio
@@ -734,30 +693,61 @@ Approval requests are declined, or accepted with `--skip-permissions`. If app
 mode fails before the turn starts, the relay falls back to `codex exec --json`
 and warns that the successor will not be listed (an empty thread is
 archived). `--codex-mode exec` picks that directly. `--codex-mode tmux` runs the
-TUI in a tmux session and is proven by a new rollout in the repo.
+TUI in a tmux session — the only mode that needs tmux.
 
-- **Names**: successors are called `<prefix> · handoff N · <topic>`, where the
-  prefix defaults to the repo name and the topic to the handoff's first
-  heading. N carries along the chain. Codex threads are named via
-  `thread/name/set`
-- **Retirement** is off unless you pass `--retire-predecessor`, and it only
-  happens after the check-in. A `--bg` session is ended with `claude stop <short>`,
-  a tmux pane with `tmux kill-session`, and a plain CLI process with a delayed
-  SIGTERM from a detached child (no `setsid` binary needed). A desktop-app
-  session is **never** killed: the relay says so and leaves it to you
+**The installed plugin checks in too.** Every successor carries
+`LASTCALL_RELAY_*` variables. With Last Call installed, its SessionStart hook
+sees them, checks in on the ledger for whatever mode started the session, and
+tells the successor in one line which generation it is and which handoff to
+read. A different session that merely inherited the variables (a verifier the
+successor runs, say) is recognised and left alone.
+
+**Configuration.** The relay reads the `relay` block of the same layered
+config as everything else — `~/.lastcall/config.json`, then the project's
+`.lastcall.json` (or `.lastcall/config.json`, `.claude/lastcall.json`,
+`.codex/lastcall.json`), then `LASTCALL_RELAY` — merged key by key, with flags
+winning over all of it. The project config is found by walking up from your
+working directory, so a session run from a parent folder that owns several
+repos still finds it: **where the config lives and which repo to hand over are
+different questions**, and `repo` answers the second one.
+
+```json
+{ "relay": { "repo": "/path/to/the/repo", "handoff_dir": "docs/handoff",
+             "name_prefix": "myproject", "remote_control": true,
+             "skip_permissions": true, "kill_predecessor": true,
+             "model": "opus", "fallback_model": "fable,sonnet" } }
+```
+
+`model` decides which model drives a Claude successor — `opus`, `fable`,
+`sonnet`, or a full model name (`codex_model` for Codex). `fallback_model`
+takes a comma-separated list that Claude Code tries in turn when the first is
+overloaded or unavailable, so "run on fable, drop to opus when fable is full"
+is configuration, not logic. The relay only passes these through.
+
+`remote_control` passes `--remote-control <name>`, so you can reach a Claude
+successor from anywhere. `skip_permissions` passes
+`--dangerously-skip-permissions` (Codex: full access, approvals accepted),
+which is what lets the chain continue while you are away — it means the
+successor runs tools without asking, so `setup` asks before enabling it and
+`--no-skip-permissions` turns it off for one run.
+
+**`relay/handoff.sh` is deprecated.** It is now a small POSIX-sh shim that
+prints a one-line notice and execs `relay.py`, mapping the 1.x flags
+(`--kill-predecessor` becomes `--retire-predecessor`; `--trust` is ignored)
+and environment variables (`LASTCALL_MODEL`, `LASTCALL_KILL_PREDECESSOR`, ...).
 
 What has been checked against real CLIs (Claude Code 2.1.281, Codex 0.153.4):
 Codex app mode end to end (source `vscode`, named, turn completed, listed by a
 default `thread/list`), the Claude `--bg` hook check-in, and `bridgeSessionId`
 in the job state of a `--bg` session. **Not verified live** (fake binaries
-only): the exec fallback, tmux mode and every retirement path. The Codex app
-sidebar and the `codex resume` picker have not been checked by eye. That they
-list the thread is inferred from its `vscode` source.
+only): the exec fallback, tmux mode, the plugin-hook check-in and every
+retirement path. The Codex app sidebar and the `codex resume` picker have not
+been checked by eye. That they list the thread is inferred from its `vscode`
+source.
 
-```
-python3 plugins/lastcall/lib/lastcall_core/relay.py --dry-run            # print every command
-python3 plugins/lastcall/lib/lastcall_core/relay.py --agent codex --dry-run
-```
+Requires `python3` and the `claude` or `codex` CLI. Git is optional. The guard
+needs none of these — if you are on Windows, or you just want the alarm,
+ignore this whole section.
 
 ## Tests
 
@@ -765,15 +755,15 @@ python3 plugins/lastcall/lib/lastcall_core/relay.py --agent codex --dry-run
 python3 -m unittest discover -s tests -v
 ```
 
-588 tests, standard library only, no network. They cover the failure modes that
+625 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.
 
 ## What this does not do
 
-The relay is Unix + tmux only, and off unless your template calls it. The
-guard itself has no such dependency and works anywhere Python does.
+The relay is Unix only, and off unless your template calls it. The guard
+itself has no such dependency and works anywhere Python does.
 
 ## Licence
 

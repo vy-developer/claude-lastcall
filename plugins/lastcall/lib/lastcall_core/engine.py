@@ -309,6 +309,23 @@ def on_measure(agent, config, payload, event, env=None, out=None):
     return 0
 
 
+RELAY_ENV = ("LASTCALL_RELAY_LEDGER", "LASTCALL_RELAY_CHAIN", "LASTCALL_RELAY_GENERATION")
+
+
+def relay_successor_note(agent, payload, env=None):
+    """A session the relay spawned (the LASTCALL_RELAY_* variables are set)
+    checks in on the relay's ledger from here, whatever started it, and gets a
+    short note saying which handoff to read. None otherwise. Fail-passive."""
+    env = os.environ if env is None else env
+    if not all(env.get(name) for name in RELAY_ENV):
+        return None
+    try:
+        from . import relay
+        return relay.successor_session_start(payload, env, agent.name)
+    except Exception:  # noqa: BLE001 - never break a session over the relay
+        return None
+
+
 def on_session_start(agent, config, payload, env=None, out=None):
     """Reset for a new conversation, keep state for a resumed one, re-arm and
     remind after a compaction, and offer onboarding once per project."""
@@ -318,6 +335,9 @@ def on_session_start(agent, config, payload, env=None, out=None):
     now = time.time()
     messages = []
     onboard_project = None
+    relay_note = relay_successor_note(agent, payload, env)
+    if relay_note:
+        messages.append(relay_note)
 
     if source == "resume":
         pass  # same conversation: a zone already announced stays announced

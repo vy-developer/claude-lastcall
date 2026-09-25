@@ -38,19 +38,19 @@ def handover_status(config):
     bodies = [b for b in bodies if b]
 
     def invokes_relay(text):
-        # "{relay}" counts: it is the placeholder that BECOMES the relay path.
-        return ("{relay}" in text or RELAY_SCRIPT in text
-                or "handoff.sh" in text)
+        # "{relay}" counts: it is the placeholder that BECOMES the relay command.
+        return ("{relay}" in text or RELAY_SCRIPT in text or "relay.py" in text
+                or "lastcall relay" in text or "handoff.sh" in text)
 
+    from .relay import readiness
     wired = any(invokes_relay(b) for b in bodies)
     checks = {
         "template configured": bool(bodies),
         "template invokes the relay": wired,
-        "relay script present": os.path.isfile(RELAY_SCRIPT),
-        "tmux on PATH": bool(shutil.which("tmux")),
-        "git on PATH": bool(shutil.which("git")),
-        "claude CLI on PATH": bool(shutil.which("claude")),
     }
+    # relay.py, git, and the successor's CLI (claude or codex); tmux only for
+    # codex_mode "tmux".
+    checks.update(readiness(config.get("relay"), shutil.which))
     ready = all(checks.values())
     return ready, checks
 

@@ -86,7 +86,10 @@ def setup(argv):
             existing = {}
 
     has_git_repo = os.path.isdir(os.path.join(root, ".git"))
-    tools = {name: bool(shutil.which(name)) for name in ("tmux", "git", "claude")}
+    # The relay (relay.py) needs git to prove the handoff is committed, and
+    # the successor's CLI: Claude Code or Codex, whichever runs the session.
+    tools = {"git": bool(shutil.which("git")),
+             "claude or codex": bool(shutil.which("claude") or shutil.which("codex"))}
     relay_possible = has_git_repo and all(tools.values())
 
     def ask(question, options, default, why=None, accept_number=False):
@@ -146,14 +149,14 @@ def setup(argv):
             "1": 200_000, "2": 1_000_000, "3": None}[window]
 
     relay_default = "y" if relay_possible else "n"
-    relay_why = ("tmux, git and the claude CLI are all present."
+    relay_why = ("git and the claude/codex CLI are present."
                  if relay_possible else
                  "Not available here: " + ", ".join(
                      [n for n, ok in tools.items() if not ok]
                      + ([] if has_git_repo else ["this is not a git repository"])))
     relay = ask(
         "2/6  Hand over to a fresh session automatically when context runs low?",
-        [("y", "yes — write a handoff, then spawn a successor in tmux"),
+        [("y", "yes — write a handoff, then start a successor session"),
          ("n", "no  — just warn me; the session ends there")],
         relay_default,
         why=relay_why)
@@ -189,17 +192,17 @@ def setup(argv):
         except OSError as error:
             notes.append("could NOT create %s (%s)" % (handoff_dir, error))
         installers = {
-            "tmux": "sudo apt install tmux   (or: brew install tmux)",
             "git": "sudo apt install git     (or: brew install git)",
-            "claude": "see https://claude.com/claude-code for the CLI",
+            "claude or codex": "the Claude Code CLI (https://claude.com/claude-code) "
+                               "or the Codex CLI (npm i -g @openai/codex)",
         }
         for name, ok in tools.items():
             if not ok:
                 notes.append("MISSING: %s — install it with: %s"
                              % (name, installers[name]))
         if not has_git_repo:
-            notes.append("MISSING: %s is not a git repository — the relay "
-                         "refuses to spawn without one" % root)
+            notes.append("NOTE: %s is not a git repository — the relay cannot "
+                         "verify the handoff is committed, and says so" % root)
 
         gates = ask_text(
             "4/6  What must PASS before this project hands over?",

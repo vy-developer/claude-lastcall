@@ -92,7 +92,7 @@ if not os.environ.get("FAKE_QUIET_BG"):
 # approval request mid-turn, FAKE_APP_HANG=1 never completes the turn until
 # it is interrupted. Every client message is appended to FAKE_RPC.
 FAKE_CODEX = r'''#!%(python)s
-import json, os, sys, time
+import json, os, subprocess, sys, time
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as fh:
     fh.write(json.dumps({"argv": args, "cwd": os.getcwd()}) + "\n")
@@ -112,8 +112,18 @@ if args[:1] == ["exec"]:
         print("boom")
         sys.exit(3)
     tid = "01a0d9b2-0000-7000-8000-%%012d" %% os.getpid()
-    rollout(tid, "exec")
-    print(json.dumps({"type": "thread.started", "thread_id": tid}), flush=True)
+    path = rollout(tid, "exec")
+    if os.environ.get("FAKE_PLUGIN_HOOK"):
+        # The installed Last Call plugin's SessionStart hook, as Codex runs it.
+        payload = json.dumps({"session_id": tid, "transcript_path": path, "cwd": os.getcwd(),
+                              "hook_event_name": "SessionStart", "source": "startup"})
+        out = subprocess.run([sys.executable, os.environ["FAKE_PLUGIN_HOOK"], "SessionStart"],
+                             input=payload, stdout=subprocess.PIPE,
+                             universal_newlines=True).stdout
+        with open(os.environ["FAKE_HOOK_OUT"], "w") as fh:
+            fh.write(out)
+    if not os.environ.get("FAKE_NO_THREAD_EVENT"):
+        print(json.dumps({"type": "thread.started", "thread_id": tid}), flush=True)
     time.sleep(0.2)
     print(json.dumps({"type": "turn.completed"}), flush=True)
     sys.exit(0)
@@ -183,6 +193,9 @@ for line in sys.stdin:
     else:
         send({"id": message["id"], "result": {}})
 '''
+
+
+HOOK_SCRIPT = os.path.join(ROOT, "plugins", "lastcall", "scripts", "lastcall.py")
 
 
 def scrubbed_environ():
@@ -795,6 +808,310 @@ class TestCheckinAndRetirement(RelayV2Case):
         self.assertEqual(relay.plan_retirement({"agent": "codex"},
                                                find_codex=lambda: None)["method"], "none")
         self.assertEqual(relay.plan_retirement({})["method"], "none")
+
+
+
+class TestLayeredConfig(RelayV2Case):
+    """relay.py reads its settings through lastcall_core.config.load_config,
+    so the relay block lives wherever the rest of Last Call's config does."""
+
+    def write(self, path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(data, fh)
+
+    def committed(self, repo, rel, data):
+        self.write(os.path.join(repo, rel), data)
+        subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "cfg"], check=True)
+
+    def test_global_config_is_read(self):
+        self.write(os.path.join(self.tmp, ".lastcall", "config.json"),
+                   {"relay": {"name_prefix": "globalprefix", "model": "opus"}})
+        result = self.relay(self.repo(), "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("globalprefix · handoff 1", result.stdout)
+        self.assertIn("--model opus", result.stdout)
+        self.assertIn(os.path.join(".lastcall", "config.json"), result.stdout)
+
+    def test_project_relay_block_merges_over_the_global_one_key_by_key(self):
+        self.write(os.path.join(self.tmp, ".lastcall", "config.json"),
+                   {"relay": {"name_prefix": "globalprefix", "model": "opus"}})
+        repo = self.repo()
+        self.committed(repo, ".lastcall.json", {"relay": {"model": "sonnet"}})
+        result = self.relay(repo, "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("globalprefix · handoff 1", result.stdout)
+        self.assertIn("--model sonnet", result.stdout)
+
+    def test_every_project_config_name_is_read(self):
+        for index, rel in enumerate((".lastcall.json", os.path.join(".lastcall", "config.json"),
+                                     os.path.join(".claude", "lastcall.json"),
+                                     os.path.join(".codex", "lastcall.json"))):
+            name = "p%d" % index
+            repo = self.repo(name=name)
+            self.committed(repo, rel, {"relay": {"name_prefix": "from-" + name}})
+            result = self.relay(repo, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn("from-%s · handoff 1" % name, result.stdout, rel)
+
+    def test_environment_overrides_the_files(self):
+        repo = self.repo()
+        self.committed(repo, ".lastcall.json", {"relay": {"name_prefix": "fromfile"}})
+        result = self.relay(repo, "--dry-run",
+                            extra={"LASTCALL_RELAY": json.dumps({"name_prefix": "fromenv"})})
+        self.assertIn("fromenv · handoff 1", result.stdout)
+
+    def test_flags_override_the_config(self):
+        repo = self.repo()
+        self.committed(repo, ".lastcall.json", {"relay": {"model": "opus", "agent": "codex"}})
+        result = self.relay(repo, "--dry-run", "--model", "haiku", "--agent", "claude")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("--model haiku", result.stdout)
+        self.assertIn("claude successor", result.stdout)
+
+    def test_config_found_from_the_working_directory_names_the_repo(self):
+        parent = os.path.join(self.tmp, "workspace")
+        repo = self.repo(name=os.path.join("workspace", "frontend"))
+        self.write(os.path.join(parent, ".lastcall.json"),
+                   {"relay": {"repo": "frontend", "name_prefix": "ws"}})
+        result = subprocess.run([sys.executable, RELAY, "--dry-run"], cwd=parent,
+                                env=self.env(), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, universal_newlines=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("repo:        %s" % repo, result.stdout)
+        self.assertIn("ws · handoff 1", result.stdout)
+
+    def test_retire_predecessor_and_kill_predecessor_are_the_same_setting(self):
+        for key in ("retire_predecessor", "kill_predecessor"):
+            repo = self.repo(name=key)
+            self.committed(repo, ".lastcall.json", {"relay": {key: True, "kill_delay": 7}})
+            result = self.relay(repo, "--dry-run", extra={"TMUX_PANE": "%1"})
+            self.assertNotIn("not requested", result.stdout, key)
+            off = self.relay(repo, "--dry-run", "--no-kill-predecessor")
+            self.assertIn("not requested", off.stdout, key)
+
+    def test_kill_delay_comes_from_the_config(self):
+        self.stub("tmux", "#!/bin/sh\necho old-session\n")
+        repo = self.repo()
+        self.committed(repo, ".lastcall.json", {"relay": {"kill_predecessor": True,
+                                                          "kill_delay": 7}})
+        result = self.relay(repo, "--dry-run", extra={"TMUX_PANE": "%1"})
+        self.assertIn("in 7s: tmux kill-session -t =old-session", result.stdout)
+
+    def test_a_bad_flag_is_a_precondition_failure_not_exit_2(self):
+        result = self.relay(self.repo(), "--dry-run", "--timeout", "abc")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        result = self.relay(self.repo(name="p2"), "--dry-run", "--timeout", "-1")
+        self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_require_git(self):
+        plain = os.path.join(self.tmp, "plain")
+        os.makedirs(os.path.join(plain, "docs", "handoff"))
+        with open(os.path.join(plain, "docs", "handoff", "next.md"), "w") as fh:
+            fh.write("go\n")
+        self.assertEqual(self.relay(plain, "--dry-run").returncode, 0)
+        result = self.relay(plain, "--dry-run", "--require-git")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("not a git worktree", result.stdout)
+
+    def test_uncommitted_handoff_suggests_the_newest_committed_one(self):
+        repo = self.repo()
+        with open(os.path.join(repo, "docs", "handoff", "2026-09-26.md"), "w") as fh:
+            fh.write("# newer\n")
+        result = self.relay(repo, "--dry-run")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("newest committed handoff is docs/handoff/2026-09-25.md", result.stdout)
+
+
+class TestAgentDefault(RelayV2Case):
+    """The successor is the agent that runs the predecessor unless something
+    says otherwise; saying otherwise is a cross-agent handover."""
+
+    def test_a_claude_predecessor_gets_a_claude_successor(self):
+        result = self.relay(self.repo(), "--dry-run", extra={"CLAUDE_CODE_SESSION_ID": "s"})
+        self.assertIn("claude successor", result.stdout)
+        self.assertIn("(same as the predecessor)", result.stdout)
+
+    def test_a_codex_predecessor_gets_a_codex_successor(self):
+        result = self.relay(self.repo(), "--dry-run", extra={"CODEX_THREAD_ID": "t"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("codex successor", result.stdout)
+        self.assertIn("codex-app-runner", result.stdout)
+
+    def test_a_relay_successor_is_recognised_by_its_relay_agent(self):
+        self.assertEqual(relay.running_agent({relay.AGENT_ENV: "codex"}), "codex")
+        self.assertIsNone(relay.running_agent({relay.AGENT_ENV: "nonsense"}))
+        self.assertIsNone(relay.running_agent({}))
+
+    def test_nothing_detected_means_claude(self):
+        result = self.relay(self.repo(), "--dry-run")
+        self.assertIn("claude successor", result.stdout)
+        self.assertIn("(default)", result.stdout)
+
+    def test_config_agent_beats_detection(self):
+        repo = self.repo()
+        with open(os.path.join(repo, ".lastcall.json"), "w") as fh:
+            json.dump({"relay": {"agent": "codex"}}, fh)
+        subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "cfg"], check=True)
+        result = self.relay(repo, "--dry-run", extra={"CLAUDE_CODE_SESSION_ID": "s"})
+        self.assertIn("codex successor", result.stdout)
+        self.assertIn("(config)", result.stdout)
+
+    def test_claude_hands_over_to_codex(self):
+        result = self.relay(self.repo(), "--agent", "codex", "--codex-mode", "exec",
+                            extra={"CLAUDE_CODE_SESSION_ID": "pred", "CLAUDECODE": "1"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("via exec-json", result.stdout)
+        self.assertEqual([r["agent"] for r in self.ledger() if r["event"] == "spawn"], ["codex"])
+        self.assertEqual(self.ledger()[0]["predecessor"], "pred")
+
+    def test_codex_hands_over_to_claude(self):
+        result = self.relay(self.repo(), "--agent", "claude", extra={"CODEX_THREAD_ID": "t"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("via hook", result.stdout)
+        spawn = [c for c in self.calls() if "--bg" in c["argv"]][0]
+        self.assertIsNotNone(spawn["chain"])
+
+
+class TestPluginCheckin(RelayV2Case):
+    """A successor started by ANY mode checks in through the normally installed
+    plugin's SessionStart hook, and is told which handoff to read."""
+
+    def relay_env(self, ledger, generation="2", handoff="/r/docs/handoff/h.md"):
+        return {relay.LEDGER_ENV: ledger, relay.CHAIN_ENV: "chainX",
+                relay.GENERATION_ENV: generation, relay.HANDOFF_ENV: handoff,
+                relay.AGENT_ENV: "codex"}
+
+    def test_checkin_is_idempotent_per_session(self):
+        ledger = os.path.join(self.tmp, "l.jsonl")
+        env = self.relay_env(ledger)
+        first = relay.checkin_from_hook({"session_id": "S"}, env, "claude")
+        again = relay.checkin_from_hook({"session_id": "S", "source": "resume"}, env, "claude")
+        self.assertEqual(first, again)
+        self.assertEqual(len(relay.read_ledger(ledger)), 1)
+
+    def test_another_session_inheriting_the_variables_is_not_the_successor(self):
+        ledger = os.path.join(self.tmp, "l.jsonl")
+        env = self.relay_env(ledger)
+        relay.checkin_from_hook({"session_id": "S"}, env, "claude")
+        self.assertIsNone(relay.checkin_from_hook({"session_id": "verifier"}, env, "codex"))
+        self.assertIsNone(relay.successor_session_start({"session_id": "verifier"}, env, "codex"))
+        self.assertEqual(len(relay.read_ledger(ledger)), 1)
+
+    def test_note_names_the_generation_chain_and_handoff(self):
+        ledger = os.path.join(self.tmp, "l.jsonl")
+        note = relay.successor_session_start({"session_id": "S", "source": "startup"},
+                                             self.relay_env(ledger), "codex")
+        self.assertIn("generation 2 of relay chain chainX", note)
+        self.assertIn("Read /r/docs/handoff/h.md first", note)
+        self.assertLess(len(note), 300)
+        record = relay.read_ledger(ledger)[0]
+        self.assertEqual((record["via"], record["agent"], record["session_id"]),
+                         ("session-start", "codex", "S"))
+
+    def test_resumed_successor_checks_in_but_gets_no_note(self):
+        ledger = os.path.join(self.tmp, "l.jsonl")
+        self.assertIsNone(relay.successor_session_start(
+            {"session_id": "S", "source": "resume"}, self.relay_env(ledger), "claude"))
+        self.assertEqual(len(relay.read_ledger(ledger)), 1)
+
+    def test_unwritable_ledger_is_silent(self):
+        blocker = os.path.join(self.tmp, "file")
+        with open(blocker, "w") as fh:
+            fh.write("x")
+        env = self.relay_env(os.path.join(blocker, "sub", "l.jsonl"))
+        self.assertIsNone(relay.successor_session_start({"session_id": "S"}, env, "claude"))
+
+    def run_hook(self, env_extra, payload):
+        env = self.env(env_extra)
+        return subprocess.run([sys.executable, HOOK_SCRIPT, "SessionStart"],
+                              input=json.dumps(payload), stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, universal_newlines=True, env=env,
+                              cwd=self.tmp)
+
+    def test_engine_session_start_checks_in_and_injects_the_note(self):
+        ledger = os.path.join(self.tmp, "relay", "chainX.jsonl")
+        for agent, transcript in (("claude", os.path.join(self.tmp, ".claude", "projects",
+                                                          "p", "S1.jsonl")),
+                                  ("codex", os.path.join(self.tmp, ".codex", "sessions",
+                                                         "2026", "09", "25",
+                                                         "rollout-x-S2.jsonl"))):
+            sid = "S1" if agent == "claude" else "S2"
+            env = self.relay_env(ledger, generation="3" if agent == "claude" else "4")
+            env["LASTCALL_AGENT"] = agent
+            result = self.run_hook(env, {"hook_event_name": "SessionStart", "source": "startup",
+                                         "session_id": sid, "transcript_path": transcript,
+                                         "cwd": self.tmp})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = json.loads(result.stdout)
+            context = output["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("generation %s of relay chain chainX" % env[relay.GENERATION_ENV],
+                          context, agent)
+            record = [r for r in relay.read_ledger(ledger) if r["session_id"] == sid][0]
+            self.assertEqual((record["agent"], record["via"]), (agent, "session-start"))
+
+    def test_engine_without_relay_variables_writes_no_ledger(self):
+        result = self.run_hook({}, {"hook_event_name": "SessionStart", "source": "startup",
+                                    "session_id": "S", "cwd": self.tmp})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("LAST CALL RELAY", result.stdout)
+        self.assertFalse(os.path.isdir(os.path.join(self.tmp, ".lastcall", "relay")))
+
+    def test_engine_survives_a_broken_ledger(self):
+        blocker = os.path.join(self.tmp, "file")
+        with open(blocker, "w") as fh:
+            fh.write("x")
+        result = self.run_hook(self.relay_env(os.path.join(blocker, "l.jsonl")),
+                               {"hook_event_name": "SessionStart", "source": "startup",
+                                "session_id": "S", "cwd": self.tmp})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("LAST CALL RELAY", result.stdout)
+
+    def test_codex_exec_successor_checks_in_through_the_plugin_hook(self):
+        """No thread.started on stdout: the only proof is the plugin's
+        SessionStart hook, which the relay accepts."""
+        hook_out = os.path.join(self.tmp, "hook.out")
+        result = self.relay(self.repo(), "--agent", "codex", "--codex-mode", "exec",
+                            "--no-name-thread",
+                            extra={"FAKE_PLUGIN_HOOK": HOOK_SCRIPT, "FAKE_HOOK_OUT": hook_out,
+                                   "FAKE_NO_THREAD_EVENT": "1"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("via session-start", result.stdout)
+        with open(hook_out) as fh:
+            context = json.loads(fh.read())["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("generation 1 of relay chain", context)
+        self.assertIn("docs/handoff/2026-09-25.md first", context)
+
+
+class TestReadiness(RelayV2Case):
+    def test_either_cli_will_do_unless_the_config_pins_one(self):
+        only_codex = lambda name: "/x/codex" if name in ("codex", "git") else None
+        checks = relay.readiness(None, only_codex)
+        self.assertTrue(checks["claude or codex CLI on PATH"])
+        self.assertTrue(checks["relay script present"])
+        self.assertNotIn("tmux on PATH (codex_mode tmux)", checks)
+        pinned = relay.readiness({"agent": "claude"}, only_codex)
+        self.assertFalse(pinned["claude CLI on PATH"])
+
+    def test_tmux_matters_only_for_codex_tmux_mode(self):
+        checks = relay.readiness({"codex_mode": "tmux"}, lambda name: None)
+        self.assertFalse(checks["tmux on PATH (codex_mode tmux)"])
+
+
+class TestLastcallRelayCommand(RelayV2Case):
+    def test_lastcall_relay_runs_relay_py(self):
+        launcher = os.path.join(ROOT, "plugins", "lastcall", "bin", "lastcall")
+        result = subprocess.run([sys.executable, launcher, "relay", "--repo", self.repo(),
+                                 "--dry-run", "--agent", "codex"], env=self.env(),
+                                cwd=self.tmp, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, universal_newlines=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("relay v2 — codex successor", result.stdout)
+        help_text = subprocess.run([sys.executable, launcher, "relay", "--help"],
+                                   stdout=subprocess.PIPE, universal_newlines=True).stdout
+        self.assertIn("usage: lastcall relay", help_text)
 
 
 if __name__ == "__main__":

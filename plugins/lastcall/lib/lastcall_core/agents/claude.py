@@ -364,3 +364,37 @@ class ClaudeAgent(Agent):
         if isinstance(model, str) and _ONE_M_MARKER.search(model):
             return EXTENDED_WINDOW, "model-name"
         return None, "unknown"
+
+    def settings_window(self, model, env=None):
+        """(window, source) from the model the user CONFIGURED, when that
+        carries an explicit "[1m]" and names this session's model.
+
+        The transcript records "claude-opus-5" for the 1M variant too, but a
+        user who picked "opus[1m]" has it in $ANTHROPIC_MODEL or in
+        settings.json's "model" (/model writes it there). That is a strong
+        hint rather than a proof — the session may have been started with
+        --model — so it ranks below every exact source. Read-only.
+        """
+        if not isinstance(model, str) or not model:
+            return None, "unknown"
+        env = os.environ if env is None else env
+        candidates = []
+        if env.get("ANTHROPIC_MODEL"):
+            candidates.append(("$ANTHROPIC_MODEL", env.get("ANTHROPIC_MODEL")))
+        settings = os.path.join(expand_home(env, "CLAUDE_CONFIG_DIR", "~/.claude"),
+                                "settings.json")
+        try:
+            with open(settings, encoding="utf-8") as handle:
+                configured = json.load(handle).get("model")
+            if isinstance(configured, str):
+                candidates.append(("settings.json", configured))
+        except (OSError, ValueError, AttributeError):
+            pass
+        lowered = model.lower()
+        for origin, configured in candidates:
+            if not isinstance(configured, str) or not _ONE_M_MARKER.search(configured):
+                continue
+            base = _ONE_M_MARKER.sub("", configured).strip().lower()
+            if base and (base in lowered or lowered in base):
+                return EXTENDED_WINDOW, "configured model %s (%s)" % (configured, origin)
+        return None, "unknown"

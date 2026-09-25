@@ -24,6 +24,11 @@ sys.path.insert(0, os.path.dirname(SCRIPT))
 
 import lastcall as cg  # noqa: E402
 
+# Never read the real ~/.lastcall/config.json: a machine-wide config would
+# change what every test here measures.
+_HOME = tempfile.mkdtemp(prefix="lastcall-home-")
+os.environ["LASTCALL_HOME"] = _HOME
+
 
 def assistant_line(tokens, model="claude-sonnet-5", session="s1", sidechain=False):
     return json.dumps({
@@ -42,11 +47,24 @@ def assistant_line(tokens, model="claude-sonnet-5", session="s1", sidechain=Fals
     })
 
 
+def _restore_env(name, value):
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+
+
 class TempCase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="lastcall-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.state = os.path.join(self.dir, "state")
+        # These fixtures are Claude Code transcripts. Pin the agent so the
+        # suite means the same thing when it is run from inside Codex, whose
+        # environment markers would otherwise point detection at Codex.
+        previous = os.environ.get("LASTCALL_AGENT")
+        os.environ["LASTCALL_AGENT"] = "claude"
+        self.addCleanup(_restore_env, "LASTCALL_AGENT", previous)
 
     def transcript(self, lines):
         path = os.path.join(self.dir, "session.jsonl")
@@ -668,17 +686,35 @@ class TestEndToEnd(TempCase):
         with open(target) as handle:
             self.assertNotIn("SECRET", handle.read())
 
-    def test_unknown_window_is_silent_end_to_end(self):
-        """Without a window the guard must emit nothing at all, even at a token
-        count that would be red on every plausible window."""
+    def test_unknown_window_is_silent_end_to_end_without_a_fallback(self):
+        """With the fallback switched off, an unknown window means silence,
+        even at a token count that would be red on every plausible window."""
         path = self.transcript([assistant_line(190_000)])
         result = self.invoke(
             {"transcript_path": path, "session_id": "s1",
              "hook_event_name": "Stop", "cwd": self.dir},
-            env={"LASTCALL_CONTEXT_WINDOW_TOKENS": "auto"},
+            env={"LASTCALL_CONTEXT_WINDOW_TOKENS": "auto",
+                 "LASTCALL_FALLBACK_WINDOW_TOKENS": "none",
+                 "CLAUDE_CONFIG_DIR": self.dir},
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"")
+
+    def test_unknown_window_falls_back_to_an_advisory_warning(self):
+        """Zero config on Claude Code: the window is assumed, the warning says
+        so, and an assumed window never blocks the stop."""
+        path = self.transcript([assistant_line(190_000)])
+        result = self.invoke(
+            {"transcript_path": path, "session_id": "s1",
+             "hook_event_name": "Stop", "cwd": self.dir},
+            env={"LASTCALL_CONTEXT_WINDOW_TOKENS": "auto",
+                 "CLAUDE_CONFIG_DIR": self.dir},
+        )
+        output = json.loads(result.stdout.decode())
+        text = output["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("LAST CALL — RED", text)
+        self.assertIn("assumed the", text)
+        self.assertNotIn("decision", output)
 
     def test_doctor_runs_without_a_transcript(self):
         process = subprocess.run(
@@ -807,7 +843,7 @@ class TestSetupCommand(TempCase):
         result = self.run_setup(self.dir)
         self.assertEqual(result.returncode, 0,
                          result.stdout.decode("utf-8", "replace"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json")) as handle:
+        with open(os.path.join(self.dir, ".lastcall.json")) as handle:
             written = json.load(handle)
         self.assertEqual(written["context_window_tokens"], 200_000)
         self.assertNotIn("template", written)
@@ -847,7 +883,7 @@ class TestSetupRecommendations(TempCase):
         result = self.run_setup(root)
         self.assertEqual(result.returncode, 0,
                          result.stdout.decode("utf-8", "replace"))
-        with open(os.path.join(root, ".claude", "lastcall.json")) as handle:
+        with open(os.path.join(root, ".lastcall.json")) as handle:
             written = json.load(handle)
         self.assertNotIn("template", written)
         self.assertFalse(os.path.exists(
@@ -1258,8 +1294,8 @@ class TestProjectIsolation(TempCase):
                            env=env, cwd=cwd)
         self.assertFalse(os.path.exists(
             os.path.join(home, ".claude", "lastcall.json")))
-        self.assertTrue(os.path.isfile(
-            os.path.join(project, ".claude", "lastcall.json")))
+        self.assertFalse(os.path.exists(os.path.join(home, ".lastcall.json")))
+        self.assertTrue(os.path.isfile(os.path.join(project, ".lastcall.json")))
 
     def test_state_files_are_keyed_by_session_not_by_project(self):
         config = self.config()
@@ -1542,3 +1578,133 @@ class TestMinimumWindow(TempCase):
     def test_no_floor_means_no_restriction(self):
         config = self.config(context_window_tokens=200_000)
         self.assertIsNone(config["min_window_tokens"])
+
+
+import lastcall_core.config as lc_config  # noqa: E402  (on sys.path via the script)
+import lastcall_core.state as lc_state  # noqa: E402
+
+
+class TestStateMerge(TempCase):
+    """The status line and the hooks write the same session's state file.
+    Neither may wipe out the other's fields."""
+
+    def test_a_hook_write_keeps_the_status_line_window(self):
+        config = self.config()
+        lc_state.update_state(config, "s1", {"window_from_statusline": 1_000_000})
+        stale = cg.read_state(config, "s1")
+        stale.pop("window_from_statusline")
+        cg.write_state(config, "s1", dict(stale, band="yellow"))
+        state = cg.read_state(config, "s1")
+        self.assertEqual(state["window_from_statusline"], 1_000_000)
+        self.assertEqual(state["band"], "yellow")
+
+    def test_session_state_saves_only_what_it_changed(self):
+        config = self.config()
+        mine = lc_state.SessionState(config, "s1", "codex")
+        lc_state.update_state(config, "s1", {"window_from_statusline": 5}, "codex")
+        mine["band"] = "red"
+        mine.save()
+        state = cg.read_state(config, "s1", "codex")
+        self.assertEqual(state["window_from_statusline"], 5)
+        self.assertEqual(state["band"], "red")
+        self.assertEqual(state["agent"], "codex")
+
+    def test_agents_do_not_share_a_session_file(self):
+        config = self.config()
+        cg.write_state(config, "same-id", {"band": "red"}, "claude")
+        self.assertEqual(cg.read_state(config, "same-id", "codex"), {})
+
+    def test_onboarding_is_recorded_per_project(self):
+        config = self.config()
+        self.assertFalse(lc_state.was_onboarded(config, self.dir))
+        lc_state.mark_onboarded(config, self.dir, "claude")
+        self.assertTrue(lc_state.was_onboarded(config, self.dir))
+        self.assertFalse(lc_state.was_onboarded(config, os.path.join(self.dir, "other")))
+
+    def test_the_onboarding_record_is_never_pruned(self):
+        config = self.config(state_ttl_days=1)
+        lc_state.mark_onboarded(config, self.dir)
+        path = os.path.join(self.state, lc_state.ONBOARDED_FILE)
+        old = time.time() - 400 * 86400
+        os.utime(path, (old, old))
+        cg.prune_state(config)
+        self.assertTrue(os.path.exists(path))
+
+
+class TestConfigSearch(TempCase):
+    """One agent-neutral config, layered: defaults < global < project < env."""
+
+    def setUp(self):
+        super(TestConfigSearch, self).setUp()
+        self.env = {"LASTCALL_HOME": os.path.join(self.dir, "lc-home"),
+                    "HOME": os.path.join(self.dir, "home")}
+        os.makedirs(self.env["LASTCALL_HOME"])
+        os.makedirs(self.env["HOME"])
+
+    def write(self, path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            json.dump(data, handle)
+
+    def test_global_config_is_read(self):
+        self.write(os.path.join(self.env["LASTCALL_HOME"], "config.json"), {"red_percent": 60})
+        config = lc_config.load_config({"cwd": self.dir}, self.env)
+        self.assertEqual(config["red_percent"], 60)
+        self.assertTrue(config["_configured"])
+
+    def test_every_project_file_name_is_found(self):
+        for name in lc_config.PROJECT_CONFIG_NAMES:
+            root = os.path.join(self.dir, name.replace(os.sep, "_"))
+            self.write(os.path.join(root, name), {"red_percent": 61})
+            config = lc_config.load_config({"cwd": root}, self.env)
+            self.assertEqual(config["red_percent"], 61, name)
+            self.assertEqual(config["_project_dir"], root, name)
+
+    def test_project_beats_global_and_env_beats_both(self):
+        self.write(os.path.join(self.env["LASTCALL_HOME"], "config.json"),
+                   {"red_percent": 60, "yellow_percent": 30})
+        self.write(os.path.join(self.dir, ".lastcall.json"), {"red_percent": 70})
+        env = dict(self.env, LASTCALL_YELLOW_PERCENT="33")
+        config = lc_config.load_config({"cwd": self.dir}, env)
+        self.assertEqual((config["yellow_percent"], config["red_percent"]), (33, 70))
+
+    def test_the_nearest_project_wins(self):
+        self.write(os.path.join(self.dir, ".lastcall.json"), {"red_percent": 70})
+        inner = os.path.join(self.dir, "inner")
+        self.write(os.path.join(inner, ".codex", "lastcall.json"), {"red_percent": 80})
+        self.assertEqual(lc_config.load_config({"cwd": inner}, self.env)["red_percent"], 80)
+
+    def test_home_is_never_a_project_even_with_every_marker(self):
+        home = self.env["HOME"]
+        for marker in (".claude", ".codex", ".git"):
+            os.makedirs(os.path.join(home, marker))
+        self.write(os.path.join(home, ".claude", "lastcall.json"), {"red_percent": 99})
+        project = os.path.join(home, "code", "project")
+        os.makedirs(project)
+        original = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        self.addCleanup(_restore_env, "HOME", original)
+        config = lc_config.load_config({"cwd": project}, self.env)
+        self.assertEqual(config["_project_dir"], project)
+        self.assertIsNone(config["_config_path"])
+        self.assertEqual(config["red_percent"], cg.DEFAULTS["red_percent"])
+
+    def test_unknown_keys_are_problems_but_comments_are_not(self):
+        self.write(os.path.join(self.dir, ".lastcall.json"),
+                   {"_comment": "x", "red_precent": 60})
+        problems = lc_config.load_config({"cwd": self.dir}, self.env)["_problems"]
+        self.assertEqual(len(problems), 1)
+        self.assertIn('did you mean "red_percent"', problems[0])
+
+    def test_state_defaults_under_lastcall_home(self):
+        config = lc_config.load_config({"cwd": self.dir}, self.env)
+        self.assertEqual(lc_config.state_dir(config, self.env),
+                         os.path.join(self.env["LASTCALL_HOME"], "state"))
+
+    def test_compaction_note_env_accepts_false(self):
+        env = dict(self.env, LASTCALL_COMPACTION_NOTE="false")
+        self.assertIs(lc_config.load_config({"cwd": self.dir}, env)["compaction_note"], False)
+
+    def test_fallback_window_env_accepts_none(self):
+        env = dict(self.env, LASTCALL_FALLBACK_WINDOW_TOKENS="none")
+        self.assertIsNone(lc_config.load_config({"cwd": self.dir}, env)["fallback_window_tokens"])

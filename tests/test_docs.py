@@ -118,8 +118,8 @@ class TestSetupWizardDocs(unittest.TestCase):
     doc tests looked at the numbering."""
 
     def source(self):
-        with open(os.path.join(ROOT, "plugins", "lastcall", "scripts",
-                               "lastcall.py"), encoding="utf-8") as handle:
+        with open(os.path.join(ROOT, "plugins", "lastcall", "lib", "lastcall_core",
+                               "wizard.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_readme_shows_every_question_the_wizard_asks(self):
@@ -152,6 +152,9 @@ class TestReleaseHygiene(unittest.TestCase):
         with open(os.path.join(ROOT, "plugins", "lastcall", ".claude-plugin",
                                "plugin.json")) as fh:
             plugin = json.load(fh)
+        with open(os.path.join(ROOT, "plugins", "lastcall", ".codex-plugin",
+                               "plugin.json")) as fh:
+            codex_plugin = json.load(fh)
         with open(os.path.join(ROOT, "plugins", "lastcall", "scripts",
                                "lastcall.py")) as fh:
             code = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M).group(1)
@@ -159,6 +162,7 @@ class TestReleaseHygiene(unittest.TestCase):
             "marketplace.metadata": market["metadata"]["version"],
             "marketplace.plugins[0]": market["plugins"][0]["version"],
             "plugin.json": plugin["version"],
+            ".codex-plugin/plugin.json": codex_plugin["version"],
             "lastcall.py": code,
         }
 

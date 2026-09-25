@@ -1,6 +1,29 @@
 {
-  "description": "Last Call — measure context usage at Stop, re-arm on compaction.",
+  "description": "Last Call — measure context usage (Claude Code and Codex), warn once per zone, block once at the last one, re-arm on compaction.",
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" PostToolUse",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" UserPromptSubmit",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

@@ -12,8 +12,10 @@ says "you decide", take your recommendation and tell them what you chose.
 
 ## If this project is ALREADY configured, do not start over
 
-Read `.claude/lastcall.json` first. If it exists, this is an update, not a
-first run. Show the user what is currently set, in a short table, and then ask
+Read the project's config first: `.lastcall.json` (or `.lastcall/config.json`,
+or a legacy `.claude/lastcall.json` / `.codex/lastcall.json`), and
+`~/.lastcall/config.json` for machine-wide settings. If one exists, this is an
+update, not a first run. Show the user what is currently set, in a short table, and then ask
 only about what is missing or what they want changed. Do not re-ask settled
 questions.
 
@@ -44,7 +46,7 @@ command -v tmux git codex gemini claude
 ls docs/handoff .claude/work 2>/dev/null
 ```
 
-Read the project's CLAUDE.md, AGENTS.md, README and any docs/ index if they
+Read the project's AGENTS.md, CLAUDE.md, README and any docs/ index if they
 exist. A project that already documents its test command should not be asked
 what its test command is — propose the one you found and ask only for
 confirmation.
@@ -62,7 +64,8 @@ confirmation.
    built-in wording, and any other name silently renders without a headline.
 
 2. **The context window (`context_window_tokens`) — only if they chose
-   percentages.** Accept ANY figure:
+   percentages, and only for Claude Code** (Codex reports its own window).
+   Accept ANY figure:
    200000, 500000, 1000000, whatever they say. Do not argue with it; if the
    session later holds more tokens than that, Last Call corrects it by itself.
    If they chose token thresholds, do not ask this at all.
@@ -103,13 +106,14 @@ confirmation.
    another session running forever.
 
 If the user does not want Last Call in this project, write
-`{"disabled": true}` to `.claude/lastcall.json` and stop. That silences it
+`{"disabled": true}` to `.lastcall.json` and stop. That silences it
 without uninstalling anything.
 
 ## Then write the configuration
 
-Write `.claude/lastcall.json` in THIS project only. Never write to a parent
-directory and never to `~/.claude`; each project carries its own configuration
+Write `.lastcall.json` at the root of THIS project only (or update the
+project's existing config file in place). Never write to a parent directory
+and never to your home directory; each project carries its own configuration
 and they must not leak into one another.
 
 Include only what the user actually chose. Then write the wrap-up template you

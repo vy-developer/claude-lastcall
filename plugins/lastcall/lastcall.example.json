@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to .claude/lastcall.json in your project. Every field is optional; these are the defaults. Override any of them per-run with LASTCALL_<FIELD> in the environment.",
+  "_comment": "Copy to .lastcall.json in your project (or ~/.lastcall/config.json for every project; a legacy .claude/lastcall.json is still read). Every field is optional; these are the defaults. Override any of them per-run with LASTCALL_<FIELD> in the environment. Keys starting with _ are comments; any other unknown key is reported by doctor.",
 
   "_comment_zones": "Two zones named yellow and red is only the default. Set 'zones' to define your own: any number, your names, your thresholds, your instructions, and which ones hold the stop. When 'zones' is set, yellow_percent and red_percent are ignored.",
   "yellow_percent": 40,
@@ -16,7 +16,7 @@
   "min_window_tokens": null,
 
   "_comment_zones_example": [
-    {"name": "winddown", "at": 60, "template": ".claude/winddown.md"},
+    {"name": "winddown", "at": 60, "template": ".lastcall/winddown.md"},
     {"name": "closing", "at": 85, "block": true, "message": "Closing time. Finish the handoff, commit, stop."}
   ],
 
@@ -31,14 +31,20 @@
 
   "_comment_relay_example": {"handoff_dir": "docs/handoff", "name_prefix": "myproject", "remote_control": true, "skip_permissions": true, "model": "opus", "fallback_model": "fable,sonnet", "kill_predecessor": true},
 
-  "_comment_window": "The one thing Last Call will not guess. null means 'use an exact source or stay silent'. Set it to 200000 or 1000000 if you are not using the bundled status line.",
+  "_comment_window": "null means 'use an exact source'. Codex writes its window into every session, so this only matters for Claude Code, whose transcript does not say whether a session has 200K or 1M. Set it to 200000 or 1000000 if you are not using the bundled status line.",
   "context_window_tokens": null,
+
+  "_comment_fallback_window": "Claude Code with no exact source: judge the zones against this window, but never block, and say in the message that it was assumed. Once more tokens than this are in use the real window is proven anyway. null keeps Last Call silent until the window is known.",
+  "fallback_window_tokens": 200000,
 
   "_comment_mode": "block_once holds the stop a single time at red so the handoff actually gets written. advisory never blocks.",
   "mode": "block_once",
 
   "_comment_template": "Path to your own wrap-up instructions, absolute or relative to the project. Placeholders: {percent} {tokens} {window} {remaining} {zone} {gates} {transcript} {relay}",
   "template": null,
+
+  "_comment_compaction_note": "Injected after a compaction, telling the model its memory is now a summary and to re-read its plan and handoff files. null is the built-in text, false turns it off, a string replaces it.",
+  "compaction_note": null,
 
   "include_output_tokens": false,
   "debug": false,

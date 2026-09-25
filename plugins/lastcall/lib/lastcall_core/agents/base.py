@@ -9,8 +9,6 @@ the other.
 
 import os
 import re
-from dataclasses import asdict, dataclass
-from typing import Mapping, Optional
 
 # How strongly a hook invocation points at one agent. The registry picks the
 # highest; ties go to registration order.
@@ -23,8 +21,7 @@ _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 UUID_RE = re.compile(_UUID)
 
 
-@dataclass
-class Usage:
+class Usage(object):
     """One measurement of how full a session's context is.
 
     tokens         context in use, as the agent itself counts it.
@@ -52,18 +49,43 @@ class Usage:
                    way to tell (see ClaudeAgent.read_usage), else None.
     """
 
-    tokens: int
-    window: Optional[int]
-    window_source: str
-    model: Optional[str]
-    compacted: bool
-    session_id: Optional[str]
-    agent: str
-    turn_id: Optional[str] = None
-    measured_at: Optional[str] = None
-    stale: bool = False
-    record_id: Optional[str] = None
-    fresh: Optional[bool] = None
+    # A plain class rather than a dataclass: hooks run on every tool call, and
+    # importing dataclasses (and with it inspect and typing) costs more than
+    # the whole measurement.
+    __slots__ = ("tokens", "window", "window_source", "model", "compacted",
+                 "session_id", "agent", "turn_id", "measured_at", "stale",
+                 "record_id", "fresh")
+
+    def __init__(self, tokens, window, window_source, model, compacted,
+                 session_id, agent, turn_id=None, measured_at=None, stale=False,
+                 record_id=None, fresh=None):
+        self.tokens = tokens
+        self.window = window
+        self.window_source = window_source
+        self.model = model
+        self.compacted = compacted
+        self.session_id = session_id
+        self.agent = agent
+        self.turn_id = turn_id
+        self.measured_at = measured_at
+        self.stale = stale
+        self.record_id = record_id
+        self.fresh = fresh
+
+    def __eq__(self, other):
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return self.to_dict() == other.to_dict()
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        return result if result is NotImplemented else not result
+
+    __hash__ = None
+
+    def __repr__(self):
+        return "Usage(%s)" % ", ".join("%s=%r" % (name, getattr(self, name))
+                                       for name in self.__slots__)
 
     @property
     def percent(self):
@@ -80,7 +102,7 @@ class Usage:
         return max(0, self.window - self.tokens)
 
     def to_dict(self):
-        return asdict(self)
+        return {name: getattr(self, name) for name in self.__slots__}
 
 
 class Agent:
@@ -135,7 +157,7 @@ class Agent:
 
 def expand_home(env, var, default):
     """A directory from ``env[var]``, else ``default``, with ~ expanded."""
-    value = (env or {}).get(var) if isinstance(env, Mapping) else None
+    value = env.get(var) if env is not None and hasattr(env, "get") else None
     return os.path.expanduser(value or default)
 
 

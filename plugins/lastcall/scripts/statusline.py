@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Optional status line that teaches Last Call the exact context window.
 
-The Stop hook cannot see how big the window is. The transcript records the
+The hooks cannot see how big a Claude Code session's window is. The transcript records the
 model as e.g. "claude-opus-5" whether that session has a 200K window or a 1M
 one, so the size is genuinely not derivable there — measured, not assumed.
 
@@ -25,10 +25,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from lastcall import (band_for, load_config, read_state, state_dir,
-                               write_state)
+    from lastcall import band_for, load_config, read_state, update_state
 except ImportError:  # standalone copy — degrade to printing only
-    band_for = load_config = read_state = state_dir = write_state = None
+    band_for = load_config = read_state = update_state = None
 
 # Field names vary across Claude Code versions, so match on shape rather than
 # betting the feature on one spelling. --dump exists for when none of these hit.
@@ -81,14 +80,17 @@ def main(argv):
     used = deep_find(payload, _USED_KEYS)
     session_id = payload.get("session_id") or (payload.get("session") or {}).get("id")
 
-    # Cache the window for the Stop hook. This is the whole point of the file.
+    # Cache the window for the hooks. This is the whole point of the file.
+    # update_state touches only this one field, re-reading the file first, so
+    # a hook writing the same session's state at the same moment keeps its
+    # fields and this one keeps its own. The status line is Claude Code's.
     if window and session_id and load_config:
         try:
             config = load_config(payload)
-            state = read_state(config, session_id)
+            state = read_state(config, session_id, "claude")
             if state.get("window_from_statusline") != window:
-                state["window_from_statusline"] = window
-                write_state(config, session_id, state)
+                update_state(config, session_id,
+                             {"window_from_statusline": window}, "claude")
         except Exception:  # noqa: BLE001 - a status line must never fail loudly
             pass
 

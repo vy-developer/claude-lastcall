@@ -860,9 +860,14 @@ class TestTemplateWhitespace(TempCase):
         message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
         self.assertIn("step 6: run %s" % cg.RELAY_COMMAND, message)
         self.assertTrue(os.path.isfile(cg.RELAY_SCRIPT), cg.RELAY_SCRIPT)
-        launcher = shlex.split(cg.RELAY_COMMAND)[1]
-        self.assertTrue(os.path.isfile(launcher), launcher)
-        self.assertEqual(shlex.split(cg.RELAY_COMMAND)[2], "relay")
+        # Split as the shell of the platform would: POSIX shlex rules eat
+        # the backslashes of a Windows path.
+        if os.name == "nt":
+            words = [w.strip('"') for w in shlex.split(cg.RELAY_COMMAND, posix=False)]
+        else:
+            words = shlex.split(cg.RELAY_COMMAND)
+        self.assertTrue(os.path.isfile(words[1]), words[1])
+        self.assertEqual(words[2], "relay")
 
     def test_a_1x_bash_relay_line_still_renders_a_runnable_command(self):
         """Older templates say "bash {relay}"; {relay} is now a python command,

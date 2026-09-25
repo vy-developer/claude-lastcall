@@ -791,8 +791,9 @@ class TestLibraryHygiene(unittest.TestCase):
             names = getattr(sys, "stdlib_module_names", None)  # 3.10+
             if names is not None:
                 return root in names
-            if root in ("msvcrt", "winreg", "_winapi"):
-                return True     # Windows-only standard modules: no spec elsewhere
+            if root in ("msvcrt", "winreg", "_winapi", "fcntl", "termios", "pwd", "grp",
+                        "resource"):
+                return True     # one platform's standard modules: no spec on the other
             spec = importlib.util.find_spec(root)
             origin = getattr(spec, "origin", None) or ""
             if origin in ("built-in", "frozen"):

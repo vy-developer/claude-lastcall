@@ -86,6 +86,10 @@ GENERATION_ENV = "LASTCALL_RELAY_GENERATION"
 LEDGER_ENV = "LASTCALL_RELAY_LEDGER"
 HANDOFF_ENV = "LASTCALL_RELAY_HANDOFF"
 AGENT_ENV = "LASTCALL_RELAY_AGENT"
+# One per spawn attempt. A check-in only counts when it carries the nonce of
+# the attempt being waited for: chain + generation + agent alone also match a
+# stale successor from an earlier (timed-out, retried) attempt.
+NONCE_ENV = "LASTCALL_RELAY_NONCE"
 LEDGER_DIR_ENV = "LASTCALL_RELAY_DIR"
 
 AGENTS = ("claude", "codex")
@@ -265,21 +269,28 @@ def new_chain_id(prefix="lastcall"):
 
 
 def next_generation(env, records):
-    """The predecessor's own generation + 1; else one past the ledger's newest."""
+    """One past both the predecessor's own generation and every generation
+    the ledger has already spawned: a retry from the same predecessor must
+    not reuse the generation of a successor that is still out there."""
+    candidates = [1]
     try:
-        return int(env.get(GENERATION_ENV, "")) + 1
+        candidates.append(int(env.get(GENERATION_ENV, "")) + 1)
     except ValueError:
         pass
-    spawned = [r.get("generation") for r in records
-               if r.get("event") == "spawn" and isinstance(r.get("generation"), int)]
-    return max(spawned) + 1 if spawned else 1
+    candidates += [r["generation"] + 1 for r in records
+                   if r.get("event") == "spawn" and isinstance(r.get("generation"), int)]
+    return max(candidates)
 
 
-def checkin_record(payload, chain, generation, agent, handoff, via="hook"):
+def new_nonce():
+    return uuid.uuid4().hex
+
+
+def checkin_record(payload, chain, generation, agent, handoff, via="hook", nonce=None):
     payload = payload if isinstance(payload, dict) else {}
     return {
         "event": "checkin", "via": via, "chain": chain, "generation": generation,
-        "agent": agent, "handoff": handoff,
+        "agent": agent, "handoff": handoff, "nonce": nonce,
         "session_id": payload.get("session_id"),
         "transcript_path": payload.get("transcript_path"),
         "cwd": payload.get("cwd"), "source": payload.get("source"),
@@ -296,9 +307,11 @@ def checkin_from_hook(payload, env=None, agent=None, via="hook"):
     plugin hook both run in a Claude successor, and a resumed successor fires
     SessionStart again, so an existing check-in by the same session is
     returned instead of duplicated. A check-in by a DIFFERENT session for the
-    same generation means this one merely inherited the variables (a verifier
-    `codex exec` run by the successor, say): it is not the successor, so
-    nothing is written and None is returned."""
+    same spawn (same nonce; same generation when there is no nonce) means
+    this one merely inherited the variables (a verifier `codex exec` run by
+    the successor, say): it is not the successor, so nothing is written and
+    None is returned. A stale check-in from another attempt at the same
+    generation carries another nonce and does not get in the way."""
     env = os.environ if env is None else env
     ledger, chain = env.get(LEDGER_ENV), env.get(CHAIN_ENV)
     if not ledger or not valid_chain(chain):
@@ -307,13 +320,15 @@ def checkin_from_hook(payload, env=None, agent=None, via="hook"):
         generation = int(env.get(GENERATION_ENV, ""))
     except ValueError:
         generation = None
+    nonce = env.get(NONCE_ENV) or None
     record = checkin_record(payload, chain, generation, agent or env.get(AGENT_ENV),
-                            env.get(HANDOFF_ENV), via=via)
+                            env.get(HANDOFF_ENV), via=via, nonce=nonce)
     session = record.get("session_id")
     try:
         for old in read_ledger(ledger):
             if (old.get("event") == "checkin" and old.get("chain") == chain
-                    and old.get("generation") == generation and old.get("session_id")):
+                    and old.get("generation") == generation and old.get("session_id")
+                    and (old.get("nonce") or None) == nonce):
                 if old.get("session_id") == session:
                     return old
                 if session:
@@ -485,11 +500,13 @@ def successor_env(base, relay_env):
     return env
 
 
-def checkin_command(python_bin, ledger, chain, generation, agent, handoff):
-    return shlex.join([python_bin, os.path.abspath(__file__), "checkin",
-                       "--ledger", ledger, "--chain", chain,
-                       "--generation", str(generation), "--agent", agent,
-                       "--handoff", handoff])
+def checkin_command(python_bin, ledger, chain, generation, agent, handoff, nonce=None):
+    argv = [python_bin, os.path.abspath(__file__), "checkin",
+            "--ledger", ledger, "--chain", chain,
+            "--generation", str(generation), "--agent", agent, "--handoff", handoff]
+    if nonce:
+        argv += ["--nonce", nonce]
+    return shlex.join(argv)
 
 
 def claude_settings(relay_env, hook_command):
@@ -592,7 +609,8 @@ def codex_app_sandbox(opts):
     return "danger-full-access" if opts.skip_permissions else opts.codex_sandbox
 
 
-def codex_app_runner_argv(opts, repo, prompt, name, ledger, chain, generation, handoff):
+def codex_app_runner_argv(opts, repo, prompt, name, ledger, chain, generation, handoff,
+                          nonce=None):
     """The detached runner that keeps `codex app-server` alive for the turn."""
     argv = [opts.python_bin, os.path.abspath(__file__), "codex-app-runner",
             "--ledger", ledger, "--chain", chain, "--generation", str(generation),
@@ -605,6 +623,8 @@ def codex_app_runner_argv(opts, repo, prompt, name, ledger, chain, generation, h
         argv.append("--auto-approve")
     if not getattr(opts, "name_thread", True):
         argv.append("--no-name")
+    if nonce:
+        argv += ["--nonce", nonce]
     argv += ["--prompt", prompt]
     return argv
 
@@ -963,7 +983,7 @@ class AppRunner:
 
     def record(self, event, **fields):
         record = {"event": event, "chain": self.a.chain, "generation": self.a.generation,
-                  "agent": "codex", "runner_pid": os.getpid()}
+                  "agent": "codex", "runner_pid": os.getpid(), "nonce": self.a.nonce}
         record.update(fields)
         try:
             return append_record(self.a.ledger, record)
@@ -1070,7 +1090,7 @@ class AppRunner:
              "transcript_path": path or find_codex_rollout(self.thread_id, self.env),
              "cwd": thread.get("cwd") or a.repo, "source": thread.get("source"),
              "model": started.get("model") or a.model},
-            a.chain, a.generation, "codex", a.handoff, via="app-server")
+            a.chain, a.generation, "codex", a.handoff, via="app-server", nonce=a.nonce)
         record.update(pid=os.getpid(), runner_pid=os.getpid(), app_server_pid=client.proc.pid,
                       turn_id=self.turn_id, named=named, name_error=name_error,
                       max_seconds=a.max_seconds)
@@ -1121,6 +1141,7 @@ def codex_app_runner_main(argv, out=None):
     p.add_argument("--ledger", required=True)
     p.add_argument("--chain", required=True)
     p.add_argument("--generation", type=int, required=True)
+    p.add_argument("--nonce")
     p.add_argument("--handoff")
     p.add_argument("--repo", required=True)
     p.add_argument("--name", required=True)
@@ -1502,15 +1523,18 @@ class Relay:
         retirement = plan_retirement(pred, o.claude_bin, o.tmux_bin) if o.retire \
             else {"method": "none", "why": "not requested (pass --retire-predecessor)"}
         prompt = build_prompt(handoff, o.retire and retirement["method"] != "none")
+        nonce = new_nonce()
         relay_env = {CHAIN_ENV: chain, GENERATION_ENV: str(generation), LEDGER_ENV: ledger,
-                     HANDOFF_ENV: handoff, AGENT_ENV: o.agent}
+                     HANDOFF_ENV: handoff, AGENT_ENV: o.agent, NONCE_ENV: nonce}
         have_git = is_git_repo(repo)
         plan = {"repo": repo, "config": config_path, "handoff": handoff, "chain": chain,
                 "ledger": ledger, "generation": generation, "name": name, "agent": o.agent,
                 "relay_env": relay_env, "predecessor": pred, "retirement": retirement,
-                "prompt": prompt, "session_id": None, "log": None, "tmux_session": None}
+                "prompt": prompt, "session_id": None, "log": None, "tmux_session": None,
+                "nonce": nonce}
         if o.agent == "claude":
-            hook = checkin_command(o.python_bin, ledger, chain, generation, "claude", handoff)
+            hook = checkin_command(o.python_bin, ledger, chain, generation, "claude", handoff,
+                                   nonce)
             plan.update(hook=hook, bg_short=None, transcript=None,
                         argv=claude_argv(o, name, prompt, claude_settings(relay_env, hook)))
         elif o.codex_mode == "tmux":
@@ -1519,15 +1543,19 @@ class Relay:
                         argv=tmux_argv(o.tmux_bin, session, repo,
                                        codex_argv(o, repo, prompt, have_git), relay_env))
         else:
+            # One log per spawn attempt (the nonce), written from scratch: an
+            # appended log from an earlier attempt would hand over ITS thread.
             logs = os.path.join(os.path.dirname(ledger), "%s-%d" % (chain, generation))
             exec_argv = codex_argv(o, repo, prompt, have_git, mode="exec")
             if o.codex_mode == "app":
+                fallback_nonce = new_nonce()
                 plan.update(argv=codex_app_runner_argv(o, repo, prompt, name, ledger, chain,
-                                                       generation, handoff),
-                            log=logs + "-app.log", fallback_argv=exec_argv,
-                            fallback_log=logs + ".log")
+                                                       generation, handoff, nonce),
+                            log="%s-%s-app.log" % (logs, nonce[:8]), fallback_argv=exec_argv,
+                            fallback_log="%s-%s.log" % (logs, fallback_nonce[:8]),
+                            fallback_nonce=fallback_nonce)
             else:
-                plan.update(argv=exec_argv, log=logs + ".log")
+                plan.update(argv=exec_argv, log="%s-%s.log" % (logs, nonce[:8]))
         self.plan = plan
         return None
 
@@ -1611,6 +1639,7 @@ class Relay:
     def _spawn_record(self, **extra):
         p = self.plan
         record = {"event": "spawn", "chain": p["chain"], "generation": p["generation"],
+                  "nonce": p["nonce"],
                   "agent": p["agent"], "name": p["name"], "handoff": p["handoff"],
                   "repo": p["repo"], "session_id": p["session_id"],
                   "predecessor": p["predecessor"].get("session_id")}
@@ -1618,13 +1647,14 @@ class Relay:
         append_record(p["ledger"], record)
 
     def _wait(self, match, extra=None):
-        """First ledger check-in satisfying `match`, else what `extra` finds."""
+        """First ledger check-in of THIS spawn (its nonce) satisfying `match`,
+        else what `extra` finds."""
         p = self.plan
         deadline = time.time() + self.o.timeout
         while True:
             for record in read_ledger(p["ledger"]):
                 if record.get("event") == "checkin" and record.get("chain") == p["chain"] \
-                        and match(record):
+                        and record.get("nonce") == p["nonce"] and match(record):
                     return record
             if extra:
                 found = extra()
@@ -1697,7 +1727,8 @@ class Relay:
                 return None
             return append_record(p["ledger"], dict(checkin_record(
                 {"session_id": sid, "transcript_path": transcript, "cwd": p["repo"]},
-                p["chain"], generation, "claude", p["handoff"], via="transcript")))
+                p["chain"], generation, "claude", p["handoff"], via="transcript",
+                nonce=p["nonce"])))
 
         record = self._wait(lambda r: r.get("agent") == "claude"
                             and r.get("generation") == generation, transcript_fallback)
@@ -1744,7 +1775,8 @@ class Relay:
     def _mine(self, record, event):
         p = self.plan
         return (record.get("event") == event and record.get("chain") == p["chain"]
-                and record.get("generation") == p["generation"])
+                and record.get("generation") == p["generation"]
+                and record.get("nonce") == p["nonce"])
 
     def _codex_app(self, env):
         """The checked-in record; "fallback" when app mode failed before the
@@ -1753,7 +1785,7 @@ class Relay:
         os.makedirs(os.path.dirname(p["log"]), exist_ok=True)
         self._spawn_record(log=p["log"], mode="app")
         try:
-            with open(p["log"], "ab") as log:
+            with open(p["log"], "wb") as log:
                 proc = subprocess.Popen(p["argv"], cwd=p["repo"], env=env,
                                         stdin=subprocess.DEVNULL, stdout=log,
                                         stderr=subprocess.STDOUT, start_new_session=True)
@@ -1814,7 +1846,7 @@ class Relay:
         p = self.plan
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         self._spawn_record(log=log_path, mode="exec")
-        with open(log_path, "ab") as log:
+        with open(log_path, "wb") as log:
             proc = subprocess.Popen(argv, cwd=p["repo"], env=env,
                                     stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, start_new_session=True)
@@ -1826,7 +1858,8 @@ class Relay:
                 return append_record(p["ledger"], checkin_record(
                     {"session_id": thread, "cwd": p["repo"],
                      "transcript_path": find_codex_rollout(thread, self.env)},
-                    p["chain"], p["generation"], "codex", p["handoff"], via="exec-json"))
+                    p["chain"], p["generation"], "codex", p["handoff"], via="exec-json",
+                    nonce=p["nonce"]))
             if proc.poll() is not None:
                 return {"died": proc.returncode}
             return None
@@ -1877,7 +1910,8 @@ class Relay:
                     return append_record(p["ledger"], checkin_record(
                         {"session_id": meta.get("id") or meta.get("session_id"),
                          "transcript_path": path, "cwd": meta.get("cwd")},
-                        p["chain"], p["generation"], "codex", p["handoff"], via="rollout-scan"))
+                        p["chain"], p["generation"], "codex", p["handoff"], via="rollout-scan",
+                        nonce=p["nonce"]))
             dead = subprocess.run([o.tmux_bin, "display-message", "-p", "-t",
                                    "=%s:0.0" % p["tmux_session"], "#{pane_dead}"],
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -1901,7 +1935,12 @@ class Relay:
         if mode == "app":
             record = self._codex_app(env)
             if record == "fallback":
+                # A new spawn, so a new nonce: a late check-in from the failed
+                # app attempt must not pass for the exec successor.
                 mode = "exec"
+                p["nonce"] = p["fallback_nonce"]
+                p["relay_env"][NONCE_ENV] = p["nonce"]
+                env = successor_env(self.env, p["relay_env"])
                 record = self._codex_exec(env, p["fallback_argv"], p["fallback_log"])
         elif mode == "exec":
             record = self._codex_exec(env, p["argv"], p["log"])
@@ -2039,7 +2078,7 @@ def checkin_main(argv, stdin=None):
     """`relay.py checkin ...` — the successor's SessionStart hook. Always exit 0
     and print nothing: SessionStart stdout would land in the model's context."""
     p = argparse.ArgumentParser(prog="relay.py checkin")
-    for flag in ("--ledger", "--chain", "--agent", "--handoff", "--generation"):
+    for flag in ("--ledger", "--chain", "--agent", "--handoff", "--generation", "--nonce"):
         p.add_argument(flag)
     try:
         args, _ = p.parse_known_args(argv)
@@ -2050,7 +2089,7 @@ def checkin_main(argv, stdin=None):
         env = dict(os.environ)
         for key, value in ((LEDGER_ENV, args.ledger), (CHAIN_ENV, args.chain),
                            (AGENT_ENV, args.agent), (HANDOFF_ENV, args.handoff),
-                           (GENERATION_ENV, args.generation)):
+                           (GENERATION_ENV, args.generation), (NONCE_ENV, args.nonce)):
             if value is not None:
                 env[key] = value
         checkin_from_hook(payload, env)

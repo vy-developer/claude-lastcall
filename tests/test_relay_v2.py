@@ -1245,5 +1245,68 @@ class TestRetirementScope(RelayV2Case):
         self.assertEqual(relay.plan_retirement(pred)["argv"][:2], ["tmux", "kill-session"])
 
 
+
+class TestRetriesNeverVerifyAStaleSuccessor(RelayV2Case):
+    """Review finding: a retry from the same predecessor reused its
+    generation, _wait took ANY check-in with chain + generation + agent, and
+    the exec log was appended to — so a retry verified the stale successor
+    of the earlier attempt and the new one's check-in was suppressed."""
+
+    def seed(self, *records):
+        folder = os.path.join(self.tmp, ".lastcall", "relay")
+        for record in records:
+            relay.append_record(os.path.join(folder, "chainR.jsonl"),
+                                dict(record, chain="chainR"))
+        return folder
+
+    def verified(self):
+        return [r for r in self.ledger() if r["event"] == "verified"]
+
+    def test_a_retry_gets_a_new_generation_and_verifies_the_new_successor(self):
+        self.seed({"event": "spawn", "generation": 2, "agent": "claude"},
+                  {"event": "checkin", "generation": 2, "agent": "claude",
+                   "session_id": "stale-session", "via": "hook"})
+        result = self.relay(self.repo(), extra={relay.CHAIN_ENV: "chainR",
+                                                relay.GENERATION_ENV: "1"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("handoff 3", result.stdout)
+        self.assertNotEqual(self.verified()[0]["session_id"], "stale-session")
+
+    def test_a_stale_checkin_neither_passes_nor_blocks_the_new_one(self):
+        self.seed({"event": "checkin", "generation": 2, "agent": "claude",
+                   "session_id": "stale-session", "via": "hook"})
+        result = self.relay(self.repo(), extra={relay.CHAIN_ENV: "chainR",
+                                                relay.GENERATION_ENV: "1"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("no hook check-in", result.stdout)
+        verified = self.verified()[0]["session_id"]
+        self.assertNotEqual(verified, "stale-session")
+        spawn = [r for r in self.ledger() if r["event"] == "spawn"][0]
+        checkin = [r for r in self.ledger() if r["event"] == "checkin"
+                   and r["session_id"] == verified][0]
+        self.assertTrue(spawn["nonce"])
+        self.assertEqual((checkin["nonce"], checkin["via"]), (spawn["nonce"], "hook"))
+
+    def test_an_old_exec_log_is_never_read_for_the_new_thread(self):
+        folder = self.seed({"event": "note"})
+        with open(os.path.join(folder, "chainR-1.log"), "w") as fh:
+            fh.write(json.dumps({"type": "thread.started", "thread_id": "stale-thread"}) + "\n")
+        result = self.relay(self.repo(), "--agent", "codex", "--codex-mode", "exec",
+                            "--no-name-thread", extra={relay.CHAIN_ENV: "chainR",
+                                                       relay.GENERATION_ENV: "0"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotEqual(self.verified()[0]["session_id"], "stale-thread")
+
+    def test_the_exec_fallback_is_a_new_spawn_with_its_own_nonce(self):
+        result = self.relay(self.repo(), "--agent", "codex",
+                            extra={"FAKE_APP_FAIL": "thread/start"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        spawns = [r for r in self.ledger() if r["event"] == "spawn"]
+        self.assertEqual([r["mode"] for r in spawns], ["app", "exec"])
+        self.assertNotEqual(spawns[0]["nonce"], spawns[1]["nonce"])
+        checkin = [r for r in self.ledger() if r["event"] == "checkin"][-1]
+        self.assertEqual((checkin["via"], checkin["nonce"]), ("exec-json", spawns[1]["nonce"]))
+
+
 if __name__ == "__main__":
     unittest.main()

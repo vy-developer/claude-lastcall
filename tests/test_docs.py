@@ -198,6 +198,25 @@ class TestLineEndings(unittest.TestCase):
                                      "%s has CRLF line endings" % path)
 
 
+class TestRelayTemplateMatchesTheRelay(unittest.TestCase):
+    """The wrap-up template is what the assistant believes about the relay.
+    It still said the relay "never kills anything" after 1.7.0 taught the
+    launcher to retire the predecessor itself."""
+
+    def template(self):
+        with open(os.path.join(ROOT, "plugins", "lastcall", "templates",
+                               "handoff-relay.md"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_it_does_not_claim_the_relay_never_kills(self):
+        self.assertNotIn("never kills", self.template())
+
+    def test_it_describes_both_ways_the_predecessor_is_retired(self):
+        text = self.template()
+        self.assertIn("kill_predecessor", text)
+        self.assertIn("ASKED", text)
+
+
 class TestOnboardingCoversTheFeatures(unittest.TestCase):
     """The onboarding text is what the assistant knows about this tool. It went
     stale once already: token thresholds, the window floor and model selection

@@ -45,10 +45,13 @@ your handoff with NO user prompt, so anything you leave out is lost.
 
      It spawns the successor in tmux seeded with the newest handoff and waits
      until that session has actually MADE A TOOL CALL before reporting success
-     — not merely that a process exists. It never kills anything: the successor
-     is ASKED, in its prompt, to retire this session once it has proved Step 0
-     and committed a checkpoint. That is an instruction, not a guarantee, so do
-     not assume this session will end.
+     — not merely that a process exists. Nothing is killed before then. After
+     that, THIS session is retired one of two ways: if "kill_predecessor" is
+     set, the launcher itself kills it a few seconds after reporting success;
+     otherwise the successor is ASKED, in its prompt, to retire it once it has
+     proved Step 0 and committed a checkpoint — an instruction, not a
+     guarantee. Either way, start nothing after the relay succeeds, and do not
+     assume this session will end.
 
      Non-zero exit means THIS session is still alive and must report the
      failure; the launcher prints where its log ended up. Add --skip-permissions

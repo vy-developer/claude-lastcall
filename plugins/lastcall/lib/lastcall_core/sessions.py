@@ -720,7 +720,7 @@ def _usage_cell(rec: SessionRecord) -> str:
         return "\u2013"
     window = getattr(usage, "window", None)
     if isinstance(window, int) and window > 0:
-        return "%d%% %s" % (round(100.0 * tokens / window), _k(tokens))
+        return "%s/%s %d%%" % (_k(tokens), _k(window), round(100.0 * tokens / window))
     return _k(tokens)
 
 

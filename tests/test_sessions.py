@@ -477,7 +477,7 @@ class TestStatus(Homes):
         with mock.patch.dict(S.USAGE_PROVIDERS, {}, clear=True):
             self.assertEqual(S._usage_cell(rec), "–")
             S.register_usage_provider("claude", lambda r: U())
-            self.assertEqual(S._usage_cell(rec), "45% 90k")
+            self.assertEqual(S._usage_cell(rec), "90k/200k 45%")
             S.register_usage_provider("claude", lambda r: 1 / 0)
             self.assertEqual(S._usage_cell(rec), "?")
 

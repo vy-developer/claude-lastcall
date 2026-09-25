@@ -2018,6 +2018,15 @@ class TestConfigSearch(TempCase):
         self.assertIsNone(config["_config_path"])
         self.assertEqual(config["red_percent"], cg.DEFAULTS["red_percent"])
 
+    def test_a_git_file_marks_a_worktree_as_the_project(self):
+        worktree = os.path.join(self.dir, "worktree")
+        subdir = os.path.join(worktree, "src", "deep")
+        os.makedirs(subdir)
+        with open(os.path.join(worktree, ".git"), "w") as handle:
+            handle.write("gitdir: /elsewhere/.git/worktrees/worktree\n")
+        config = lc_config.load_config({"cwd": subdir}, self.env)
+        self.assertEqual(config["_project_dir"], worktree)
+
     def test_unknown_keys_are_problems_but_comments_are_not(self):
         self.write(os.path.join(self.dir, ".lastcall.json"),
                    {"_comment": "x", "red_precent": 60})

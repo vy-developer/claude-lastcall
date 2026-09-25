@@ -520,7 +520,7 @@ on successors; do not set those yourself.
 python3 -m unittest discover -s tests -v
 ```
 
-687 tests, standard library only, no network. They cover the failure modes
+688 tests, standard library only, no network. They cover the failure modes
 that shaped the design: thresholds that can never fire, zones that never
 re-arm, sidechain usage counted as the main session's, Stop payloads Codex
 would reject, and a README that drifts from the code.

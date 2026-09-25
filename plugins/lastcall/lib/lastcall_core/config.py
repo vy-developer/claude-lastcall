@@ -243,7 +243,9 @@ def project_dir(payload=None, env=None):
     for path in _walk_up(start):
         if _is_home(path):
             continue
-        if any(os.path.isdir(os.path.join(path, marker)) for marker in PROJECT_MARKERS):
+        # os.path.exists, not isdir: in a git worktree or submodule .git is a
+        # file pointing at the real repository.
+        if any(os.path.exists(os.path.join(path, marker)) for marker in PROJECT_MARKERS):
             return path
     return os.path.abspath(start)
 

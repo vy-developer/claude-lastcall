@@ -617,13 +617,43 @@ Requires `bash`, `tmux`, `python3` and the `claude` CLI. Git is optional. The gu
 none of these — if you are on Windows, or you just want the alarm, ignore this
 whole section.
 
+### Relay v2 (preview, not wired in yet)
+
+[`plugins/lastcall/lib/lastcall_core/relay.py`](plugins/lastcall/lib/lastcall_core/relay.py)
+is the terminal-free successor to `handoff.sh`. It hands over to **Claude Code
+or Codex** (`--agent claude|codex`), needs neither tmux nor a TTY — so a
+desktop-app session can hand over too — and proves the successor started by a
+**check-in** on a ledger (`~/.lastcall/relay/<chain>.jsonl`) rather than by
+guessing a transcript path:
+
+- Claude: `claude --bg -n NAME --remote-control NAME --session-id UUID
+  --settings JSON PROMPT`. The inline settings add a SessionStart hook that runs
+  `relay.py checkin`; the relay then looks for the `bridge-session` entry and
+  says `remote control did NOT connect` when it is missing
+- Codex: a detached `codex exec --json`, proven by its `thread.started` event and
+  named through `codex app-server` (`thread/name/set`); `--codex-mode tmux` runs
+  the interactive TUI instead
+- successors are named `<prefix> · handoff N · <topic>`, with N carried along
+  the chain
+- `--retire-predecessor` uses `claude stop` for a background session, tmux for
+  a tmux pane, a delayed SIGTERM for a plain CLI process, and never kills a
+  desktop-app session
+
+```
+python3 plugins/lastcall/lib/lastcall_core/relay.py --dry-run            # print every command
+python3 plugins/lastcall/lib/lastcall_core/relay.py --agent codex --dry-run
+```
+
+`claude --bg` refuses an untrusted folder outright ("Workspace not trusted");
+the relay reports that as a precondition failure and never edits `~/.claude.json`.
+
 ## Tests
 
 ```
 python3 -m unittest discover -s tests -v
 ```
 
-351 tests, standard library only, no network. They cover the failure modes that
+386 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

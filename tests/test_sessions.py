@@ -208,6 +208,46 @@ class TestHelpers(unittest.TestCase):
         self.assertFalse(S.pid_alive("nope"))
         self.assertFalse(S.pid_alive(0))
 
+    @unittest.skipUnless(os.name == "posix", "POSIX signal-0 probe")
+    def test_pid_alive_posix_probes_with_signal_zero_only(self):
+        with mock.patch.object(S.os, "kill") as kill, \
+                mock.patch.object(S, "_pid_alive_nt") as nt:
+            self.assertTrue(S.pid_alive(4242))
+        kill.assert_called_once_with(4242, 0)
+        nt.assert_not_called()
+        with mock.patch.object(S.os, "kill", side_effect=PermissionError):
+            self.assertTrue(S.pid_alive(4242))
+        with mock.patch.object(S.os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(S.pid_alive(4242))
+
+    def test_pid_alive_on_windows_never_signals(self):
+        with mock.patch.object(S.os, "name", "nt"), \
+                mock.patch.object(S.os, "kill") as kill, \
+                mock.patch.object(S, "_pid_alive_nt", return_value=True) as nt:
+            self.assertTrue(S.pid_alive("4242"))
+            self.assertFalse(S.pid_alive(0))
+        nt.assert_called_once_with(4242)
+        kill.assert_not_called()
+
+    def test_pid_alive_windows_tasklist_fallback(self):
+        def fake_run(argv, **_kw):
+            self.assertEqual(argv[:3], ["tasklist", "/FI", "PID eq 4242"])
+            return mock.Mock(stdout=b'"python.exe","4242","Console","1","9,000 K"\r\n')
+        with mock.patch.object(S.subprocess, "run", side_effect=fake_run):
+            self.assertTrue(S._pid_alive_tasklist(4242))
+        info = b"INFO: No tasks are running which match the specified criteria.\r\n"
+        with mock.patch.object(S.subprocess, "run", return_value=mock.Mock(stdout=info)):
+            self.assertFalse(S._pid_alive_tasklist(4242))
+        with mock.patch.object(S.subprocess, "run", side_effect=OSError):
+            self.assertFalse(S._pid_alive_tasklist(4242))
+
+    @unittest.skipIf(os.name == "nt", "exercises the no-kernel32 path")
+    def test_pid_alive_nt_without_kernel32_uses_tasklist(self):
+        # ctypes has no WinDLL off Windows: the NT probe must degrade, not raise.
+        with mock.patch.object(S, "_pid_alive_tasklist", return_value=True) as tl:
+            self.assertTrue(S._pid_alive_nt(4242))
+        tl.assert_called_once_with(4242)
+
     def test_homes_follow_env(self):
         with mock.patch.dict(os.environ, {"LASTCALL_CLAUDE_HOME": "/x/c",
                                           "LASTCALL_CODEX_HOME": "/x/o"}):

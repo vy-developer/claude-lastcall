@@ -50,6 +50,11 @@ fail = os.environ.get("FAKE_AGENT_FAIL")
 if fail and fail in args:
     sys.stderr.write("fake failure\n")
     sys.exit(3)
+once = os.environ.get("FAKE_AGENT_FAIL_ONCE")
+if once and once in args and not os.path.exists(os.path.join(folder, name + ".failed")):
+    open(os.path.join(folder, name + ".failed"), "w").close()
+    sys.stderr.write("fake failure\n")
+    sys.exit(3)
 state_path = os.path.join(folder, name + ".state.json")
 try:
     with open(state_path) as fh:
@@ -65,6 +70,27 @@ def market_name(src):
     with open(os.path.join(src, ".claude-plugin", "marketplace.json")) as fh:
         return json.load(fh)["name"]
 
+def source_of(pid):
+    """(plugin dir, version) in the marketplace's checkout, like the agents."""
+    src = state["markets"][pid.split("@")[1]]
+    if not os.path.isdir(src):          # a GitHub-style source: pretend
+        return None, os.environ.get("FAKE_REMOTE_VERSION", "1.7.0")
+    with open(os.path.join(src, ".claude-plugin", "marketplace.json")) as fh:
+        entry = json.load(fh)["plugins"][0]
+    root = os.path.normpath(os.path.join(src, entry["source"]))
+    with open(os.path.join(root, ".claude-plugin", "plugin.json")) as fh:
+        return root, json.load(fh)["version"]
+
+def copy_to_cache(pid):
+    """Codex copies the plugin into $CODEX_HOME/plugins/cache/<m>/<p>/<ver>."""
+    import shutil
+    root, ver = source_of(pid)
+    plugin, market = pid.split("@")
+    dest = os.path.join(os.environ["CODEX_HOME"], "plugins", "cache", market, plugin, ver)
+    shutil.rmtree(dest, ignore_errors=True)
+    shutil.copytree(root, dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    return ver
+
 if args[:1] != ["plugin"]:
     sys.exit(2)
 rest = args[1:]
@@ -73,7 +99,9 @@ if rest[:2] == ["marketplace", "list"]:
         out = [{"name": n, "source": "directory", "path": p} for n, p in state["markets"].items()]
     else:
         out = {"marketplaces": [{"name": n, "root": p,
-                                 "marketplaceSource": {"sourceType": "local", "source": p}}
+                                 "marketplaceSource": {
+                                     "sourceType": "local" if os.path.isdir(p) else "git",
+                                     "source": p}}
                                 for n, p in state["markets"].items()]}
     print(json.dumps(out))
 elif rest[:2] == ["marketplace", "add"]:
@@ -86,11 +114,13 @@ elif rest[:2] == ["marketplace", "remove"]:
     save()
 elif rest[:1] == ["list"]:
     if name == "claude":
-        out = [{"id": pid, "version": "1.7.0", "scope": "user", "enabled": p["enabled"],
+        out = [{"id": pid, "version": p.get("version", "1.7.0"), "scope": "user",
+                "enabled": p["enabled"],
                 "installPath": "/nowhere"} for pid, p in state["plugins"].items()]
     else:
         out = {"installed": [{"pluginId": pid, "name": pid.split("@")[0],
                               "marketplaceName": pid.split("@")[1], "installed": True,
+                              "version": p.get("version", "1.7.0"),
                               "enabled": p["enabled"]} for pid, p in state["plugins"].items()]}
     print(json.dumps(out))
 elif rest[:1] in (["install"], ["add"]):
@@ -98,7 +128,27 @@ elif rest[:1] in (["install"], ["add"]):
     if pid.split("@")[1] not in state["markets"]:
         sys.stderr.write("unknown marketplace\n")
         sys.exit(1)
-    state["plugins"][pid] = {"enabled": True}
+    if name == "codex" and os.environ.get("FAKE_CODEX_CACHE"):
+        ver = copy_to_cache(pid)
+    else:
+        ver = source_of(pid)[1]
+    if name == "claude" and pid in state["plugins"]:
+        pass  # claude: "already installed", changes nothing
+    else:
+        state["plugins"][pid] = {"enabled": True, "version": ver}
+    save()
+elif rest[:2] == ["marketplace", "update"] and name == "claude":
+    if rest[2:3] and rest[2] not in state["markets"]:
+        sys.exit(1)
+elif rest[:2] == ["marketplace", "upgrade"] and name == "codex":
+    if os.path.isdir(state["markets"].get(rest[2], "")):
+        sys.stderr.write("marketplace is not configured as a Git marketplace\n")
+        sys.exit(1)
+elif rest[:1] == ["update"] and name == "claude":
+    pid = rest[1]
+    if pid not in state["plugins"]:
+        sys.exit(1)
+    state["plugins"][pid]["version"] = source_of(pid)[1]
     save()
 elif rest[:1] == ["enable"]:
     state["plugins"][rest[1]]["enabled"] = True
@@ -322,6 +372,142 @@ class TestPluginMethod(Sandbox):
         self.assertEqual(code, 1, out)
         self.assertIn("Failed for: claude", out)
         self.assertIn(PLUGIN_ID, self.state("codex")["plugins"])
+
+
+@posix_only
+class TestRefresh(Sandbox):
+    """`install --refresh` after a `git pull` of the checkout."""
+    agents_on_path = ("claude", "codex")
+
+    def refresh(self, *extra, **kw):
+        return self.run_cli("install", "--refresh", "--no-link-bin", *extra, **kw)
+
+    def installed(self, agent, version="1.7.0", enabled=True, market=ROOT):
+        self.set_state(agent, {"markets": {MARKET: market},
+                               "plugins": {PLUGIN_ID: {"enabled": enabled,
+                                                       "version": version}}})
+
+    def test_claude_same_version_reads_the_catalog_and_says_it_loads_in_place(self):
+        self.installed("claude", version=cli.version())
+        for _ in range(2):
+            code, out = self.refresh("--claude")
+            self.assertEqual(code, 0, out)
+            self.assertIn("in place from %s" % cli.PLUGIN_ROOT, out)
+            self.assertIn("/reload-plugins", out)
+        self.assertEqual(self.mutations("claude"),
+                         [["plugin", "marketplace", "update", MARKET]] * 2)
+
+    def test_claude_bumped_version_runs_plugin_update_once(self):
+        self.installed("claude", version="0.0.1")
+        code, out = self.refresh("--claude")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.mutations("claude"), [
+            ["plugin", "marketplace", "update", MARKET],
+            ["plugin", "update", PLUGIN_ID, "--scope", "user"],
+        ])
+        self.assertEqual(self.state("claude")["plugins"][PLUGIN_ID]["version"], cli.version())
+        code, out = self.refresh("--claude")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.mutations("claude")[2:],
+                         [["plugin", "marketplace", "update", MARKET]])
+
+    def test_codex_stale_cache_is_re_added_then_left_alone(self):
+        env = {"FAKE_CODEX_CACHE": "1"}
+        code, out = self.run_cli("install", "--codex", "--no-link-bin", extra_env=env)
+        self.assertEqual(code, 0, out)
+        cache = os.path.join(self.codex_home, "plugins", "cache", MARKET, "lastcall",
+                             cli.version())
+        with open(os.path.join(cache, "scripts", "lastcall.py"), "a") as fh:
+            fh.write("# stale\n")                    # the checkout moved on
+        code, out = self.refresh("--codex", extra_env=env)
+        self.assertEqual(code, 0, out)
+        self.assertIn("no update command for a local marketplace", out)
+        self.assertEqual(self.mutations("codex")[-1], ["plugin", "add", PLUGIN_ID])
+        self.assertNotIn(["plugin", "marketplace", "upgrade", MARKET], self.mutations("codex"))
+        self.assertEqual(cli.tree_digest(cache), cli.tree_digest(cli.PLUGIN_ROOT))
+        before = len(self.mutations("codex"))
+        code, out = self.refresh("--codex", extra_env=env)
+        self.assertEqual(code, 0, out)
+        self.assertIn("already matches this checkout", out)
+        self.assertEqual(len(self.mutations("codex")), before, "second refresh mutated")
+
+    def test_codex_older_version_is_re_added(self):
+        self.installed("codex", version="0.0.1")
+        code, out = self.refresh("--codex")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.mutations("codex"), [["plugin", "add", PLUGIN_ID]])
+
+    def test_codex_disabled_plugin_is_not_silently_re_enabled(self):
+        self.installed("codex", version="0.0.1", enabled=False)
+        code, out = self.refresh("--codex")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.mutations("codex"), [])
+        self.assertIn("disabled; not refreshed", out)
+
+    def test_codex_falls_back_to_remove_and_add_of_the_plugin_only(self):
+        self.installed("codex", version="0.0.1")
+        code, out = self.refresh("--codex", extra_env={"FAKE_AGENT_FAIL_ONCE": "add"})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.mutations("codex"), [
+            ["plugin", "add", PLUGIN_ID],
+            ["plugin", "remove", PLUGIN_ID],
+            ["plugin", "add", PLUGIN_ID],
+        ])
+        self.assertIn("falling back to remove + add", out)
+        self.assertIn(MARKET, self.state("codex")["markets"])
+
+    def test_codex_git_marketplace_is_upgraded_first(self):
+        self.installed("codex", market="vy-developer/claude-lastcall")
+        code, out = self.refresh("--codex")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.mutations("codex"), [
+            ["plugin", "marketplace", "upgrade", MARKET],
+            ["plugin", "add", PLUGIN_ID],
+        ])
+
+    def test_refresh_installs_what_is_missing(self):
+        code, out = self.refresh()
+        self.assertEqual(code, 0, out)
+        self.assertIn(PLUGIN_ID, self.state("claude")["plugins"])
+        self.assertIn(PLUGIN_ID, self.state("codex")["plugins"])
+        self.assertIn("Refreshing Last Call", out)
+
+    def test_dry_run_prints_the_refresh_commands_and_changes_nothing(self):
+        self.installed("claude", version="0.0.1")
+        self.installed("codex", version="0.0.1")
+        code, out = self.refresh("--dry-run")
+        self.assertEqual(code, 0, out)
+        self.assertIn("would run: claude plugin marketplace update %s" % MARKET, out)
+        self.assertIn("would run: claude plugin update %s --scope user" % PLUGIN_ID, out)
+        self.assertIn("would run: codex plugin add %s" % PLUGIN_ID, out)
+        for agent in ("claude", "codex"):
+            self.assertEqual(self.mutations(agent), [], "dry run mutated %s" % agent)
+            self.assertEqual(self.state(agent)["plugins"][PLUGIN_ID]["version"], "0.0.1")
+
+    def test_refresh_with_the_hooks_method_is_refused(self):
+        code, out = self.refresh("--claude", "--method", "hooks")
+        self.assertEqual(code, 2, out)
+        self.assertIn("nothing to refresh", out)
+
+
+class TestTreeDigest(unittest.TestCase):
+    def test_ignores_bytecode_and_sees_content_and_deletions(self):
+        a = tempfile.mkdtemp(prefix="lastcall-tree-")
+        self.addCleanup(shutil.rmtree, a, True)
+        dump(os.path.join(a, "x", "one.json"), {"v": 1})
+        b = a + "-copy"
+        shutil.copytree(a, b)
+        self.addCleanup(shutil.rmtree, b, True)
+        os.makedirs(os.path.join(b, "x", "__pycache__"))
+        open(os.path.join(b, "x", "__pycache__", "one.cpython-39.pyc"), "w").close()
+        open(os.path.join(b, ".DS_Store"), "w").close()
+        self.assertEqual(cli.tree_digest(a), cli.tree_digest(b))
+        dump(os.path.join(b, "x", "one.json"), {"v": 2})
+        self.assertNotEqual(cli.tree_digest(a), cli.tree_digest(b))
+        dump(os.path.join(a, "x", "one.json"), {"v": 2})
+        dump(os.path.join(b, "x", "gone.json"), {})
+        self.assertNotEqual(cli.tree_digest(a), cli.tree_digest(b))
+        self.assertIsNone(cli.tree_digest(os.path.join(a, "missing")))
 
 
 @posix_only
@@ -588,7 +774,6 @@ class TestSubcommands(Sandbox):
         self.assertEqual(code, 0, out)
         self.assertIsInstance(json.loads(out), dict)
 
-    @posix_only  # sessions.pid_alive uses os.kill(pid, 0): CTRL_C_EVENT on Windows
     def test_status_context_column_comes_from_the_agent_adapter(self):
         sid = "11111111-2222-3333-4444-555555555555"
         dump(os.path.join(self.claude_home, "sessions", "%d.json" % os.getpid()),

@@ -673,31 +673,61 @@ whole section.
 
 [`plugins/lastcall/lib/lastcall_core/relay.py`](plugins/lastcall/lib/lastcall_core/relay.py)
 is the terminal-free successor to `handoff.sh`. It hands over to **Claude Code
-or Codex** (`--agent claude|codex`), needs neither tmux nor a TTY — so a
-desktop-app session can hand over too — and proves the successor started by a
-**check-in** on a ledger (`~/.lastcall/relay/<chain>.jsonl`) rather than by
-guessing a transcript path:
+or Codex** (`--agent claude|codex`), needs neither tmux nor a TTY (so a
+desktop-app session can hand over too), and refuses unless the handoff is
+committed. It proves the successor started by a **check-in** on a ledger,
+`~/.lastcall/relay/<chain>.jsonl`, matched by chain + generation rather than by
+guessing a transcript path. The hooks do not call it yet.
 
-- Claude: `claude --bg -n NAME --remote-control NAME --session-id UUID
-  --settings JSON PROMPT`. The inline settings add a SessionStart hook that runs
-  `relay.py checkin`; the relay then looks for the `bridge-session` entry and
-  says `remote control did NOT connect` when it is missing
-- Codex: a detached `codex exec --json`, proven by its `thread.started` event and
-  named through `codex app-server` (`thread/name/set`); `--codex-mode tmux` runs
-  the interactive TUI instead
-- successors are named `<prefix> · handoff N · <topic>`, with N carried along
-  the chain
-- `--retire-predecessor` uses `claude stop` for a background session, tmux for
-  a tmux pane, a delayed SIGTERM for a plain CLI process, and never kills a
-  desktop-app session
+**Claude**: `claude --bg -n NAME --remote-control NAME --settings JSON PROMPT`.
+
+- No `--session-id`: `--bg` picks the id itself and ignores that flag. The
+  relay reads the short id from the `backgrounded · <short> · <name>` line
+  (falling back to `claude agents --json`)
+- the inline `--settings` adds a SessionStart hook that runs `relay.py checkin`,
+  which writes the session id and transcript path to the ledger
+- Remote Control is checked in `~/.claude/jobs/<short>/state.json`
+  (`bridgeSessionId`), then in a `bridge-session` transcript entry, then in
+  `~/.claude/sessions`. If none is found, it prints `remote control did NOT connect`,
+  and `--require-remote-control` makes that exit 2
+- `claude --bg` will not start in a folder you have not trusted ("Workspace not
+  trusted"). Run `claude` once in the repo and accept the prompt. The relay
+  reports this and never edits `~/.claude.json`
+
+**Codex**: `--codex-mode app` (the default) starts a detached runner
+(`relay.py codex-app-runner`) that drives `codex app-server` over stdio
+JSON-RPC: `initialize`, `thread/start`, `thread/name/set`, `turn/start`. The
+thread's source is `vscode`, so it shows up where interactive threads do. The
+runner checks in once the turn is accepted and keeps the server up until the
+turn completes (`--codex-app-max-seconds`, default 6 h, then `turn/interrupt`).
+Approval requests are declined, or accepted with `--skip-permissions`. If app
+mode fails before the turn starts, the relay falls back to `codex exec --json`
+and warns that the successor will not be listed (an empty thread is
+archived). `--codex-mode exec` picks that directly. `--codex-mode tmux` runs the
+TUI in a tmux session and is proven by a new rollout in the repo.
+
+- **Names**: successors are called `<prefix> · handoff N · <topic>`, where the
+  prefix defaults to the repo name and the topic to the handoff's first
+  heading. N carries along the chain. Codex threads are named via
+  `thread/name/set`
+- **Retirement** is off unless you pass `--retire-predecessor`, and it only
+  happens after the check-in. A `--bg` session is ended with `claude stop <short>`,
+  a tmux pane with `tmux kill-session`, and a plain CLI process with a delayed
+  SIGTERM from a detached child (no `setsid` binary needed). A desktop-app
+  session is **never** killed: the relay says so and leaves it to you
+
+What has been checked against real CLIs (Claude Code 2.1.281, Codex 0.153.4):
+Codex app mode end to end (source `vscode`, named, turn completed, listed by a
+default `thread/list`), the Claude `--bg` hook check-in, and `bridgeSessionId`
+in the job state of a `--bg` session. **Not verified live** (fake binaries
+only): the exec fallback, tmux mode and every retirement path. The Codex app
+sidebar and the `codex resume` picker have not been checked by eye. That they
+list the thread is inferred from its `vscode` source.
 
 ```
 python3 plugins/lastcall/lib/lastcall_core/relay.py --dry-run            # print every command
 python3 plugins/lastcall/lib/lastcall_core/relay.py --agent codex --dry-run
 ```
-
-`claude --bg` refuses an untrusted folder outright ("Workspace not trusted");
-the relay reports that as a precondition failure and never edits `~/.claude.json`.
 
 ## Tests
 
@@ -705,7 +735,7 @@ the relay reports that as a precondition failure and never edits `~/.claude.json
 python3 -m unittest discover -s tests -v
 ```
 
-512 tests, standard library only, no network. They cover the failure modes that
+527 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

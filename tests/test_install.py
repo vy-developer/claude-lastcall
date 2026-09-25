@@ -74,7 +74,7 @@ def source_of(pid):
     """(plugin dir, version) in the marketplace's checkout, like the agents."""
     src = state["markets"][pid.split("@")[1]]
     if not os.path.isdir(src):          # a GitHub-style source: pretend
-        return None, os.environ.get("FAKE_REMOTE_VERSION", "1.7.0")
+        return None, os.environ.get("FAKE_REMOTE_VERSION", "1.8.0")
     with open(os.path.join(src, ".claude-plugin", "marketplace.json")) as fh:
         entry = json.load(fh)["plugins"][0]
     root = os.path.normpath(os.path.join(src, entry["source"]))
@@ -114,13 +114,13 @@ elif rest[:2] == ["marketplace", "remove"]:
     save()
 elif rest[:1] == ["list"]:
     if name == "claude":
-        out = [{"id": pid, "version": p.get("version", "1.7.0"), "scope": "user",
+        out = [{"id": pid, "version": p.get("version", "1.8.0"), "scope": "user",
                 "enabled": p["enabled"],
                 "installPath": "/nowhere"} for pid, p in state["plugins"].items()]
     else:
         out = {"installed": [{"pluginId": pid, "name": pid.split("@")[0],
                               "marketplaceName": pid.split("@")[1], "installed": True,
-                              "version": p.get("version", "1.7.0"),
+                              "version": p.get("version", "1.8.0"),
                               "enabled": p["enabled"]} for pid, p in state["plugins"].items()]}
     print(json.dumps(out))
 elif rest[:1] in (["install"], ["add"]):
@@ -382,7 +382,7 @@ class TestRefresh(Sandbox):
     def refresh(self, *extra, **kw):
         return self.run_cli("install", "--refresh", "--no-link-bin", *extra, **kw)
 
-    def installed(self, agent, version="1.7.0", enabled=True, market=ROOT):
+    def installed(self, agent, version="1.8.0", enabled=True, market=ROOT):
         self.set_state(agent, {"markets": {MARKET: market},
                                "plugins": {PLUGIN_ID: {"enabled": enabled,
                                                        "version": version}}})

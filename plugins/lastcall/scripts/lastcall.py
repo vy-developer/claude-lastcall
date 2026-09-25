@@ -22,7 +22,7 @@ below are re-exported so code that imported this module keeps working.
 import os
 import sys
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 _LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 if _LIB not in sys.path:

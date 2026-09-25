@@ -11,6 +11,7 @@ subagent usage records being read as the main session's context.
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -741,23 +742,40 @@ class TestTemplateWhitespace(TempCase):
         self.assertEqual(
             body, "  1. FINISH what is in flight.\n     continued here\n  2. THEN this.")
 
-    def test_relay_placeholder_resolves_to_the_shipped_script(self):
-        """A wrap-up template says "run {relay}" and must get a real path, so
-        nobody has to hand-edit one that changes with every plugin update."""
+    def test_relay_placeholder_resolves_to_the_shipped_command(self):
+        """A wrap-up template says "run {relay}" and must get a real command,
+        so nobody has to hand-edit a path that changes with every update."""
         path = os.path.join(self.dir, "wrap.md")
         with open(path, "w") as fh:
-            fh.write("step 6: run bash {relay}")
+            fh.write("step 6: run {relay}")
         config = self.config(template=path)
         message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
-        self.assertIn(cg.RELAY_SCRIPT, message)
+        self.assertIn("step 6: run %s" % cg.RELAY_COMMAND, message)
         self.assertTrue(os.path.isfile(cg.RELAY_SCRIPT), cg.RELAY_SCRIPT)
+        launcher = shlex.split(cg.RELAY_COMMAND)[1]
+        self.assertTrue(os.path.isfile(launcher), launcher)
+        self.assertEqual(shlex.split(cg.RELAY_COMMAND)[2], "relay")
+
+    def test_a_1x_bash_relay_line_still_renders_a_runnable_command(self):
+        """1.x templates say "bash {relay}"; {relay} is now a python command,
+        and `bash python3 ...` would fail, so render drops the shell."""
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w") as fh:
+            fh.write("run bash {relay} --dry-run, or sh {relay}")
+        config = self.config(template=path)
+        message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
+        self.assertIn("run %s --dry-run, or %s" % (cg.RELAY_COMMAND, cg.RELAY_COMMAND),
+                      message)
+        self.assertNotIn("bash python3", message)
 
     def test_shipped_relay_template_renders(self):
         template = os.path.join(ROOT, "plugins", "lastcall", "templates",
                                 "handoff-relay.md")
         config = self.config(template=template)
         message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
-        self.assertIn("bash %s" % cg.RELAY_SCRIPT, message)
+        self.assertIn(cg.RELAY_COMMAND, message)
+        self.assertNotIn("bash ", message)
+        self.assertIn("--agent codex", message)
         self.assertNotIn("{relay}", message)
 
     def test_surrounding_blank_lines_are_still_trimmed(self):
@@ -808,6 +826,27 @@ class TestHandoverReadiness(TempCase):
             {"name": "closing", "at": 80, "template": cg.RELAY_TEMPLATE}])
         _ready, checks = cg.handover_status(config)
         self.assertTrue(checks["template invokes the relay"])
+
+    def test_tmux_is_not_required_unless_codex_runs_in_tmux(self):
+        """Relay v2 needs relay.py, git and the successor's CLI; tmux only
+        for codex_mode "tmux"."""
+        _ready, checks = cg.handover_status(self.config(template=cg.RELAY_TEMPLATE))
+        self.assertNotIn("tmux on PATH", checks)
+        self.assertIn("claude or codex CLI on PATH", checks)
+        self.assertTrue(checks["relay script present"])
+        _ready, checks = cg.handover_status(self.config(
+            template=cg.RELAY_TEMPLATE, relay={"agent": "codex", "codex_mode": "tmux"}))
+        self.assertIn("codex CLI on PATH", checks)
+        self.assertIn("tmux on PATH (codex_mode tmux)", checks)
+
+    def test_a_template_calling_the_relay_by_name_counts_as_wired(self):
+        for line in ("lastcall relay --agent codex", "python3 /x/relay.py",
+                     "bash /x/relay/handoff.sh"):
+            path = os.path.join(self.dir, "wrap.md")
+            with open(path, "w") as fh:
+                fh.write("finally: " + line)
+            _ready, checks = cg.handover_status(self.config(template=path))
+            self.assertTrue(checks["template invokes the relay"], line)
 
     def test_relay_script_and_template_actually_ship(self):
         self.assertTrue(os.path.isfile(cg.RELAY_SCRIPT), cg.RELAY_SCRIPT)

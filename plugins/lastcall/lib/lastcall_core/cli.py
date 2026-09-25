@@ -6,6 +6,8 @@
     lastcall status [--json] ...        live sessions of both agents
     lastcall tidy ...                   propose names for old chats
     lastcall doctor | setup ...         the hook script's own checks / wizard
+    lastcall relay [--agent claude|codex] [--dry-run] ...
+                                        hand over to a fresh session
     lastcall version
 
 Standard library only, Python 3.9+. Reached through plugins/lastcall/bin/lastcall
@@ -976,6 +978,15 @@ def cmd_script(name, rest):
         return 130
 
 
+def cmd_relay(_name, rest):
+    """Hand over to a fresh Claude Code or Codex session (relay.py)."""
+    from . import relay
+    try:
+        return relay.main(list(rest), prog="lastcall relay")
+    except KeyboardInterrupt:
+        return 130
+
+
 def cmd_version(_args):
     print("lastcall %s" % version())
     print("  checkout : %s" % REPO_ROOT)
@@ -988,6 +999,8 @@ DELEGATES = {
     "tidy": ("propose names and groups for old chats (read-only unless --apply)", cmd_sessions),
     "doctor": ("check what is and is not wired up", cmd_script),
     "setup": ("configure the handoff (interactive wizard)", cmd_script),
+    "relay": ("hand over to a fresh Claude Code or Codex session (--dry-run to preview)",
+              cmd_relay),
 }
 
 

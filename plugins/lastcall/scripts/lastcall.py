@@ -39,7 +39,8 @@ try:
                                       measure, run_hook)
     from lastcall_core.render import (DEFAULT_TEMPLATE,  # noqa: F401
                                       HANDOFF_SKELETON, ONBOARDING,
-                                      RELAY_SCRIPT, RELAY_TEMPLATE, fill,
+                                      RELAY_COMMAND, RELAY_SCRIPT,
+                                      RELAY_TEMPLATE, fill,
                                       format_gates, format_verifier,
                                       read_template, render, zone_body)
     from lastcall_core.state import (prune_state, read_state,  # noqa: F401

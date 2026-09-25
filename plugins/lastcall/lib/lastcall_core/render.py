@@ -2,6 +2,8 @@
 post-compaction note, and the templates behind them."""
 
 import os
+import re
+import shlex
 
 # lib/lastcall_core/render.py -> plugins/lastcall
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -9,8 +11,15 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # "run this" without the user hand-editing a path that changes with every
 # plugin update.
 SCRIPT_PATH = os.path.join(PLUGIN_ROOT, "scripts", "lastcall.py")
-# The optional relay ships alongside; templates get it as {relay}.
-RELAY_SCRIPT = os.path.join(PLUGIN_ROOT, "relay", "handoff.sh")
+# The optional relay ships alongside; templates get it as {relay}: the whole
+# command, `python3 <plugin>/bin/lastcall relay`, which runs relay.py. A 1.x
+# template that says "bash {relay}" still works — render drops the "bash" —
+# and relay/handoff.sh is a deprecated shim that execs relay.py.
+RELAY_SCRIPT = os.path.join(PLUGIN_ROOT, "lib", "lastcall_core", "relay.py")
+RELAY_LAUNCHER = os.path.join(PLUGIN_ROOT, "bin", "lastcall")
+RELAY_COMMAND = "python3 %s relay" % shlex.quote(RELAY_LAUNCHER)
+LEGACY_RELAY_SCRIPT = os.path.join(PLUGIN_ROOT, "relay", "handoff.sh")
+_SHELL_BEFORE_RELAY = re.compile(r"\b(?:bash|sh)[ \t]+(?=\{relay\})")
 RELAY_TEMPLATE = os.path.join(PLUGIN_ROOT, "templates", "handoff-relay.md")
 
 HANDOFF_SKELETON = """\
@@ -103,7 +112,7 @@ them to a terminal wizard, and do not write anything until they have answered.
 Look first, so you ask about what is actually here rather than what might be:
 read AGENTS.md / CLAUDE.md / README, look for a test command in package.json,
 Makefile, pyproject.toml or CI config, check `git rev-parse --show-toplevel`,
-and check what is on PATH (tmux, claude, codex, gemini). Then propose answers
+and check what is on PATH (claude, codex, gemini, git). Then propose answers
 and ask the user to confirm or correct them. Ask a few at a time.
 
 What you need to settle:
@@ -139,16 +148,20 @@ What you need to settle:
    evidence. Store it as "verifier".
 
 7. AUTOMATIC HANDOVER: whether a fresh session should be spawned when context
-   runs out. If yes, settle all of these under "relay":
+   runs out. The relay needs the claude or codex CLI; git is optional and
+   only proves the handoff is committed. If yes, settle all of these under
+   "relay":
    - "repo": which directory to hand over, if not this one
    - "handoff_dir": where handoffs live, default docs/handoff
-   - "model" and "fallback_model": which model drives the successor, e.g.
-     "opus" with "fable,sonnet" as fallback.
+   - "agent": "claude" or "codex" for the successor. Leave it unset to hand
+     over to whichever agent is running; set it to hand over ACROSS agents.
+   - "model" and "fallback_model": which model drives a Claude successor,
+     e.g. "opus" with "fable,sonnet" as fallback; "codex_model" for Codex.
    - "skip_permissions": UNATTENDED. Be explicit that this means the successor
      runs tools without asking, and never enable it without a clear yes.
    - "remote_control": on by default, so you can reach the successor later.
-   - "kill_predecessor": retire the OLD session once the successor has proved
-     itself. Off by default. Recommend it whenever the handover is unattended,
+   - "kill_predecessor": retire the OLD session once the successor has checked
+     in (a desktop-app session is never killed). Off by default. Recommend it whenever the handover is unattended,
      because otherwise every handover leaves another session running forever.
 
 Then write .lastcall.json at the root of THIS project only — never a parent
@@ -280,7 +293,7 @@ def render(config, zone, tokens, window, transcript=None, assumed=False,
         "band": zone["name"],
         "zone": zone["name"],
         "at": zone["at"],
-        "relay": RELAY_SCRIPT,
+        "relay": RELAY_COMMAND,
         "setup": SCRIPT_PATH,
         "gates": format_gates(config),
         "verifier": format_verifier(config),
@@ -304,7 +317,7 @@ def render(config, zone, tokens, window, transcript=None, assumed=False,
     if assumed and window:
         header += "\n" + ASSUMED_WINDOW_NOTE
 
-    body = fill(zone_body(config, zone), values)
+    body = fill(_SHELL_BEFORE_RELAY.sub("", zone_body(config, zone)), values)
     return fill(header, values) + "\n\n" + body
 
 

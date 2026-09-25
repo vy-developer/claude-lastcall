@@ -29,6 +29,9 @@ What it does, in order, refusing at the first failure:
        codex   app: the runner, once turn/start is accepted; exec: the
                `thread.started` event on `codex exec --json`; tmux: a new
                rollout whose cwd is the repo;
+       any     with the Last Call plugin installed, the engine's SessionStart
+               hook also checks in (successor_session_start) and tells the
+               successor which generation it is and which handoff to read;
      app mode falls back to exec, loudly, when it fails before the successor's
      turn starts;
   5. claude: verifies Remote Control actually connected (bridgeSessionId in
@@ -40,6 +43,13 @@ What it does, in order, refusing at the first failure:
      job, `tmux kill-session` for a tmux pane, a delayed SIGTERM for a plain
      CLI process — from a detached Python child (no `setsid` binary needed).
      A desktop-app session is never killed; the relay says so instead.
+
+Settings: the `relay` block of the layered Last Call config (lastcall_core.
+config: ~/.lastcall/config.json < the project's .lastcall.json, .lastcall/
+config.json, .claude/lastcall.json or .codex/lastcall.json < LASTCALL_RELAY),
+merged key by key; flags win over all of it. The successor's agent defaults to
+the one running the predecessor; `--agent codex|claude` hands over across.
+`lastcall relay ...` runs this same main().
 
 Exit codes: 0 successor checked in; 1 precondition failure, nothing spawned;
 2 spawned but it never checked in (or remote control was required and absent).
@@ -113,8 +123,22 @@ def codex_home(env=None):
 
 def ledger_dir(env=None):
     env = os.environ if env is None else env
-    return env.get(LEDGER_DIR_ENV) or os.path.join(
-        env.get("HOME") or os.path.expanduser("~"), ".lastcall", "relay")
+    home = env.get("LASTCALL_HOME") or os.path.join(
+        env.get("HOME") or os.path.expanduser("~"), ".lastcall")
+    return env.get(LEDGER_DIR_ENV) or os.path.join(os.path.expanduser(home), "relay")
+
+
+def running_agent(env):
+    """The agent running THIS process (the predecessor), or None: Claude Code
+    exports CLAUDE_CODE_SESSION_ID / CLAUDECODE to its tools, Codex its
+    CODEX_THREAD_ID / sandbox variables; a relay successor also carries
+    LASTCALL_RELAY_AGENT."""
+    if env.get("CLAUDE_CODE_SESSION_ID") or env.get("CLAUDECODE"):
+        return "claude"
+    if any(k in env for k in _CODEX_SESSION_VARS):
+        return "codex"
+    agent = env.get(AGENT_ENV)
+    return agent if agent in AGENTS else None
 
 
 def claude_slug(path):
@@ -260,10 +284,18 @@ def checkin_record(payload, chain, generation, agent, handoff, via="hook"):
     }
 
 
-def checkin_from_hook(payload, env=None, agent=None):
+def checkin_from_hook(payload, env=None, agent=None, via="hook"):
     """For a SessionStart hook: append a check-in when this session was spawned
     by the relay (the LASTCALL_RELAY_* variables are set). Returns the record,
-    or None when this is not a relay successor. Never raises."""
+    or None when this is not a relay successor. Never raises.
+
+    Idempotent per session: the injected --settings hook and the installed
+    plugin hook both run in a Claude successor, and a resumed successor fires
+    SessionStart again, so an existing check-in by the same session is
+    returned instead of duplicated. A check-in by a DIFFERENT session for the
+    same generation means this one merely inherited the variables (a verifier
+    `codex exec` run by the successor, say): it is not the successor, so
+    nothing is written and None is returned."""
     env = os.environ if env is None else env
     ledger, chain = env.get(LEDGER_ENV), env.get(CHAIN_ENV)
     if not ledger or not valid_chain(chain):
@@ -272,11 +304,45 @@ def checkin_from_hook(payload, env=None, agent=None):
         generation = int(env.get(GENERATION_ENV, ""))
     except ValueError:
         generation = None
+    record = checkin_record(payload, chain, generation, agent or env.get(AGENT_ENV),
+                            env.get(HANDOFF_ENV), via=via)
+    session = record.get("session_id")
     try:
-        return append_record(ledger, checkin_record(
-            payload, chain, generation, agent or env.get(AGENT_ENV),
-            env.get(HANDOFF_ENV)))
-    except OSError:
+        for old in read_ledger(ledger):
+            if (old.get("event") == "checkin" and old.get("chain") == chain
+                    and old.get("generation") == generation and old.get("session_id")):
+                if old.get("session_id") == session:
+                    return old
+                if session:
+                    return None
+        return append_record(ledger, record)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def successor_note(record):
+    """The short SessionStart context for a relay successor."""
+    note = "LAST CALL RELAY — you are generation %s of relay chain %s." % (
+        record.get("generation") if record.get("generation") is not None else "?",
+        record.get("chain"))
+    if record.get("handoff"):
+        note += " Read %s first and follow it." % record["handoff"]
+    return note
+
+
+def successor_session_start(payload, env=None, agent=None):
+    """The installed plugin's SessionStart hook, for a session the relay
+    spawned: check in (whatever mode started it — Codex exec, tmux or app
+    successors have no injected hook) and return the note to inject, or None.
+    The note is only for a fresh context; a resumed or compacted session
+    already has it. Never raises."""
+    try:
+        payload = payload if isinstance(payload, dict) else {}
+        record = checkin_from_hook(payload, env, agent, via="session-start")
+        if record is None or payload.get("source") in ("resume", "compact"):
+            return None
+        return successor_note(record)
+    except Exception:       # a hook must never break the session
         return None
 
 
@@ -318,29 +384,78 @@ def durability(repo, handoff, allow_dirty=False, allow_uncommitted=False, baseli
     return problems, warnings
 
 
+def newest_committed_handoff(repo, handoff_dir):
+    """The newest committed handoff (by name — they are dated), or None."""
+    listed = _git(repo, "ls-files", "--", handoff_dir)
+    if listed.returncode != 0:
+        return None
+    names = [line for line in listed.stdout.splitlines()
+             if line.lower().endswith(".md")
+             and not os.path.basename(line).upper().startswith("TEMPLATE")]
+    return max(names, key=os.path.basename) if names else None
+
+
 # ------------------------------------------------------------------ config
 
 
+def _config_module():
+    """lastcall_core.config — relatively when imported as part of the package,
+    else (run as a script, or loaded by path) from this file's own lib/."""
+    if __package__:
+        from . import config
+        return config
+    import importlib
+    lib = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    return importlib.import_module("lastcall_core.config")   # our own package
+
+
+def _relay_block(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            relay = (json.load(fh) or {}).get("relay") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return relay if isinstance(relay, dict) else {}
+
+
 def load_relay_config(paths):
-    """The `relay` block of the first readable .claude/lastcall.json."""
+    """The `relay` block of the first readable file in `paths` (--config)."""
     for path in paths:
-        if not path or not os.path.isfile(path):
-            continue
-        try:
-            with open(path, encoding="utf-8") as fh:
-                relay = (json.load(fh) or {}).get("relay") or {}
-        except (OSError, ValueError, AttributeError):
-            continue
-        if isinstance(relay, dict):
-            return path, relay
+        if path and os.path.isfile(path):
+            return path, _relay_block(path)
     return None, {}
 
 
-def resolve_repo(explicit, config, env, cwd):
+def layered_relay_config(start, env, forget_project_env=False):
+    """(files, project_dir, relay) through lastcall_core.config.load_config —
+    ~/.lastcall/config.json, then the nearest .lastcall.json /
+    .lastcall/config.json / .claude/lastcall.json / .codex/lastcall.json, then
+    LASTCALL_RELAY (JSON) in the environment. Unlike the top-level keys, the
+    `relay` blocks merge key by key, so a global "agent" survives a project
+    that only sets "handoff_dir"."""
+    config_mod = _config_module()
+    env = dict(env)
+    if forget_project_env:
+        env.pop("CLAUDE_PROJECT_DIR", None)
+    loaded = config_mod.load_config({"cwd": start}, env)
+    relay = {}
+    for path in loaded.get("_config_files") or []:
+        relay.update(_relay_block(path))
+    raw = env.get(config_mod.ENV_PREFIX + "RELAY", env.get(config_mod.ENV_PREFIX + "relay"))
+    if raw is not None and isinstance(loaded.get("relay"), dict):
+        relay.update(loaded["relay"])
+    project = loaded.get("_config_path") and loaded.get("_project_dir")
+    return list(loaded.get("_config_files") or []), project, relay
+
+
+def resolve_repo(explicit, config, env, cwd, base=None):
     if explicit:
         return explicit
     if config.get("repo"):
-        return config["repo"]
+        repo = os.path.expanduser(config["repo"])
+        return repo if os.path.isabs(repo) or not base else os.path.join(base, repo)
     if env.get("CLAUDE_PROJECT_DIR"):
         return env["CLAUDE_PROJECT_DIR"]
     if shutil.which("git"):
@@ -1079,16 +1194,33 @@ def plan_retirement(pred, claude_bin="claude", tmux_bin="tmux", find_codex=find_
     return {"method": "none", "why": "no predecessor to retire could be identified"}
 
 
+# argv: plan, delay[, ledger, record]. The outcome — "retired" or
+# "retire-failed" with the exit status and stderr — is appended to the ledger,
+# because the relay itself has long exited by the time it is known.
 _RETIRE_SCRIPT = r"""
 import json, os, signal, subprocess, sys, time
 plan = json.loads(sys.argv[1])
 time.sleep(float(sys.argv[2]))
+code, detail = 0, ""
 if plan.get("argv"):
-    subprocess.call(plan["argv"], stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        done = subprocess.run(plan["argv"], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        code, detail = done.returncode, done.stderr.decode("utf-8", "replace").strip()
+    except OSError as exc:
+        code, detail = -1, str(exc)
 elif plan.get("pid"):
     try:
         os.kill(int(plan["pid"]), signal.SIGTERM)
+    except OSError as exc:
+        code, detail = -1, str(exc)
+if len(sys.argv) > 3 and sys.argv[3]:
+    record = json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}
+    record.update(event="retired" if code == 0 else "retire-failed", exit=code,
+                  detail=detail[:500], ts=time.time())
+    try:
+        with open(sys.argv[3], "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
     except OSError:
         pass
 """
@@ -1103,22 +1235,42 @@ print(child.pid)
 """
 
 
-def schedule_retirement(plan, delay, python_bin=None):
+def schedule_retirement(plan, delay, python_bin=None, ledger=None, record=None):
     """Detached and delayed: this very process may be running INSIDE the
     session being retired. A short-lived launcher starts the real worker in a
     new session (start_new_session is the setsid() syscall, which macOS has —
     unlike the `setsid` binary the bash relay depended on) and exits, so the
-    worker is re-parented away from the predecessor. Returns the worker pid."""
+    worker is re-parented away from the predecessor. With `ledger`, the
+    worker appends the outcome there. Returns the worker pid."""
     if plan.get("method") in (None, "none"):
         return None
+    extra = [ledger, json.dumps(record or {})] if ledger else []
     launched = subprocess.run([python_bin or sys.executable, "-c", _LAUNCH_SCRIPT,
-                               _RETIRE_SCRIPT, json.dumps(plan), str(delay)],
+                               _RETIRE_SCRIPT, json.dumps(plan), str(delay)] + extra,
                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, universal_newlines=True)
     try:
         return int(launched.stdout.strip())
     except ValueError:
         return None
+
+
+def readiness(relay_config=None, which=shutil.which):
+    """{check: ok} for doctor and setup: what a handover needs on this machine.
+    The successor's agent defaults to whichever agent runs the predecessor, so
+    either CLI will do unless the config pins one; tmux matters only for
+    codex_mode "tmux"."""
+    cfg = relay_config if isinstance(relay_config, dict) else {}
+    agent = cfg.get("agent") if cfg.get("agent") in AGENTS else None
+    checks = {"relay script present": os.path.isfile(os.path.abspath(__file__)),
+              "git on PATH": bool(which("git"))}
+    if agent:
+        checks["%s CLI on PATH" % agent] = bool(which(agent))
+    else:
+        checks["claude or codex CLI on PATH"] = bool(which("claude") or which("codex"))
+    if cfg.get("codex_mode") == "tmux" and agent in (None, "codex"):
+        checks["tmux on PATH (codex_mode tmux)"] = bool(which("tmux"))
+    return checks
 
 
 # ------------------------------------------------------------------- run
@@ -1141,23 +1293,45 @@ class Relay:
 
     # -- plan ---------------------------------------------------------------
 
+    def load_settings(self, cwd):
+        """(config files, relay block, repo). Settings come from the layered
+        Last Call config (see layered_relay_config); --config-dir names the
+        directory to look from, and --config adds one file on top. A project
+        whose config sits beside the repo rather than beside the session is
+        still found once the repo is known."""
+        o, env = self.o, self.env
+        start = o.config_dir or cwd
+        files, project, config = layered_relay_config(start, env,
+                                                      forget_project_env=bool(o.config_dir))
+        if o.config:
+            path, extra = load_relay_config([o.config])
+            if path:
+                files.append(path)
+                config.update(extra)
+        repo = os.path.realpath(resolve_repo(o.repo, config, env, cwd, base=project))
+        if not project and not o.config and not o.config_dir:
+            more, beside, extra = layered_relay_config(repo, env, forget_project_env=True)
+            if beside:      # `extra` layers global < that project < env again
+                files, config = more, extra
+        return files, config, repo
+
     def resolve(self):
         o, env = self.o, self.env
-        cwd = os.getcwd()
-        early = [o.config,
-                 env.get("CLAUDE_PROJECT_DIR") and os.path.join(
-                     env["CLAUDE_PROJECT_DIR"], ".claude", "lastcall.json"),
-                 os.path.join(cwd, ".claude", "lastcall.json")]
-        config_path, config = load_relay_config(early)
-        repo = os.path.realpath(resolve_repo(o.repo, config, env, cwd))
-        if not config_path:
-            config_path, config = load_relay_config(
-                [os.path.join(repo, ".claude", "lastcall.json")])
+        files, config, repo = self.load_settings(os.getcwd())
+        config_path = ", ".join(files) if files else None
 
         def pick(flag, key, default=None):
             return flag if flag is not None else config.get(key, default)
 
-        o.agent = pick(o.agent, "agent", "claude")
+        detected = running_agent(env)
+        if o.agent:
+            self.agent_source = "--agent"
+        elif config.get("agent"):
+            o.agent, self.agent_source = config["agent"], "config"
+        elif detected:
+            o.agent, self.agent_source = detected, "same as the predecessor"
+        else:
+            o.agent, self.agent_source = "claude", "default"
         if o.agent not in AGENTS:
             raise ValueError("unknown agent %r (claude|codex)" % o.agent)
         o.handoff_dir = pick(o.handoff_dir, "handoff_dir", "docs/handoff")
@@ -1167,7 +1341,15 @@ class Relay:
         o.fallback_model = pick(o.fallback_model, "fallback_model") if o.agent == "claude" else None
         o.remote_control = bool(pick(o.remote_control, "remote_control", True))
         o.skip_permissions = bool(pick(o.skip_permissions, "skip_permissions", False))
-        o.retire = bool(pick(o.retire, "kill_predecessor", False))
+        # "kill_predecessor" is the 1.x name (handoff.sh); either one works.
+        o.retire = bool(pick(o.retire, "retire_predecessor",
+                             config.get("kill_predecessor", False)))
+        o.kill_delay = float(pick(o.kill_delay, "kill_delay", 5.0))
+        o.require_git = bool(o.require_git or config.get("require_git"))
+        for label, value in (("--timeout", o.timeout), ("--kill-delay", o.kill_delay)):
+            if not 0 <= value <= 86400 or (label == "--timeout" and value <= 0):
+                raise ValueError("%s must be between 0 and 86400 seconds, got %g"
+                                 % (label, value))
         o.codex_sandbox = pick(o.codex_sandbox, "codex_sandbox", "workspace-write")
         o.codex_mode = pick(o.codex_mode, "codex_mode", "app")
         if o.codex_mode not in CODEX_MODES:
@@ -1195,6 +1377,9 @@ class Relay:
                              "no handoff files in %s — write one first" % handoff_dir)
         if not os.path.isfile(handoff):
             return self.fail(EXIT_PRECONDITION, "no such handoff: %s" % handoff)
+        if o.require_git and not is_git_repo(repo):
+            return self.fail(EXIT_PRECONDITION,
+                             "not a git worktree: %s (--require-git is set)" % repo)
         problems, warnings = durability(repo, handoff, o.allow_dirty,
                                         o.allow_uncommitted, o.dirty_baseline)
         for warning in warnings:
@@ -1202,6 +1387,12 @@ class Relay:
         if problems:
             for problem in problems[1:]:
                 self.say("refused: " + problem)
+            if problems[0].startswith("handoff is not committed"):
+                committed = newest_committed_handoff(repo, handoff_dir)
+                if committed:
+                    self.say("the newest committed handoff is %s" % committed)
+                    self.say("to hand over with that one instead: --handoff %s"
+                             % shlex.quote(os.path.join(repo, committed)))
             return self.fail(EXIT_PRECONDITION, problems[0])
 
         chain = o.chain or env.get(CHAIN_ENV)
@@ -1247,6 +1438,7 @@ class Relay:
     def describe(self):
         p, o = self.plan, self.o
         self.say("relay v2 — %s successor" % p["agent"])
+        self.say("  agent:       %s (%s)" % (p["agent"], getattr(self, "agent_source", "--agent")))
         self.say("  repo:        %s" % p["repo"])
         self.say("  config:      %s" % (p["config"] or "<none found>"))
         self.say("  handoff:     %s" % p["handoff"])
@@ -1626,11 +1818,14 @@ class Relay:
             if self.o.retire:
                 self.say("predecessor kept: %s" % ret["why"])
             return
-        pid = schedule_retirement(ret, self.o.kill_delay, self.o.python_bin)
+        pid = schedule_retirement(ret, self.o.kill_delay, self.o.python_bin, ledger=p["ledger"],
+                                  record={"chain": p["chain"], "generation": p["generation"],
+                                          "method": ret["method"], "why": ret["why"]})
         append_record(p["ledger"], {"event": "retire", "chain": p["chain"],
                                     "generation": p["generation"], "method": ret["method"],
                                     "why": ret["why"], "scheduler_pid": pid})
         self.say("retiring predecessor in %gs: %s" % (self.o.kill_delay, ret["why"]))
+        self.say("retirement outcome will be logged to %s" % p["ledger"])
 
 
 # -------------------------------------------------------------------- CLI
@@ -1642,11 +1837,26 @@ def _bool_flag(parser, name, dest, help_on, help_off):
     group.add_argument("--no-" + name, dest=dest, action="store_false", help=help_off)
 
 
-def parser():
-    p = argparse.ArgumentParser(prog="relay.py", description=__doc__.split("\n\n")[0])
-    p.add_argument("--agent", choices=AGENTS, help="successor agent (default claude)")
+class _Parser(argparse.ArgumentParser):
+    """A bad flag is a precondition failure (exit 1, nothing spawned) — not
+    argparse's exit 2, which here means "spawned but never checked in"."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_PRECONDITION, "%s: error: %s\n" % (self.prog, message))
+
+
+def parser(prog="relay.py"):
+    p = _Parser(prog=prog, description=__doc__.split("\n\n")[0])
+    p.add_argument("--agent", choices=AGENTS,
+                   help="successor agent. Default: relay.agent in the config, else the "
+                        "agent running this session (claude -> claude, codex -> codex), "
+                        "else claude. Pass the other one to hand over across agents")
     p.add_argument("--repo", help="directory to hand over")
-    p.add_argument("--config", help="lastcall.json to read the relay block from")
+    p.add_argument("--config", help="one more lastcall.json whose relay block wins over "
+                                    "the layered config")
+    p.add_argument("--config-dir", help="find the project config from this directory "
+                                        "instead of the working directory")
     p.add_argument("--handoff", help="use this handoff instead of the newest")
     p.add_argument("--handoff-dir", help="where handoffs live, repo-relative (docs/handoff)")
     p.add_argument("--name-prefix", help="successor name prefix (default: repo name)")
@@ -1674,12 +1884,20 @@ def parser():
                         "long (default 21600)")
     p.add_argument("--no-name-thread", dest="name_thread", action="store_false",
                    help="codex: do not name the thread via codex app-server")
-    _bool_flag(p, "retire-predecessor", "retire",
-               "retire this session once the successor checked in",
-               "keep this session (default)")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--retire-predecessor", "--kill-predecessor", dest="retire",
+                       action="store_true", default=None,
+                       help="retire this session once the successor checked in "
+                            "(config: retire_predecessor, or the 1.x kill_predecessor)")
+    group.add_argument("--no-retire-predecessor", "--no-kill-predecessor", dest="retire",
+                       action="store_false", help="keep this session (default)")
     p.add_argument("--predecessor", help="predecessor session id (default: from env)")
     p.add_argument("--predecessor-agent", choices=AGENTS)
-    p.add_argument("--kill-delay", type=float, default=5.0)
+    p.add_argument("--kill-delay", type=float,
+                   help="seconds between the check-in and the retirement (default 5)")
+    p.add_argument("--require-git", action="store_true", default=None,
+                   help="refuse unless the repo is a git worktree (default: warn and skip "
+                        "the committed-handoff check)")
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--allow-uncommitted", action="store_true",
                    help="hand over even though the handoff is not committed")
@@ -1724,13 +1942,13 @@ def checkin_main(argv, stdin=None):
     return 0
 
 
-def main(argv=None):
-    argv = sys.argv[1:] if argv is None else argv
+def main(argv=None, prog="relay.py"):
+    argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["checkin"]:
         return checkin_main(argv[1:])
     if argv[:1] == ["codex-app-runner"]:
         return codex_app_runner_main(argv[1:])
-    opts = parser().parse_args(argv)
+    opts = parser(prog).parse_args(argv)
     try:
         return Relay(opts).run()
     except ValueError as exc:

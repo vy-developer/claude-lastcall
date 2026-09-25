@@ -951,7 +951,20 @@ def register_usage_providers():
         agent = get_agent(rec.agent)
         if agent is None or not rec.transcript_path:
             return None
-        return agent.read_usage(rec.transcript_path, rec.session_id)
+        usage = agent.read_usage(rec.transcript_path, rec.session_id)
+        if usage is None:
+            return None
+        # The adapter only knows what the transcript says; the hooks also use
+        # config, the status-line cache and learned windows. Show the same
+        # window the hooks judge by, or the column disagrees with the warnings.
+        try:
+            from .zones import session_window
+            window, _source, _assumed = session_window(usage, cwd=rec.cwd)
+            if window:
+                usage.window = window
+        except Exception:  # noqa: BLE001 - status must never fail on config
+            pass
+        return usage
 
     for name in AGENT_ORDER:
         sessions.register_usage_provider(name, provider)

@@ -44,7 +44,7 @@
   "_comment_mode": "block_once holds the stop a single time at red so the handoff actually gets written. advisory never blocks.",
   "mode": "block_once",
 
-  "_comment_template": "Path to your own wrap-up instructions, absolute or relative to the project. Placeholders: {percent} {tokens} {window} {remaining} {zone} {gates} {transcript} {relay}",
+  "_comment_template": "Path to your own wrap-up instructions, absolute or relative to the project. Placeholders: {percent} {tokens} {window} {remaining} {zone} {gates} {verifier} {agent} {transcript} {relay}",
   "template": null,
 
   "_comment_compaction_note": "Injected after a compaction, telling the model its memory is now a summary and to re-read its plan and handoff files. null is the built-in text, false turns it off, a string replaces it.",

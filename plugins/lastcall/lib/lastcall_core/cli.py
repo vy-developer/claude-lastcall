@@ -681,7 +681,7 @@ def global_config_text():
     doc = {
         "_comment": ("Last Call machine-wide settings. Nothing here is active yet: "
                      "move a key out of _example (to the top level) to turn it on. "
-                     "A project's .claude/lastcall.json overrides this file; "
+                     "A project's .lastcall.json (or legacy .claude/lastcall.json) overrides this file; "
                      "LASTCALL_<FIELD> in the environment overrides both."),
         "_comment_docs": "Every option is explained in %s" % EXAMPLE_CONFIG,
         "_example": options,

@@ -1,7 +1,7 @@
 Wrap up this session rather than starting anything new.
 
 Available placeholders: {percent} {tokens} {window} {remaining} {zone}
-{gates} {transcript} {relay}
+{gates} {verifier} {agent} {transcript} {relay}
 Currently at {percent:.0f}% — {remaining:,} tokens of headroom left.
 
   1. FINISH what is already in flight. Your judgment on what is small enough

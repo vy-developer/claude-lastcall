@@ -19,6 +19,9 @@ import time
 from .config import legacy_state_dir, state_dir
 
 ONBOARDED_FILE = "onboarded.json"
+# Learned model windows (windows.py). Machine-wide knowledge, not a session's
+# state, so it is never pruned.
+LEARNED_FILE = "windows.json"
 DEBUG_FILE = "last-payload.json"
 
 # Keys that mark a JSON file as one this tool wrote. Pruning deletes only
@@ -155,7 +158,7 @@ def prune_state(config):
         except OSError:
             continue
         for name in names:
-            if not name.endswith(".json") or name == ONBOARDED_FILE:
+            if not name.endswith(".json") or name in (ONBOARDED_FILE, LEARNED_FILE):
                 continue
             target = os.path.join(directory, name)
             try:

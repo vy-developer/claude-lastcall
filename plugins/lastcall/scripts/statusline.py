@@ -28,6 +28,10 @@ try:
     from lastcall import band_for, load_config, read_state, update_state
 except ImportError:  # standalone copy — degrade to printing only
     band_for = load_config = read_state = update_state = None
+try:
+    from lastcall_core.windows import record_learned
+except ImportError:
+    record_learned = None
 
 # Field names vary across Claude Code versions, so match on shape rather than
 # betting the feature on one spelling. --dump exists for when none of these hit.
@@ -91,6 +95,15 @@ def main(argv):
             if state.get("window_from_statusline") != window:
                 update_state(config, session_id,
                              {"window_from_statusline": window}, "claude")
+                # And remember it for the model, so the next session on it
+                # starts with the right window before this script first runs.
+                # Transcripts record the model without "[1m]", so neither
+                # does the learned entry.
+                model_id = (payload.get("model") or {}).get("id") \
+                    if isinstance(payload.get("model"), dict) else None
+                if record_learned and isinstance(model_id, str) and model_id.strip():
+                    base = model_id.replace("[1m]", "").replace("[1M]", "").strip()
+                    record_learned(config, "claude", base, window, "statusline")
         except Exception:  # noqa: BLE001 - a status line must never fail loudly
             pass
 

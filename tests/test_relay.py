@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Tests for relay/handoff.sh — since 2.0 a deprecated POSIX-sh shim that
-maps the 1.x flags and environment onto relay v2 (lastcall_core/relay.py) and
+"""Tests for relay/handoff.sh — now a deprecated POSIX-sh shim that
+maps the old flags and environment onto the relay (lastcall_core/relay.py) and
 execs it.
 
-These keep the 1.x behaviour that still exists, driven through the shim:
+These keep the old behaviour that still exists, driven through the shim:
 the durability preconditions, handoff selection, config discovery, git being
 optional, model selection and predecessor retirement. What the bash relay did
 internally (tmux panes, remain-on-exit, transcript polling for a tool call,
 editing ~/.claude.json for workspace trust, bash integer wrapping) is gone;
-relay v2's own behaviour is covered by test_relay_v2.py.
+the relay's own behaviour is covered by test_relay_core.py.
 
 `claude` and `tmux` are fakes on PATH, HOME is a temp dir, and every session
 variable of whatever session runs the suite is scrubbed.
@@ -28,7 +28,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RELAY = os.path.join(ROOT, "plugins", "lastcall", "relay", "handoff.sh")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from test_relay_v2 import FAKE_CLAUDE, scrubbed_environ  # noqa: E402
+from test_relay_core import FAKE_CLAUDE, scrubbed_environ  # noqa: E402
 
 posix_only = unittest.skipUnless(
     os.name == "posix" and shutil.which("sh") and shutil.which("git"),
@@ -130,10 +130,10 @@ exit 0
 
 
 class TestShim(RelayCase):
-    def test_it_runs_relay_v2(self):
+    def test_it_runs_the_relay(self):
         result = self.relay(self.repo(), "--dry-run")
         self.assertEqual(result.returncode, 0, result.out)
-        self.assertIn("relay v2 — claude successor", result.stdout)
+        self.assertIn("relay — claude successor", result.stdout)
         self.assertIn("dry run", result.stdout)
 
     def test_it_says_once_on_stderr_that_it_is_deprecated(self):
@@ -158,10 +158,10 @@ class TestShim(RelayCase):
         result = self.relay(self.repo(), "--dry-run", "--agent", "codex",
                             "--codex-mode", "exec")
         self.assertEqual(result.returncode, 0, result.out)
-        self.assertIn("relay v2 — codex successor", result.stdout)
+        self.assertIn("relay — codex successor", result.stdout)
         self.assertIn("codex exec --json", result.stdout)
 
-    def test_help_is_relay_v2s(self):
+    def test_help_is_the_relays(self):
         result = self.run_shim(["--help"])
         self.assertEqual(result.returncode, 0, result.out)
         self.assertIn("--retire-predecessor", result.stdout)

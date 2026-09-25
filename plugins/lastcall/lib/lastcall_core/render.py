@@ -12,7 +12,7 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # plugin update.
 SCRIPT_PATH = os.path.join(PLUGIN_ROOT, "scripts", "lastcall.py")
 # The optional relay ships alongside; templates get it as {relay}: the whole
-# command, `python3 <plugin>/bin/lastcall relay`, which runs relay.py. A 1.x
+# command, `python3 <plugin>/bin/lastcall relay`, which runs relay.py. An older
 # template that says "bash {relay}" still works — render drops the "bash" —
 # and relay/handoff.sh is a deprecated shim that execs relay.py.
 RELAY_SCRIPT = os.path.join(PLUGIN_ROOT, "lib", "lastcall_core", "relay.py")

@@ -1,17 +1,17 @@
 #!/bin/sh
-# DEPRECATED — relay/handoff.sh is now a thin shim over relay v2.
+# DEPRECATED — relay/handoff.sh is now a thin shim over the relay.
 #
 # The relay is plugins/lastcall/lib/lastcall_core/relay.py (also reachable as
 # `lastcall relay`). It hands over to Claude Code or Codex, needs neither tmux
 # nor a TTY, and proves the successor by a check-in on a ledger. This shim
 # exists so wrap-up templates and habits that still say `bash handoff.sh`
-# keep working: it maps the 1.x flags and environment variables onto relay.py
+# keep working: it maps the old flags and environment variables onto relay.py
 # and execs it. Exit codes are relay.py's: 0 checked in, 1 precondition
 # failure (nothing spawned), 2 spawned but never checked in.
 #
 # POSIX sh; needs python3 (or $PYTHON_BIN).
 #
-#   1.x                          relay.py
+#   handoff.sh                   relay.py
 #   --kill-predecessor           --retire-predecessor
 #   --no-kill-predecessor        --no-retire-predecessor
 #   --config-dir DIR             --config-dir DIR

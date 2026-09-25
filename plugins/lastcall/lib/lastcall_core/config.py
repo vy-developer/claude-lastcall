@@ -172,7 +172,7 @@ def global_config_path(env=None):
 
 
 def legacy_state_dir():
-    """Where state lived before 2.0. Read for migration, never written."""
+    """Where state lived before 1.8. Read for migration, never written."""
     return os.path.join(os.path.expanduser("~"), ".claude", "lastcall")
 
 

@@ -175,6 +175,25 @@ class TestReleaseHygiene(unittest.TestCase):
         version = self.versions()["plugin.json"]
         self.assertRegex(version, r"^\d+\.\d+\.\d+$")
 
+    def test_the_relay_has_no_version_in_its_name(self):
+        """It is "the relay", with no version suffix: the rework shipped as
+        1.8, so a banner, help text or doc naming a second version of the relay
+        names one that never existed."""
+        v = "v" + "2"   # spelled apart so this file does not match itself
+        pattern = re.compile(r"relay[ _-]?%s|\b%s relay" % (v, v), re.I)
+        roots = [README, os.path.join(ROOT, "plugins"), os.path.join(ROOT, "tests")]
+        for base in roots:
+            walk = [(os.path.dirname(base), [], [os.path.basename(base)])] \
+                if os.path.isfile(base) else os.walk(base)
+            for directory, _dirs, names in walk:
+                for name in names:
+                    if name.endswith(".pyc"):
+                        continue
+                    path = os.path.join(directory, name)
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        found = pattern.search(fh.read())
+                    self.assertIsNone(found, "%s says %r" % (path, found and found.group(0)))
+
 
 class TestLineEndings(unittest.TestCase):
     """core.autocrlf=true rewrites shell scripts with CRLF on checkout, and
@@ -216,7 +235,7 @@ class TestRelayTemplateMatchesTheRelay(unittest.TestCase):
         self.assertNotIn("never kills", self.template())
 
     def test_it_says_when_the_predecessor_is_retired_and_when_not(self):
-        """Relay v2 retires only on kill_predecessor / --retire-predecessor,
+        """The relay retires only on kill_predecessor / --retire-predecessor,
         never a desktop-app session, and no longer asks the successor to."""
         text = self.template()
         self.assertIn("kill_predecessor", text)

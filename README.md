@@ -619,7 +619,7 @@ the assistant to run as its last step. The bundled template does exactly that:
 
 The template's step 7 resolves the `{relay}` placeholder to the real command,
 `python3 <plugin>/bin/lastcall relay`, so nothing needs hand-editing when the
-plugin updates. (A 1.x template that says `bash {relay}` still renders a
+plugin updates. (An older template that says `bash {relay}` still renders a
 runnable command.) The relay is
 [`plugins/lastcall/lib/lastcall_core/relay.py`](plugins/lastcall/lib/lastcall_core/relay.py);
 `lastcall relay` runs it.
@@ -732,7 +732,7 @@ successor runs tools without asking, so `setup` asks before enabling it and
 `--no-skip-permissions` turns it off for one run.
 
 **`relay/handoff.sh` is deprecated.** It is now a small POSIX-sh shim that
-prints a one-line notice and execs `relay.py`, mapping the 1.x flags
+prints a one-line notice and execs `relay.py`, mapping the old flags
 (`--kill-predecessor` becomes `--retire-predecessor`; `--trust` is ignored)
 and environment variables (`LASTCALL_MODEL`, `LASTCALL_KILL_PREDECESSOR`, ...).
 
@@ -755,7 +755,7 @@ ignore this whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-625 tests, standard library only, no network. They cover the failure modes that
+626 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

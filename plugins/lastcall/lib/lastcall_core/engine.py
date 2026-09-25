@@ -425,7 +425,7 @@ def run_hook(argv, stdin=None, stdout=None, env=None):
 
 
 # --------------------------------------------------------------------------
-# Compatibility with the pre-2.0 script API
+# Compatibility with the pre-1.8 script API
 # --------------------------------------------------------------------------
 
 def handle_stop(config, payload, agent=None, env=None, out=None):

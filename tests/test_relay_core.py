@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for relay v2 (plugins/lastcall/lib/lastcall_core/relay.py).
+"""Tests for the relay (plugins/lastcall/lib/lastcall_core/relay.py).
 
 `claude`, `codex` and `tmux` are fake executables on PATH, HOME is a temp dir,
 and every session variable of whatever session runs the suite is scrubbed —
@@ -205,7 +205,7 @@ def scrubbed_environ():
 
 
 @posix_only
-class RelayV2Case(unittest.TestCase):
+class RelayCoreCase(unittest.TestCase):
     def setUp(self):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="relay2-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -302,7 +302,7 @@ class RelayV2Case(unittest.TestCase):
         return records
 
 
-class TestHandoffAndNaming(RelayV2Case):
+class TestHandoffAndNaming(RelayCoreCase):
     def test_newest_handoff_wins_and_templates_are_ignored(self):
         folder = os.path.join(self.tmp, "h")
         os.makedirs(folder)
@@ -349,7 +349,7 @@ class TestHandoffAndNaming(RelayV2Case):
         self.assertEqual(relay.claude_slug("/a/b_c.d"), "-a-b-c-d")
 
 
-class TestCommands(RelayV2Case):
+class TestCommands(RelayCoreCase):
     def opts(self, **kw):
         base = dict(claude_bin="claude", codex_bin="codex", remote_control=True, model=None,
                     fallback_model=None, skip_permissions=False, permission_mode=None,
@@ -449,7 +449,7 @@ class TestCommands(RelayV2Case):
                                "LASTCALL_RELAY_CHAIN": "new"})
 
 
-class TestPreconditions(RelayV2Case):
+class TestPreconditions(RelayCoreCase):
     def test_dry_run_prints_the_commands_and_spawns_nothing(self):
         result = self.relay(self.repo(), "--dry-run", "--model", "sonnet")
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -511,7 +511,7 @@ class TestPreconditions(RelayV2Case):
         self.assertIn("lc · handoff 1", result.stdout)
 
 
-class TestClaudeRelay(RelayV2Case):
+class TestClaudeRelay(RelayCoreCase):
     def test_successor_checks_in_through_its_hook_and_remote_control_is_proven(self):
         result = self.relay(self.repo(), extra={"CLAUDE_CODE_SESSION_ID": "leaky",
                                                 "CLAUDE_CODE_USE_BEDROCK": "1"})
@@ -623,7 +623,7 @@ class TestClaudeRelay(RelayV2Case):
         self.assertIn("will not kill it", result.stdout)
 
 
-class TestCodexRelay(RelayV2Case):
+class TestCodexRelay(RelayCoreCase):
     def test_exec_successor_checks_in_and_is_named(self):
         result = self.relay(self.repo(), "--agent", "codex", "--codex-mode", "exec",
                             "--model", "gpt-x")
@@ -642,7 +642,7 @@ class TestCodexRelay(RelayV2Case):
         self.assertIn("exited before starting a thread", result.stdout)
 
 
-class TestCodexAppMode(RelayV2Case):
+class TestCodexAppMode(RelayCoreCase):
     def test_app_mode_is_the_default_and_the_thread_is_visible_and_named(self):
         repo = self.repo()
         result = self.relay(repo, "--agent", "codex", "--model", "gpt-x")
@@ -771,7 +771,7 @@ class TestCodexAppMode(RelayV2Case):
         self.assertTrue(self.rpc_messages("turn/interrupt"))
 
 
-class TestCheckinAndRetirement(RelayV2Case):
+class TestCheckinAndRetirement(RelayCoreCase):
     def test_checkin_subcommand_appends_a_record_and_prints_nothing(self):
         ledger = os.path.join(self.tmp, "l.jsonl")
         payload = json.dumps({"session_id": "S", "transcript_path": "/t", "cwd": "/c",
@@ -811,7 +811,7 @@ class TestCheckinAndRetirement(RelayV2Case):
 
 
 
-class TestLayeredConfig(RelayV2Case):
+class TestLayeredConfig(RelayCoreCase):
     """relay.py reads its settings through lastcall_core.config.load_config,
     so the relay block lives wherever the rest of Last Call's config does."""
 
@@ -924,7 +924,7 @@ class TestLayeredConfig(RelayV2Case):
         self.assertIn("newest committed handoff is docs/handoff/2026-09-25.md", result.stdout)
 
 
-class TestAgentDefault(RelayV2Case):
+class TestAgentDefault(RelayCoreCase):
     """The successor is the agent that runs the predecessor unless something
     says otherwise; saying otherwise is a cross-agent handover."""
 
@@ -975,7 +975,7 @@ class TestAgentDefault(RelayV2Case):
         self.assertIsNotNone(spawn["chain"])
 
 
-class TestPluginCheckin(RelayV2Case):
+class TestPluginCheckin(RelayCoreCase):
     """A successor started by ANY mode checks in through the normally installed
     plugin's SessionStart hook, and is told which handoff to read."""
 
@@ -1085,7 +1085,7 @@ class TestPluginCheckin(RelayV2Case):
         self.assertIn("docs/handoff/2026-09-25.md first", context)
 
 
-class TestReadiness(RelayV2Case):
+class TestReadiness(RelayCoreCase):
     def test_either_cli_will_do_unless_the_config_pins_one(self):
         only_codex = lambda name: "/x/codex" if name in ("codex", "git") else None
         checks = relay.readiness(None, only_codex)
@@ -1100,7 +1100,7 @@ class TestReadiness(RelayV2Case):
         self.assertFalse(checks["tmux on PATH (codex_mode tmux)"])
 
 
-class TestLastcallRelayCommand(RelayV2Case):
+class TestLastcallRelayCommand(RelayCoreCase):
     def test_lastcall_relay_runs_relay_py(self):
         launcher = os.path.join(ROOT, "plugins", "lastcall", "bin", "lastcall")
         result = subprocess.run([sys.executable, launcher, "relay", "--repo", self.repo(),
@@ -1108,7 +1108,7 @@ class TestLastcallRelayCommand(RelayV2Case):
                                 cwd=self.tmp, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, universal_newlines=True)
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("relay v2 — codex successor", result.stdout)
+        self.assertIn("relay — codex successor", result.stdout)
         help_text = subprocess.run([sys.executable, launcher, "relay", "--help"],
                                    stdout=subprocess.PIPE, universal_newlines=True).stdout
         self.assertIn("usage: lastcall relay", help_text)

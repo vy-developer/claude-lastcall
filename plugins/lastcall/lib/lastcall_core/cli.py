@@ -66,7 +66,7 @@ MATCHERS = {"PostToolUse": "*"}
 # Matching the bare string "lastcall.py" would strip any unrelated hook whose
 # command happened to contain it. Ours always ends with the script followed by
 # one of our event names, so require that shape. The event list is the union
-# of every version's: the 1.x installer wrote only Stop/SessionStart/PostCompact.
+# of every version's: installers before 1.8 wrote only Stop/SessionStart/PostCompact.
 MARKER = re.compile(r"lastcall\.py[\"']?\s+(?:%s)\s*$"
                     % "|".join(name for name, _ in EVENTS))
 
@@ -858,7 +858,7 @@ def cmd_install(args):
                 else:
                     ok = plugin_install(agent, binary, out, refresh=args.refresh)
                     if ok:
-                        # A 1.x hooks-method install left behind would fire
+                        # An older hooks-method install left behind would fire
                         # every event twice alongside the plugin.
                         hooks_uninstall(agent, out, quiet_if_absent=True)
         except InstallError as error:

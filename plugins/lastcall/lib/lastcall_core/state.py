@@ -6,7 +6,7 @@ before writing and applies only the keys it changed, then swaps the file in
 with os.replace, so neither can wipe out the other's fields — in particular the
 hooks never clobber window_from_statusline.
 
-State from before 2.0 lived in ~/.claude/lastcall/<session>.json. It is read
+State from before 1.8 lived in ~/.claude/lastcall/<session>.json. It is read
 when a Claude session has no new-style file yet, and written back to the new
 location, so an upgrade mid-session does not re-warn.
 """
@@ -40,7 +40,7 @@ def state_path(config, session_id, agent="claude"):
 
 
 def legacy_state_path(config, session_id, agent="claude"):
-    """The pre-2.0 file for this session, or None when it cannot apply."""
+    """The pre-1.8 file for this session, or None when it cannot apply."""
     if config.get("state_dir") or agent != "claude":
         return None
     return os.path.join(legacy_state_dir(), "%s.json" % _safe(session_id))

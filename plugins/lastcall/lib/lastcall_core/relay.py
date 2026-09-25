@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Relay v2 — hand a session over to a fresh Claude Code or Codex successor.
+"""The relay — hand a session over to a fresh Claude Code or Codex successor.
 
 Stdlib only, Python 3.9+, POSIX. Nothing here assumes a terminal: the
 predecessor may be a CLI session in tmux, a `claude --bg` job, or a desktop-app
@@ -1341,7 +1341,7 @@ class Relay:
         o.fallback_model = pick(o.fallback_model, "fallback_model") if o.agent == "claude" else None
         o.remote_control = bool(pick(o.remote_control, "remote_control", True))
         o.skip_permissions = bool(pick(o.skip_permissions, "skip_permissions", False))
-        # "kill_predecessor" is the 1.x name (handoff.sh); either one works.
+        # "kill_predecessor" is the name handoff.sh used; either one works.
         o.retire = bool(pick(o.retire, "retire_predecessor",
                              config.get("kill_predecessor", False)))
         o.kill_delay = float(pick(o.kill_delay, "kill_delay", 5.0))
@@ -1437,7 +1437,7 @@ class Relay:
 
     def describe(self):
         p, o = self.plan, self.o
-        self.say("relay v2 — %s successor" % p["agent"])
+        self.say("relay — %s successor" % p["agent"])
         self.say("  agent:       %s (%s)" % (p["agent"], getattr(self, "agent_source", "--agent")))
         self.say("  repo:        %s" % p["repo"])
         self.say("  config:      %s" % (p["config"] or "<none found>"))
@@ -1888,7 +1888,7 @@ def parser(prog="relay.py"):
     group.add_argument("--retire-predecessor", "--kill-predecessor", dest="retire",
                        action="store_true", default=None,
                        help="retire this session once the successor checked in "
-                            "(config: retire_predecessor, or the 1.x kill_predecessor)")
+                            "(config: retire_predecessor, or kill_predecessor)")
     group.add_argument("--no-retire-predecessor", "--no-kill-predecessor", dest="retire",
                        action="store_false", help="keep this session (default)")
     p.add_argument("--predecessor", help="predecessor session id (default: from env)")

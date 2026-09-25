@@ -757,7 +757,7 @@ class TestTemplateWhitespace(TempCase):
         self.assertEqual(shlex.split(cg.RELAY_COMMAND)[2], "relay")
 
     def test_a_1x_bash_relay_line_still_renders_a_runnable_command(self):
-        """1.x templates say "bash {relay}"; {relay} is now a python command,
+        """Older templates say "bash {relay}"; {relay} is now a python command,
         and `bash python3 ...` would fail, so render drops the shell."""
         path = os.path.join(self.dir, "wrap.md")
         with open(path, "w") as fh:
@@ -828,7 +828,7 @@ class TestHandoverReadiness(TempCase):
         self.assertTrue(checks["template invokes the relay"])
 
     def test_tmux_is_not_required_unless_codex_runs_in_tmux(self):
-        """Relay v2 needs relay.py, git and the successor's CLI; tmux only
+        """The relay needs relay.py, git and the successor's CLI; tmux only
         for codex_mode "tmux"."""
         _ready, checks = cg.handover_status(self.config(template=cg.RELAY_TEMPLATE))
         self.assertNotIn("tmux on PATH", checks)

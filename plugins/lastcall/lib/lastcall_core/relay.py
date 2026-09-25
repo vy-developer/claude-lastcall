@@ -11,18 +11,29 @@ What it does, in order, refusing at the first failure:
      the repo is a git worktree, refuses unless it is committed;
   2. names the successor "<prefix> · handoff N · <topic>";
   3. spawns it detached:
-       claude  `claude --bg -n NAME --remote-control NAME --session-id UUID
-                [--model M] [--fallback-model F] --settings JSON PROMPT`
-       codex   `codex exec --json -C REPO [-m M] -s workspace-write PROMPT`
-               (or an interactive `codex` inside `tmux new-session -d`);
+       claude  `claude --bg -n NAME --remote-control NAME [--model M]
+                [--fallback-model F] --settings JSON PROMPT` (--bg assigns the
+                session id itself and ignores --session-id, so none is passed);
+       codex   app mode (default): a detached `relay.py codex-app-runner` that
+               drives `codex app-server` over stdio JSON-RPC — the interface the
+               Codex desktop app uses — so the thread is listed in the app's
+               sidebar and in `codex resume` (source "vscode");
+               exec mode: `codex exec --json -C REPO [-m M] -s workspace-write
+               PROMPT` (hidden from both unless --include-non-interactive);
+               tmux mode: an interactive `codex` inside `tmux new-session -d`;
   4. waits for the successor to CHECK IN on a ledger
-     (~/.lastcall/relay/<chain>.jsonl) instead of guessing a transcript path:
+     (~/.lastcall/relay/<chain>.jsonl), matched by chain + generation, instead
+     of guessing a transcript path:
        claude  its SessionStart hook (injected via --settings) runs
                `relay.py checkin ...` which appends session_id + transcript_path
-       codex   the `thread.started` event on `codex exec --json`, or a new
-               rollout whose cwd is the repo (tmux mode);
-  5. claude: verifies Remote Control actually connected (a `bridge-session`
-     transcript entry, or bridgeSessionId in ~/.claude/jobs|sessions) and says
+       codex   app: the runner, once turn/start is accepted; exec: the
+               `thread.started` event on `codex exec --json`; tmux: a new
+               rollout whose cwd is the repo;
+     app mode falls back to exec, loudly, when it fails before the successor's
+     turn starts;
+  5. claude: verifies Remote Control actually connected (bridgeSessionId in
+     ~/.claude/jobs/<short>/state.json for a --bg session, else a
+     `bridge-session` transcript entry or ~/.claude/sessions) and says
      "remote control did NOT connect" when it did not;
      codex: names the thread through `codex app-server` (thread/name/set);
   6. optionally retires the predecessor — `claude stop <id>` for a background
@@ -42,13 +53,14 @@ import argparse
 import glob
 import json
 import os
+import queue
 import re
-import select
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -373,11 +385,12 @@ def claude_settings(relay_env, hook_command):
     }, sort_keys=True)
 
 
-def claude_argv(opts, name, session_id, prompt, settings):
+def claude_argv(opts, name, prompt, settings):
+    """No --session-id: `claude --bg` assigns its own ("--bg manages the session
+    id; ignoring --session-id") — the id comes back through the check-in."""
     argv = [opts.claude_bin, "--bg", "-n", name]
     if opts.remote_control:
         argv += ["--remote-control", name]
-    argv += ["--session-id", session_id]
     if opts.model:
         argv += ["--model", opts.model]
     if opts.fallback_model:
@@ -390,10 +403,57 @@ def claude_argv(opts, name, session_id, prompt, settings):
     return argv
 
 
-def codex_argv(opts, repo, prompt, have_git):
-    """`codex exec` (default) or the interactive TUI (tmux mode)."""
+_BG_LINE = re.compile(r"backgrounded\W+([0-9a-f]{6,})\b", re.I)
+
+
+def parse_bg_short(output):
+    """The short id from `claude --bg` output ("backgrounded · c0815a37 · NAME"),
+    else the first 8-hex word on a line that is not a warning; None if absent."""
+    match = _BG_LINE.search(output or "")
+    if match:
+        return match.group(1)
+    for line in (output or "").splitlines():
+        if line.strip().lower().startswith("warning"):
+            continue
+        found = re.findall(r"\b([0-9a-f]{8})\b", line)
+        if found:
+            return found[0]
+    return None
+
+
+def claude_agents(claude_bin, env=None, timeout=15.0):
+    """`claude agents --json` as a list of {id, sessionId, name, state, kind};
+    [] when it cannot be read."""
+    try:
+        out = subprocess.run([claude_bin, "agents", "--json"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             universal_newlines=True, timeout=timeout, env=env)
+        data = json.loads(out.stdout or "null")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+    if isinstance(data, dict):
+        data = data.get("agents") or data.get("data") or []
+    return [a for a in data if isinstance(a, dict)] if isinstance(data, list) else []
+
+
+def bg_job_state(short, env=None):
+    """~/.claude/jobs/<short>/state.json of a background session, or {}."""
+    if not short:
+        return {}
+    try:
+        with open(os.path.join(claude_home(env), "jobs", short, "state.json"),
+                  encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def codex_argv(opts, repo, prompt, have_git, mode=None):
+    """`codex exec` or the interactive TUI (tmux mode)."""
+    mode = mode or opts.codex_mode
     argv = [opts.codex_bin]
-    if opts.codex_mode == "exec":
+    if mode == "exec":
         argv += ["exec", "--json"]
     argv += ["-C", repo]
     if opts.model:
@@ -402,11 +462,32 @@ def codex_argv(opts, repo, prompt, have_git):
         argv.append("--dangerously-bypass-approvals-and-sandbox")
     else:
         argv += ["-s", opts.codex_sandbox]
-    if opts.codex_mode == "exec" and not have_git:
+    if mode == "exec" and not have_git:
         argv.append("--skip-git-repo-check")
-    if opts.codex_mode == "tmux":
+    if mode == "tmux":
         argv.append("--no-alt-screen")
     argv.append(prompt)
+    return argv
+
+
+def codex_app_sandbox(opts):
+    return "danger-full-access" if opts.skip_permissions else opts.codex_sandbox
+
+
+def codex_app_runner_argv(opts, repo, prompt, name, ledger, chain, generation, handoff):
+    """The detached runner that keeps `codex app-server` alive for the turn."""
+    argv = [opts.python_bin, os.path.abspath(__file__), "codex-app-runner",
+            "--ledger", ledger, "--chain", chain, "--generation", str(generation),
+            "--handoff", handoff, "--repo", repo, "--name", name,
+            "--sandbox", codex_app_sandbox(opts), "--approval", opts.codex_approval,
+            "--codex-bin", opts.codex_bin, "--max-seconds", "%g" % opts.codex_app_max]
+    if opts.model:
+        argv += ["--model", opts.model]
+    if opts.skip_permissions:
+        argv.append("--auto-approve")
+    if not getattr(opts, "name_thread", True):
+        argv.append("--no-name")
+    argv += ["--prompt", prompt]
     return argv
 
 
@@ -419,8 +500,21 @@ def tmux_argv(tmux_bin, session, repo, inner, relay_env):
 # ------------------------------------------------------ remote control proof
 
 
-def remote_control_evidence(session_id, transcript=None, env=None):
-    """Where Remote Control is proven connected for `session_id`, or None."""
+def remote_control_evidence(session_id, transcript=None, env=None, short=None):
+    """Where Remote Control is proven connected for `session_id`, or None.
+
+    A `claude --bg` session records it in ~/.claude/jobs/<short>/state.json
+    (bridgeSessionId) and — observed on 2.1.281 — NOT as a bridge-session
+    transcript entry, so the job state is checked first."""
+    shorts = []
+    for candidate in (short, session_id[:8] if session_id else None):
+        if candidate and candidate not in shorts:
+            shorts.append(candidate)
+    for candidate in shorts:
+        data = bg_job_state(candidate, env)
+        if data.get("bridgeSessionId") and (not session_id or data.get("sessionId")
+                                            in (None, session_id)):
+            return "jobs/%s/state.json bridgeSessionId %s" % (candidate, data["bridgeSessionId"])
     if transcript and os.path.isfile(transcript):
         try:
             with open(transcript, encoding="utf-8", errors="replace") as fh:
@@ -436,10 +530,9 @@ def remote_control_evidence(session_id, transcript=None, env=None):
                         return "transcript bridge-session %s" % entry.get("bridgeSessionId", "?")
         except OSError:
             pass
-    home = claude_home(env)
-    state = os.path.join(home, "jobs", session_id[:8], "state.json")
-    candidates = [state] + sorted(glob.glob(os.path.join(home, "sessions", "*.json")))
-    for path in candidates:
+    if not session_id:
+        return None
+    for path in sorted(glob.glob(os.path.join(claude_home(env), "sessions", "*.json"))):
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -447,9 +540,7 @@ def remote_control_evidence(session_id, transcript=None, env=None):
             continue
         if isinstance(data, dict) and data.get("sessionId") == session_id \
                 and data.get("bridgeSessionId"):
-            return "%s bridgeSessionId %s" % (os.path.basename(os.path.dirname(path))
-                                               if path == state else "sessions registry",
-                                               data["bridgeSessionId"])
+            return "sessions registry bridgeSessionId %s" % data["bridgeSessionId"]
     return None
 
 
@@ -508,65 +599,385 @@ def exec_thread_started(log_path):
     return None
 
 
+# Who the relay is to `codex app-server`. `name` becomes the thread's
+# originator (rollout session_meta); the thread's source is decided by the
+# server — the CLI's `codex app-server` always records "vscode", which is one
+# of the interactive sources that the desktop app's sidebar, a default
+# thread/list and `codex resume` show.
+CLIENT_INFO = {"name": "lastcall-relay", "title": "Last Call relay", "version": "2"}
+
+# Streaming chatter the runner never looks at; opting out keeps the pipe quiet.
+QUIET_NOTIFICATIONS = (
+    "item/agentMessage/delta", "item/reasoning/textDelta",
+    "item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded",
+    "item/commandExecution/outputDelta", "item/fileChange/outputDelta",
+    "item/plan/delta", "mcpServer/startupStatus/updated",
+    "thread/tokenUsage/updated", "account/rateLimits/updated",
+)
+
+APPROVAL_POLICIES = ("never", "on-request", "untrusted")
+CODEX_MODES = ("app", "exec", "tmux")
+
+
+class AppServerError(Exception):
+    pass
+
+
+def _rpc_error(error):
+    if isinstance(error, dict):
+        return error.get("message") or json.dumps(error, sort_keys=True)
+    return str(error)
+
+
+class AppServerClient:
+    """A minimal JSON-RPC client for `codex app-server` on stdio (one JSON
+    object per line). A reader thread feeds a queue: select() on a buffered
+    text pipe misses lines already sitting in Python's buffer."""
+
+    def __init__(self, argv, cwd=None, env=None, stderr=subprocess.DEVNULL):
+        self.proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=stderr,
+                                     universal_newlines=True, encoding="utf-8",
+                                     errors="replace", bufsize=1)
+        self.inbox = queue.Queue()
+        self.ids = 0
+        self.gone = False
+        reader = threading.Thread(target=self._read, name="app-server-reader")
+        reader.daemon = True
+        reader.start()
+
+    def _read(self):
+        try:
+            for line in self.proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(message, dict):
+                    self.inbox.put(message)
+        except (OSError, ValueError):
+            pass
+        self.inbox.put(None)
+
+    def send(self, message):
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+
+    def notify(self, method, params=None):
+        message = {"method": method}
+        if params is not None:
+            message["params"] = params
+        self.send(message)
+
+    def respond(self, request_id, result=None, error=None):
+        if error is not None:
+            self.send({"id": request_id, "error": error})
+        else:
+            self.send({"id": request_id, "result": result if result is not None else {}})
+
+    def next_message(self, timeout):
+        """The next message, None on timeout; EOFError once the server is gone."""
+        if self.gone:
+            raise EOFError("codex app-server exited")
+        try:
+            message = self.inbox.get(timeout=max(0.0, timeout))
+        except queue.Empty:
+            return None
+        if message is None:
+            self.gone = True
+            raise EOFError("codex app-server exited")
+        return message
+
+    def request(self, method, params=None, timeout=30.0, on_message=None):
+        """Send a request and return its result. Everything that arrives
+        meanwhile (notifications, server->client requests) goes to on_message."""
+        self.ids += 1
+        request_id = self.ids
+        self.send({"id": request_id, "method": method, "params": params or {}})
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise AppServerError("no answer to %s within %gs" % (method, timeout))
+            try:
+                message = self.next_message(min(remaining, 1.0))
+            except EOFError:
+                raise AppServerError("codex app-server exited before answering %s" % method)
+            if message is None:
+                continue
+            if message.get("id") == request_id and "method" not in message:
+                if "error" in message:
+                    raise AppServerError("%s failed: %s" % (method, _rpc_error(message["error"])))
+                result = message.get("result")
+                return result if isinstance(result, dict) else {}
+            if on_message:
+                on_message(message)
+
+    def initialize(self, timeout=30.0, on_message=None, quiet=True):
+        params = {"clientInfo": dict(CLIENT_INFO)}
+        if quiet:
+            params["capabilities"] = {"optOutNotificationMethods": list(QUIET_NOTIFICATIONS)}
+        result = self.request("initialize", params, timeout, on_message)
+        self.notify("initialized")
+        return result
+
+    def close(self, timeout=10.0):
+        """Closing stdin is the polite way to stop it; then escalate."""
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.terminate()
+            try:
+                self.proc.wait(5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+
+
 def codex_set_thread_name(codex_bin, thread_id, name, env=None, timeout=20.0):
     """Name a Codex thread through the app-server protocol (thread/name/set) —
     the same call the TUI's /rename makes. Returns (ok, detail)."""
     try:
-        proc = subprocess.Popen([codex_bin, "app-server"], stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                universal_newlines=True, bufsize=1, env=env)
+        client = AppServerClient([codex_bin, "app-server"], env=env)
     except OSError as exc:
         return False, "could not start codex app-server: %s" % exc
-    deadline = time.time() + timeout
-
-    def send(message):
-        proc.stdin.write(json.dumps(message) + "\n")
-        proc.stdin.flush()
-
-    def reply(request_id):
-        while time.time() < deadline:
-            ready, _, _ = select.select([proc.stdout], [], [], 0.5)
-            if not ready:
-                if proc.poll() is not None:
-                    return None
-                continue
-            line = proc.stdout.readline()
-            if not line:
-                return None
-            try:
-                message = json.loads(line)
-            except ValueError:
-                continue
-            if message.get("id") == request_id:
-                return message
-        return None
-
     try:
-        send({"id": 1, "method": "initialize",
-              "params": {"clientInfo": {"name": "lastcall-relay", "version": "2"}}})
-        if reply(1) is None:
-            return False, "codex app-server did not answer initialize"
-        send({"method": "initialized"})
-        send({"id": 2, "method": "thread/name/set",
-              "params": {"threadId": thread_id, "name": name}})
-        answer = reply(2)
-        if answer is None:
-            return False, "codex app-server did not answer thread/name/set"
-        if "error" in answer:
-            return False, "thread/name/set failed: %s" % answer["error"]
+        client.initialize(timeout)
+        client.request("thread/name/set", {"threadId": thread_id, "name": name}, timeout)
         return True, "named via codex app-server"
+    except AppServerError as exc:
+        return False, str(exc)
     except (OSError, ValueError) as exc:
         return False, "codex app-server: %s" % exc
     finally:
+        client.close(5)
+
+
+def approval_answer(method, params, allow):
+    """(result, error) for a server->client request. Nobody watches an
+    unattended successor, so every prompt is answered at once: allowed only
+    when the relay was told to skip permissions, declined otherwise."""
+    if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
+        return {"decision": "accept" if allow else "decline"}, None
+    if method in ("execCommandApproval", "applyPatchApproval"):
+        return {"decision": "approved" if allow else "denied"}, None
+    if method == "item/permissions/requestApproval":
+        granted = params.get("permissions") if allow else None
+        return {"permissions": granted if isinstance(granted, dict) else {},
+                "scope": "turn"}, None
+    if method == "mcpServer/elicitation/request":
+        return {"action": "decline"}, None
+    if method == "item/tool/requestUserInput":
+        return {"answers": {}}, None
+    return None, {"code": -32601,
+                  "message": "the Last Call relay runner cannot answer %s" % method}
+
+
+class AppRunner:
+    """`relay.py codex-app-runner`: start the successor through `codex
+    app-server` and keep that server alive until the successor's first turn
+    completes (or --max-seconds passes). Writes to the ledger:
+      app-thread       thread/start succeeded (thread id, rollout path)
+      checkin          turn/start was accepted — the successor is working
+      app-failed       failed before the turn started (stage, error)
+      app-runner-exit  the turn ended (status) or the runner gave up (reason)"""
+
+    def __init__(self, args, out=None, env=None):
+        self.a = args
+        self.out = out or sys.stdout
+        self.env = dict(os.environ if env is None else env)
+        self.client = None
+        self.thread_id = None
+        self.turn_id = None
+        self.finished = None
+        self.answered = 0
+
+    def log(self, message):
+        print("%s runner: %s" % (time.strftime("%H:%M:%S"), message), file=self.out)
+        self.out.flush()
+
+    def record(self, event, **fields):
+        record = {"event": event, "chain": self.a.chain, "generation": self.a.generation,
+                  "agent": "codex", "runner_pid": os.getpid()}
+        record.update(fields)
         try:
-            proc.stdin.close()
-        except OSError:
-            pass
+            return append_record(self.a.ledger, record)
+        except OSError as exc:
+            self.log("could not write the ledger: %s" % exc)
+            return record
+
+    def fail(self, stage, error, **extra):
+        self.log("FAILED at %s: %s" % (stage, error))
+        self.record("app-failed", stage=stage, error=str(error), thread_id=self.thread_id, **extra)
+        return 1
+
+    def on_message(self, message):
+        method = message.get("method")
+        if not method:
+            return
+        params = message.get("params") if isinstance(message.get("params"), dict) else {}
+        if "id" in message:
+            result, error = approval_answer(method, params, self.a.auto_approve)
+            self.answered += 1
+            self.log("answered %s: %s" % (method, json.dumps(result if error is None else error,
+                                                             sort_keys=True)[:200]))
+            try:
+                self.client.respond(message["id"], result, error)
+            except (OSError, ValueError):
+                pass
+            return
+        if method == "turn/completed" and params.get("threadId") == self.thread_id:
+            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+            if self.turn_id is None or turn.get("id") == self.turn_id:
+                self.finished = turn
+                self.log("turn/completed status=%s" % turn.get("status"))
+        elif method in ("turn/started", "thread/status/changed", "thread/name/updated"):
+            self.log("%s %s" % (method, json.dumps(params.get("status") or params.get("threadName")
+                                                   or params.get("turn", {}).get("id"))))
+        elif method == "error":
+            self.log("error notification: %s" % json.dumps(params, sort_keys=True)[:400])
+
+    def run(self):
+        a = self.a
         try:
-            proc.terminate()
-            proc.wait(5)
-        except (OSError, subprocess.TimeoutExpired):
-            proc.kill()
+            self.client = AppServerClient([a.codex_bin, "app-server"], cwd=a.repo, env=self.env,
+                                          stderr=None)
+        except OSError as exc:
+            return self.fail("spawn", "could not start codex app-server: %s" % exc)
+        try:
+            return self._drive()
+        except (OSError, ValueError) as exc:
+            return self.fail("runner", exc)
+        finally:
+            self.client.close(10)
+            self.log("app-server stopped")
+
+    def _archive(self):
+        try:
+            self.client.request("thread/archive", {"threadId": self.thread_id},
+                                self.a.rpc_timeout, self.on_message)
+            return True
+        except (AppServerError, OSError, ValueError):
+            return False
+
+    def _drive(self):
+        a, client = self.a, self.client
+        stage = "initialize"
+        try:
+            client.initialize(a.rpc_timeout, self.on_message)
+            stage = "thread/start"
+            params = {"cwd": a.repo, "sandbox": a.sandbox, "approvalPolicy": a.approval}
+            if a.model:
+                params["model"] = a.model
+            started = client.request("thread/start", params, a.rpc_timeout, self.on_message)
+            thread = started.get("thread") if isinstance(started.get("thread"), dict) else {}
+            self.thread_id = thread.get("id")
+            if not self.thread_id:
+                raise AppServerError("thread/start returned no thread id")
+        except AppServerError as exc:
+            return self.fail(stage, exc)
+        path = thread.get("path")
+        self.record("app-thread", thread_id=self.thread_id, source=thread.get("source"),
+                    transcript_path=path)
+        self.log("thread %s started (source %s)" % (self.thread_id, thread.get("source")))
+
+        named, name_error = False, None
+        if a.name_thread:
+            try:
+                client.request("thread/name/set", {"threadId": self.thread_id, "name": a.name},
+                               a.rpc_timeout, self.on_message)
+                named = True
+            except AppServerError as exc:
+                name_error = str(exc)
+                self.log("thread/name/set failed: %s" % exc)
+        try:
+            turn = client.request("turn/start", {
+                "threadId": self.thread_id,
+                "input": [{"type": "text", "text": a.prompt}]},
+                a.rpc_timeout, self.on_message).get("turn") or {}
+        except AppServerError as exc:
+            # An empty thread helps nobody: archive it (not delete) and let
+            # the relay fall back to another mode.
+            return self.fail("turn/start", exc, archived=self._archive())
+        self.turn_id = turn.get("id") if isinstance(turn, dict) else None
+        record = checkin_record(
+            {"session_id": self.thread_id,
+             "transcript_path": path or find_codex_rollout(self.thread_id, self.env),
+             "cwd": thread.get("cwd") or a.repo, "source": thread.get("source"),
+             "model": started.get("model") or a.model},
+            a.chain, a.generation, "codex", a.handoff, via="app-server")
+        record.update(pid=os.getpid(), runner_pid=os.getpid(), app_server_pid=client.proc.pid,
+                      turn_id=self.turn_id, named=named, name_error=name_error,
+                      max_seconds=a.max_seconds)
+        try:
+            append_record(a.ledger, record)
+        except OSError as exc:
+            self.log("could not write the check-in: %s" % exc)
+        self.log("checked in; turn %s running" % self.turn_id)
+        return self._await_turn()
+
+    def _await_turn(self):
+        a, client = self.a, self.client
+        deadline = time.time() + a.max_seconds
+        reason = None
+        while self.finished is None:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                reason = "max-duration"
+                break
+            try:
+                message = client.next_message(min(remaining, 5.0))
+            except EOFError:
+                reason = "app-server exited"
+                break
+            if message is not None:
+                self.on_message(message)
+        if reason == "max-duration" and self.turn_id:
+            self.log("still running after %gs — interrupting the turn" % a.max_seconds)
+            try:
+                client.request("turn/interrupt", {"threadId": self.thread_id,
+                                                  "turnId": self.turn_id},
+                               a.rpc_timeout, self.on_message)
+                grace = time.time() + 30
+                while self.finished is None and time.time() < grace:
+                    message = client.next_message(1.0)
+                    if message is not None:
+                        self.on_message(message)
+            except (AppServerError, EOFError, OSError, ValueError) as exc:
+                self.log("turn/interrupt: %s" % exc)
+        status = (self.finished or {}).get("status") or "unknown"
+        self.record("app-runner-exit", thread_id=self.thread_id, turn_id=self.turn_id,
+                    status=status, reason=reason or "turn-completed", answered=self.answered)
+        return 0 if reason is None else 3
+
+
+def codex_app_runner_main(argv, out=None):
+    p = argparse.ArgumentParser(prog="relay.py codex-app-runner")
+    p.add_argument("--ledger", required=True)
+    p.add_argument("--chain", required=True)
+    p.add_argument("--generation", type=int, required=True)
+    p.add_argument("--handoff")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--prompt", required=True)
+    p.add_argument("--model")
+    p.add_argument("--sandbox", default="workspace-write",
+                   choices=("read-only", "workspace-write", "danger-full-access"))
+    p.add_argument("--approval", default="never", choices=APPROVAL_POLICIES)
+    p.add_argument("--auto-approve", action="store_true",
+                   help="accept approval requests instead of declining them")
+    p.add_argument("--no-name", dest="name_thread", action="store_false")
+    p.add_argument("--codex-bin", default="codex")
+    p.add_argument("--max-seconds", type=float, default=21600.0)
+    p.add_argument("--rpc-timeout", type=float, default=60.0)
+    return AppRunner(p.parse_args(argv), out).run()
 
 
 # ------------------------------------------------------------ predecessor
@@ -758,6 +1169,14 @@ class Relay:
         o.skip_permissions = bool(pick(o.skip_permissions, "skip_permissions", False))
         o.retire = bool(pick(o.retire, "kill_predecessor", False))
         o.codex_sandbox = pick(o.codex_sandbox, "codex_sandbox", "workspace-write")
+        o.codex_mode = pick(o.codex_mode, "codex_mode", "app")
+        if o.codex_mode not in CODEX_MODES:
+            raise ValueError("unknown codex mode %r (app|exec|tmux)" % o.codex_mode)
+        o.codex_approval = pick(o.codex_approval, "codex_approval", "never")
+        if o.codex_approval not in APPROVAL_POLICIES:
+            raise ValueError("unknown codex approval policy %r (never|on-request|untrusted)"
+                             % o.codex_approval)
+        o.codex_app_max = float(pick(o.codex_app_max, "codex_app_max_seconds", 21600))
         baseline = pick(o.dirty_baseline, "dirty_baseline", "") or ""
         o.dirty_baseline = tuple(p.strip() for p in baseline.split(",") if p.strip()) \
             if isinstance(baseline, str) else tuple(baseline)
@@ -804,20 +1223,24 @@ class Relay:
                 "relay_env": relay_env, "predecessor": pred, "retirement": retirement,
                 "prompt": prompt, "session_id": None, "log": None, "tmux_session": None}
         if o.agent == "claude":
-            sid = str(uuid.uuid4())
             hook = checkin_command(o.python_bin, ledger, chain, generation, "claude", handoff)
-            plan.update(session_id=sid, hook=hook,
-                        transcript=claude_transcript_path(repo, sid, env),
-                        argv=claude_argv(o, name, sid, prompt, claude_settings(relay_env, hook)))
+            plan.update(hook=hook, bg_short=None, transcript=None,
+                        argv=claude_argv(o, name, prompt, claude_settings(relay_env, hook)))
+        elif o.codex_mode == "tmux":
+            session = tmux_safe(name)
+            plan.update(tmux_session=session,
+                        argv=tmux_argv(o.tmux_bin, session, repo,
+                                       codex_argv(o, repo, prompt, have_git), relay_env))
         else:
-            inner = codex_argv(o, repo, prompt, have_git)
-            if o.codex_mode == "tmux":
-                session = tmux_safe(name)
-                plan.update(tmux_session=session,
-                            argv=tmux_argv(o.tmux_bin, session, repo, inner, relay_env))
+            logs = os.path.join(os.path.dirname(ledger), "%s-%d" % (chain, generation))
+            exec_argv = codex_argv(o, repo, prompt, have_git, mode="exec")
+            if o.codex_mode == "app":
+                plan.update(argv=codex_app_runner_argv(o, repo, prompt, name, ledger, chain,
+                                                       generation, handoff),
+                            log=logs + "-app.log", fallback_argv=exec_argv,
+                            fallback_log=logs + ".log")
             else:
-                plan.update(argv=inner, log=os.path.join(os.path.dirname(ledger),
-                                                         "%s-%d.log" % (chain, generation)))
+                plan.update(argv=exec_argv, log=logs + ".log")
         self.plan = plan
         return None
 
@@ -831,20 +1254,35 @@ class Relay:
         self.say("  chain:       %s (generation %d)" % (p["chain"], p["generation"]))
         self.say("  ledger:      %s" % p["ledger"])
         if p["agent"] == "claude":
-            self.say("  session-id:  %s" % p["session_id"])
-            self.say("  transcript:  %s" % p["transcript"])
+            self.say("  session-id:  assigned by `claude --bg`; taken from the check-in")
             self.say("  remote ctl:  %s" % ("on as %s" % p["name"] if o.remote_control else "off"))
             self.say("  check-in:    SessionStart hook -> %s" % p["hook"])
+        elif o.codex_mode == "app":
+            self.say("  log:         %s" % p["log"])
+            self.say("  runner:      detached; drives `%s app-server` (JSON-RPC: initialize, "
+                     "thread/start, thread/name/set, turn/start) and stays up until the turn "
+                     "completes (max %gs)" % (o.codex_bin, o.codex_app_max))
+            self.say("  visible:     Codex app sidebar and `codex resume` (source vscode)")
+            self.say("  check-in:    the runner, once turn/start is accepted")
+            self.say("  approvals:   %s, sandbox %s%s" % (
+                o.codex_approval, codex_app_sandbox(o),
+                "; any request is accepted" if o.skip_permissions
+                else "; any request is declined"))
+            self.say("  fallback:    %s  (if app mode fails before the turn starts)"
+                     % shlex.join(p["fallback_argv"]))
         elif o.codex_mode == "exec":
             self.say("  log:         %s" % p["log"])
-            self.say("  check-in:    thread.started on `codex exec --json`")
+            self.say("  check-in:    thread.started on `codex exec --json` (hidden from the "
+                     "Codex app and the default `codex resume` list)")
         else:
             self.say("  tmux:        %s" % p["tmux_session"])
             self.say("  check-in:    new rollout under %s whose cwd is the repo"
                      % os.path.join(codex_home(self.env), "sessions"))
         self.say("  permissions: %s" % ("SKIPPED (unattended)" if o.skip_permissions
                                         else (o.permission_mode or "normal")
-                                        if p["agent"] == "claude" else o.codex_sandbox))
+                                        if p["agent"] == "claude" else
+                                        codex_app_sandbox(o) if o.codex_mode == "app"
+                                        else o.codex_sandbox))
         self.say("  model:       %s%s" % (o.model or "<default>",
                                          "  fallback: %s" % o.fallback_model
                                          if o.fallback_model else ""))
@@ -873,9 +1311,10 @@ class Relay:
         if self.o.dry_run:
             self.say("dry run — nothing spawned")
             return EXIT_OK
-        binary = self.plan["argv"][0]
-        if not shutil.which(binary):
-            return self.fail(EXIT_PRECONDITION, "not found on PATH: %s" % binary)
+        for binary in (self.plan["argv"][0],
+                       self.o.codex_bin if self.o.agent == "codex" else None):
+            if binary and not shutil.which(binary):
+                return self.fail(EXIT_PRECONDITION, "not found on PATH: %s" % binary)
         if self.o.agent == "claude":
             return self.run_claude()
         return self.run_codex()
@@ -909,9 +1348,11 @@ class Relay:
     def run_claude(self):
         p, o = self.plan, self.o
         env = successor_env(self.env, p["relay_env"])
+        generation = p["generation"]
         # Recorded BEFORE the spawn: the successor's hook can check in before
-        # `claude --bg` has even returned.
-        self._spawn_record(bg_id=p["session_id"][:8])
+        # `claude --bg` has even returned. --bg picks the session id itself, so
+        # the check-in is matched by chain + generation, and the id comes from it.
+        self._spawn_record()
         try:
             spawned = subprocess.run(p["argv"], cwd=p["repo"], env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -921,7 +1362,7 @@ class Relay:
         output = spawned.stdout.strip()
         if spawned.returncode != 0:
             append_record(p["ledger"], {"event": "spawn-failed", "chain": p["chain"],
-                                        "generation": p["generation"],
+                                        "generation": generation,
                                         "exit": spawned.returncode})
         for line in output.splitlines()[:10]:
             self.say("  claude: %s" % line)
@@ -931,10 +1372,16 @@ class Relay:
                                  "untrusted workspace — run `claude` once in %s and accept the "
                                  "trust prompt (the relay does not edit ~/.claude.json)" % p["repo"])
             return self.fail(EXIT_PRECONDITION, "`claude --bg` refused (exit %d)" % spawned.returncode)
-        sid = p["session_id"]
-        shorts = re.findall(r"\b([0-9a-f]{8})\b", output)
-        short = sid[:8] if sid[:8] in shorts or not shorts else shorts[0]
-        self.say("spawned: background session %s" % short)
+        short = parse_bg_short(output)
+        agent_entry = {}
+        if not short:
+            for entry in claude_agents(o.claude_bin, env):
+                if entry.get("name") == p["name"] and entry.get("id"):
+                    short, agent_entry = entry["id"], entry
+        p["bg_short"] = short
+        append_record(p["ledger"], {"event": "bg", "chain": p["chain"], "generation": generation,
+                                    "bg_id": short})
+        self.say("spawned: background session %s" % (short or "<id not printed>"))
 
         seen = {}
 
@@ -942,32 +1389,49 @@ class Relay:
             # The hook is the proof we want. A transcript without a hook
             # check-in means the session runs but the hook did not fire (e.g.
             # --settings hooks ignored) — accept it after a grace period, and
-            # say so.
-            if not os.path.isfile(p["transcript"]):
+            # say so. The session id comes from the job state (or `claude
+            # agents --json`), since --bg chose it.
+            sid = bg_job_state(short, self.env).get("sessionId") or agent_entry.get("sessionId")
+            if not sid and short and time.time() - seen.get("agents", 0) >= 5:
+                seen["agents"] = time.time()
+                for entry in claude_agents(o.claude_bin, env):
+                    if entry.get("id") == short and entry.get("sessionId"):
+                        agent_entry.update(entry)
+                sid = agent_entry.get("sessionId")
+            if not sid:
+                return None
+            transcript = claude_transcript_path(p["repo"], sid, self.env)
+            if not os.path.isfile(transcript):
                 return None
             seen.setdefault("at", time.time())
             if time.time() - seen["at"] < o.hook_grace:
                 return None
             return append_record(p["ledger"], dict(checkin_record(
-                {"session_id": sid, "transcript_path": p["transcript"], "cwd": p["repo"]},
-                p["chain"], p["generation"], "claude", p["handoff"], via="transcript")))
+                {"session_id": sid, "transcript_path": transcript, "cwd": p["repo"]},
+                p["chain"], generation, "claude", p["handoff"], via="transcript")))
 
-        record = self._wait(lambda r: r.get("session_id") == sid, transcript_fallback)
+        record = self._wait(lambda r: r.get("agent") == "claude"
+                            and r.get("generation") == generation, transcript_fallback)
         if record is None:
-            self.say("attach:  %s attach %s" % (o.claude_bin, short))
-            self.say("logs:    %s logs %s" % (o.claude_bin, short))
+            if short:
+                self.say("attach:  %s attach %s" % (o.claude_bin, short))
+                self.say("logs:    %s logs %s" % (o.claude_bin, short))
             return self.fail(EXIT_UNPROVEN, "successor never checked in within %ds" % o.timeout)
+        sid = record.get("session_id")
         if record.get("via") == "transcript":
             self.say("WARNING: no hook check-in — proved by the transcript existing instead")
         self.say("checked in: %s (via %s)" % (sid, record.get("via")))
-        transcript = record.get("transcript_path") or p["transcript"]
+        short = short or (sid[:8] if sid else None)
+        transcript = record.get("transcript_path") or (
+            claude_transcript_path(p["repo"], sid, self.env) if sid else None)
+        p.update(session_id=sid, transcript=transcript, bg_short=short)
 
         rc_ok = True
         if o.remote_control:
             evidence = None
             deadline = time.time() + o.rc_timeout
             while True:
-                evidence = remote_control_evidence(sid, transcript, self.env)
+                evidence = remote_control_evidence(sid, transcript, self.env, short=short)
                 if evidence or time.time() >= deadline:
                     break
                 time.sleep(o.poll)
@@ -975,82 +1439,183 @@ class Relay:
                 self.say("remote control: connected (%s)" % evidence)
             else:
                 rc_ok = False
-                self.say("remote control did NOT connect — no bridge-session for %s after %ds"
+                self.say("remote control did NOT connect — no bridgeSessionId for %s after %ds"
                          % (sid, o.rc_timeout))
         append_record(p["ledger"], {"event": "verified", "chain": p["chain"],
-                                    "generation": p["generation"], "session_id": sid,
+                                    "generation": generation, "session_id": sid,
+                                    "bg_id": short,
                                     "remote_control": rc_ok if o.remote_control else None})
         if not rc_ok and o.require_remote_control:
             return self.fail(EXIT_UNPROVEN, "remote control required but not connected — "
                              "predecessor NOT retired")
         self.retire()
-        self.say("OK — %s is up (%s attach %s)" % (p["name"], o.claude_bin, short))
+        self.say("OK — %s is up (%s attach %s)" % (p["name"], o.claude_bin, short or sid))
         return EXIT_OK
 
-    def run_codex(self):
+    def _mine(self, record, event):
+        p = self.plan
+        return (record.get("event") == event and record.get("chain") == p["chain"]
+                and record.get("generation") == p["generation"])
+
+    def _codex_app(self, env):
+        """The checked-in record; "fallback" when app mode failed before the
+        successor's turn started; an exit code when it failed after that."""
         p, o = self.plan, self.o
-        env = successor_env(self.env, p["relay_env"])
-        started = time.time()
-        if o.codex_mode == "exec":
-            os.makedirs(os.path.dirname(p["log"]), exist_ok=True)
-            self._spawn_record(log=p["log"])
+        os.makedirs(os.path.dirname(p["log"]), exist_ok=True)
+        self._spawn_record(log=p["log"], mode="app")
+        try:
             with open(p["log"], "ab") as log:
                 proc = subprocess.Popen(p["argv"], cwd=p["repo"], env=env,
                                         stdin=subprocess.DEVNULL, stdout=log,
                                         stderr=subprocess.STDOUT, start_new_session=True)
-            self.say("spawned: codex exec pid %d (log %s)" % (proc.pid, p["log"]))
+        except OSError as exc:
+            self.say("WARNING: could not start the app-server runner: %s" % exc)
+            return "fallback"
+        self.say("spawned: codex app-server runner pid %d (log %s)" % (proc.pid, p["log"]))
 
-            def check():
-                thread = exec_thread_started(p["log"])
-                if thread:
-                    return append_record(p["ledger"], checkin_record(
-                        {"session_id": thread, "cwd": p["repo"],
-                         "transcript_path": find_codex_rollout(thread, self.env)},
-                        p["chain"], p["generation"], "codex", p["handoff"], via="exec-json"))
-                if proc.poll() is not None:
-                    return {"died": proc.returncode}
-                return None
+        def is_checkin(record):
+            return record.get("agent") == "codex" and record.get("via") == "app-server" \
+                and record.get("generation") == p["generation"]
+
+        def check():
+            records = read_ledger(p["ledger"])
+            for record in records:
+                if self._mine(record, "app-failed"):
+                    return {"app_failed": record}
+            if proc.poll() is not None:
+                # It may have checked in and finished between two polls.
+                for record in records:
+                    if self._mine(record, "checkin") and is_checkin(record):
+                        return record
+                return {"died": proc.returncode}
+            return None
+
+        record = self._wait(is_checkin, check)
+        if record is not None and "app_failed" not in record and "died" not in record:
+            return record
+        thread = [r for r in read_ledger(p["ledger"]) if self._mine(r, "app-thread")]
+        if record is None:
+            if thread:
+                self.say("log: %s" % p["log"])
+                return self.fail(EXIT_UNPROVEN, "app-server thread %s started but the runner never "
+                                 "checked in within %ds" % (thread[-1].get("thread_id"), o.timeout))
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            why = "no thread within %ds" % o.timeout
+        elif "app_failed" in record:
+            failed = record["app_failed"]
+            why = "%s: %s" % (failed.get("stage"), failed.get("error"))
+            if failed.get("thread_id"):
+                why += " (empty thread %s %s)" % (failed["thread_id"], "archived"
+                                                  if failed.get("archived") else "NOT archived")
         else:
-            self._spawn_record(tmux_session=p["tmux_session"])
-            spawned = subprocess.run(p["argv"], cwd=p["repo"], env=env, stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     universal_newlines=True)
-            if spawned.returncode != 0:
-                return self.fail(EXIT_PRECONDITION, "tmux could not start %s: %s"
-                                 % (p["tmux_session"], spawned.stdout.strip()))
-            self.say("spawned: tmux session %s" % p["tmux_session"])
+            why = "runner exited %s before the turn started" % record["died"]
+        append_record(p["ledger"], {"event": "fallback", "chain": p["chain"],
+                                    "generation": p["generation"], "from": "app", "to": "exec",
+                                    "why": why})
+        self.say("WARNING: codex app-server mode failed (%s); log %s" % (why, p["log"]))
+        self.say("WARNING: falling back to `codex exec` — this successor will NOT show in the "
+                 "Codex app sidebar or the default `codex resume` list "
+                 "(`codex resume --include-non-interactive` finds it)")
+        return "fallback"
 
-            def check():
-                for path, meta in scan_new_rollouts(p["repo"], started, self.env):
-                    return append_record(p["ledger"], checkin_record(
-                        {"session_id": meta.get("id") or meta.get("session_id"),
-                         "transcript_path": path, "cwd": meta.get("cwd")},
-                        p["chain"], p["generation"], "codex", p["handoff"], via="rollout-scan"))
-                dead = subprocess.run([o.tmux_bin, "display-message", "-p", "-t",
-                                       "=%s:0.0" % p["tmux_session"], "#{pane_dead}"],
-                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                      universal_newlines=True)
-                if dead.returncode != 0 or dead.stdout.strip() == "1":
-                    return {"died": "pane"}
-                return None
+    def _codex_exec(self, env, argv, log_path):
+        p = self.plan
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        self._spawn_record(log=log_path, mode="exec")
+        with open(log_path, "ab") as log:
+            proc = subprocess.Popen(argv, cwd=p["repo"], env=env,
+                                    stdin=subprocess.DEVNULL, stdout=log,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+        self.say("spawned: codex exec pid %d (log %s)" % (proc.pid, log_path))
+
+        def check():
+            thread = exec_thread_started(log_path)
+            if thread:
+                return append_record(p["ledger"], checkin_record(
+                    {"session_id": thread, "cwd": p["repo"],
+                     "transcript_path": find_codex_rollout(thread, self.env)},
+                    p["chain"], p["generation"], "codex", p["handoff"], via="exec-json"))
+            if proc.poll() is not None:
+                return {"died": proc.returncode}
+            return None
 
         record = self._wait(lambda r: r.get("agent") == "codex"
                             and r.get("generation") == p["generation"], check)
         if record is None or "died" in record:
-            if p["log"]:
-                self.say("log: %s" % p["log"])
-            if p["tmux_session"]:
-                self.say("attach: %s attach -t %s" % (o.tmux_bin, p["tmux_session"]))
-            why = ("successor exited before starting a thread (%s)" % record["died"]
-                   if record else "successor never checked in within %ds" % o.timeout)
-            return self.fail(EXIT_UNPROVEN, why)
+            self.say("log: %s" % log_path)
+            return self.fail(EXIT_UNPROVEN, "successor exited before starting a thread (%s)"
+                             % record["died"] if record else
+                             "successor never checked in within %ds" % self.o.timeout)
+        return record
+
+    def _codex_tmux(self, env):
+        p, o = self.plan, self.o
+        started = time.time()
+        self._spawn_record(tmux_session=p["tmux_session"], mode="tmux")
+        spawned = subprocess.run(p["argv"], cwd=p["repo"], env=env, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 universal_newlines=True)
+        if spawned.returncode != 0:
+            return self.fail(EXIT_PRECONDITION, "tmux could not start %s: %s"
+                             % (p["tmux_session"], spawned.stdout.strip()))
+        self.say("spawned: tmux session %s" % p["tmux_session"])
+
+        def check():
+            for path, meta in scan_new_rollouts(p["repo"], started, self.env):
+                return append_record(p["ledger"], checkin_record(
+                    {"session_id": meta.get("id") or meta.get("session_id"),
+                     "transcript_path": path, "cwd": meta.get("cwd")},
+                    p["chain"], p["generation"], "codex", p["handoff"], via="rollout-scan"))
+            dead = subprocess.run([o.tmux_bin, "display-message", "-p", "-t",
+                                   "=%s:0.0" % p["tmux_session"], "#{pane_dead}"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  universal_newlines=True)
+            if dead.returncode != 0 or dead.stdout.strip() == "1":
+                return {"died": "pane"}
+            return None
+
+        record = self._wait(lambda r: r.get("agent") == "codex"
+                            and r.get("generation") == p["generation"], check)
+        if record is None or "died" in record:
+            self.say("attach: %s attach -t %s" % (o.tmux_bin, p["tmux_session"]))
+            return self.fail(EXIT_UNPROVEN, "successor exited before starting a thread (pane)"
+                             if record else "successor never checked in within %ds" % o.timeout)
+        return record
+
+    def run_codex(self):
+        p, o = self.plan, self.o
+        env = successor_env(self.env, p["relay_env"])
+        mode = o.codex_mode
+        if mode == "app":
+            record = self._codex_app(env)
+            if record == "fallback":
+                mode = "exec"
+                record = self._codex_exec(env, p["fallback_argv"], p["fallback_log"])
+        elif mode == "exec":
+            record = self._codex_exec(env, p["argv"], p["log"])
+        else:
+            record = self._codex_tmux(env)
+        if isinstance(record, int):
+            return record
         thread = record.get("session_id")
         self.say("checked in: thread %s (via %s)" % (thread, record.get("via")))
-        if thread and o.name_thread:
+        if mode == "app":
+            if record.get("named"):
+                self.say("thread name: set — by the app-server runner (thread/name/set)")
+            elif o.name_thread:
+                self.say("thread name: NOT set — %s" % (record.get("name_error") or "unknown"))
+            self.say("visible: Codex app sidebar and `codex resume` (source %s); runner pid %s "
+                     "keeps `codex app-server` up until the turn completes (max %gs)"
+                     % (record.get("source"), record.get("runner_pid"), o.codex_app_max))
+        elif thread and o.name_thread:
             ok, detail = codex_set_thread_name(o.codex_bin, thread, p["name"], env)
             self.say("thread name: %s — %s" % ("set" if ok else "NOT set", detail))
         append_record(p["ledger"], {"event": "verified", "chain": p["chain"],
-                                    "generation": p["generation"], "session_id": thread})
+                                    "generation": p["generation"], "session_id": thread,
+                                    "mode": mode})
         self.retire()
         self.say("OK — %s is up (codex resume %s)" % (p["name"], thread))
         return EXIT_OK
@@ -1096,9 +1661,17 @@ def parser():
                "run the successor without permission prompts (dangerous)",
                "keep permission prompts on")
     p.add_argument("--permission-mode", help="claude: --permission-mode for the successor")
-    p.add_argument("--codex-mode", choices=("exec", "tmux"), default="exec",
-                   help="codex: detached `codex exec --json` (default) or TUI in tmux")
-    p.add_argument("--codex-sandbox", help="codex: -s value (default workspace-write)")
+    p.add_argument("--codex-mode", choices=CODEX_MODES,
+                   help="codex: `app` (default) runs it through `codex app-server` so it shows "
+                        "in the Codex app and `codex resume`; `exec` a hidden `codex exec "
+                        "--json`; `tmux` the TUI in tmux")
+    p.add_argument("--codex-sandbox", help="codex: sandbox (default workspace-write)")
+    p.add_argument("--codex-approval", choices=APPROVAL_POLICIES,
+                   help="codex app mode: approvalPolicy (default never); any approval request "
+                        "is declined, or accepted with --skip-permissions")
+    p.add_argument("--codex-app-max-seconds", dest="codex_app_max", type=float,
+                   help="codex app mode: interrupt the turn and stop the runner after this "
+                        "long (default 21600)")
     p.add_argument("--no-name-thread", dest="name_thread", action="store_false",
                    help="codex: do not name the thread via codex app-server")
     _bool_flag(p, "retire-predecessor", "retire",
@@ -1155,6 +1728,8 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["checkin"]:
         return checkin_main(argv[1:])
+    if argv[:1] == ["codex-app-runner"]:
+        return codex_app_runner_main(argv[1:])
     opts = parser().parse_args(argv)
     try:
         return Relay(opts).run()

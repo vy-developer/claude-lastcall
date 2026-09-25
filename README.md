@@ -670,7 +670,7 @@ the relay reports that as a precondition failure and never edits `~/.claude.json
 python3 -m unittest discover -s tests -v
 ```
 
-424 tests, standard library only, no network. They cover the failure modes that
+442 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

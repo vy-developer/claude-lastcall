@@ -122,6 +122,118 @@ class SessionState(dict):
         return ok
 
 
+# How long a hook waits for another hook of the same session to finish judging
+# a reading. Judging takes milliseconds; a holder this slow is stuck, and the
+# waiter stays silent rather than risk saying the same thing twice.
+LOCK_TIMEOUT = 2.0
+
+
+class SessionLock(object):
+    """An exclusive lock on one session's state, around decide -> emit -> save.
+
+    Parallel tool calls fire PostToolUse hooks at the same moment; each read
+    the same "not announced yet" state and each emitted the same warning.
+    Under this lock the second one re-reads the state the first one saved and
+    stays silent.
+
+    flock (POSIX) or msvcrt.locking (Windows) on a sidecar file — the state
+    file itself is swapped by os.replace, so it cannot carry a lock. Where
+    neither exists, an O_CREAT|O_EXCL marker. ``acquired`` is True when held,
+    False when another holder kept it past ``timeout`` (the caller should stay
+    silent), and None when no lock could be made at all (an unwritable state
+    dir: the caller carries on unlocked, as it would have before).
+    """
+
+    def __init__(self, path, timeout=LOCK_TIMEOUT):
+        self.path = path
+        self.timeout = timeout
+        self.handle = None
+        self.marker = False
+        self.acquired = None
+
+    def __enter__(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        except OSError:
+            return self
+        deadline = time.monotonic() + self.timeout
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
+        msvcrt = None
+        if fcntl is None:
+            try:
+                import msvcrt
+            except ImportError:
+                msvcrt = None
+        if fcntl is None and msvcrt is None:
+            return self._marker(deadline)
+        try:
+            self.handle = open(self.path, "a+")
+        except OSError:
+            return self
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                self.acquired = True
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    self.acquired = False
+                    return self
+                time.sleep(0.002)
+
+    def _marker(self, deadline):
+        marker = self.path + ".held"
+        while True:
+            try:
+                os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                self.marker, self.acquired = True, True
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(marker) > 10 * self.timeout:
+                        os.remove(marker)       # left behind by a killed hook
+                        continue
+                except OSError:
+                    pass
+                if time.monotonic() >= deadline:
+                    self.acquired = False
+                    return self
+                time.sleep(0.002)
+            except OSError:
+                return self
+
+    def __exit__(self, *exc):
+        if self.marker:
+            try:
+                os.remove(self.path + ".held")
+            except OSError:
+                pass
+        if self.handle is not None:
+            try:
+                if self.acquired and os.name == "nt":
+                    import msvcrt
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except (ImportError, OSError):
+                pass
+            try:
+                self.handle.close()  # closing releases a flock
+            except OSError:
+                pass
+        return False
+
+
+def session_lock(config, session_id, agent="claude"):
+    return SessionLock(state_path(config, session_id, agent) + ".lock")
+
+
 def read_state(config, session_id, agent="claude"):
     return dict(SessionState(config, session_id, agent))
 
@@ -158,6 +270,9 @@ def prune_state(config):
         except OSError:
             continue
         for name in names:
+            if name.endswith(".json.lock"):
+                _prune_lock(os.path.join(directory, name), cutoff)
+                continue
             if not name.endswith(".json") or name in (ONBOARDED_FILE, LEARNED_FILE):
                 continue
             target = os.path.join(directory, name)
@@ -169,6 +284,15 @@ def prune_state(config):
                 os.remove(target)
             except OSError:
                 pass
+
+
+def _prune_lock(path, cutoff):
+    """A session's lock sidecar: always empty, and as dead as its session."""
+    try:
+        if os.path.getmtime(path) < cutoff and os.path.getsize(path) == 0:
+            os.remove(path)
+    except OSError:
+        pass
 
 
 def _is_our_state(path):

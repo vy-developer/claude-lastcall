@@ -37,8 +37,8 @@ from .agents import detect_agent
 from .config import home_dir, load_config
 from .render import (block_reason, compaction_message, onboarding_message,
                      render)
-from .state import (SessionState, mark_onboarded, prune_state, was_onboarded,
-                    write_debug)
+from .state import (SessionState, mark_onboarded, prune_state, session_lock,
+                    was_onboarded, write_debug)
 from .windows import learn, load_learned
 from .zones import effective_window as _effective_window
 from .zones import resolve_window, resolve_zones, zone_for, zone_threshold
@@ -198,6 +198,23 @@ def on_measure(agent, config, payload, event, env=None, out=None):
         usage = read_usage(agent, config, payload, state, fresh=stop and not looping)
     except OSError:
         usage = None
+    # Decide, emit and save under the session's lock: parallel tool calls fire
+    # PostToolUse hooks together, and without it every one of them read the
+    # same "not announced yet" state and emitted the same warning.
+    with session_lock(config, session_id, agent.name) as lock:
+        if lock.acquired is False:
+            return 0  # another hook is judging this session; it speaks, not us
+        state = SessionState(config, session_id, agent.name)
+        if not stop and state.get("sig") == signature:
+            return 0  # a concurrent hook already judged this very reading
+        return _judge(agent, config, payload, event, env, out, state, usage,
+                      signature, stop, looping, transcript)
+
+
+def _judge(agent, config, payload, event, env, out, state, usage, signature,
+           stop, looping, transcript):
+    """on_measure's decision, with the session's state freshly read under its
+    lock. Always returns 0."""
     state["sig"] = signature
     if usage is None:
         state.save()

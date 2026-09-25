@@ -84,7 +84,7 @@ Linux, macOS and Windows against 3.9, 3.11 and 3.13.
 ## Commands
 
 ```
-lastcall.py setup      configure this project — six questions, writes
+lastcall.py setup      configure this project — nine questions, writes
                        .lastcall.json and docs/handoff/TEMPLATE.md
 lastcall.py doctor     show what resolved: window, zones, handover readiness
 lastcall.py doctor <transcript.jsonl>
@@ -410,19 +410,24 @@ that is already written down. It then settles **everything** with you:
 
 | | |
 |---|---|
-| when to warn | token counts (`at_tokens`) or percentages — it offers both, and token counts skip the window question entirely |
-| the window | only if you chose percentages, and it takes **any** figure you say |
-| small models | `min_window_tokens`, so a 400k ladder stays silent on a 200k model |
+| when to warn | percentages (recommended) or token counts (`at_tokens`); with percentages, a `windows` map for your Claude models, taking **any** figure you say; with token counts, `min_window_tokens` so a 400k ladder stays silent on a 200k model |
 | what wrap-up means here | written into a template, not left generic |
 | gates | turned into real shell commands, not descriptions |
-| a second opinion | codex or gemini, if either is on `PATH` |
-| handover | the whole `relay` block: which directory, where handoffs live, which model drives the successor and what it falls back to, and whether it runs unattended |
+| a second opinion | codex, gemini or claude, if one is on `PATH` |
+| handover | the `relay` block: which directory, where handoffs live, and which `agent` takes over — the same one, or across agents |
+| models | which model drives the successor and what it falls back to |
+| unattended | `skip_permissions`, only on an explicit yes |
+| remote control | on by default, so you can reach a Claude successor |
+| retire the predecessor | `kill_predecessor`, recommended when the handover is unattended |
 
 Then it writes the config and proves it with `doctor`.
 
-Both onboarding texts are covered by tests asserting they mention every option
-a user is actually onboarded onto — the prompt went stale once, shipping
-features the assistant could not offer because nothing told it they existed.
+The in-session prompt, `/lastcall:onboard` and the terminal wizard below ask
+the same questions, in the same order, with the same recommendations: they
+come from one list in `lib/lastcall_core/render.py`, and tests fail if the
+command file drifts from it or either text stops mentioning an option — the
+prompt went stale once, shipping features the assistant could not offer
+because nothing told it they existed.
 
 It never asks twice in the same project. If you do not want Last Call in a
 project at all, tell the assistant so and it writes `{"disabled": true}`.
@@ -433,7 +438,7 @@ You can trigger the same interview yourself at any time:
 /lastcall:onboard
 ```
 
-Or, if you would rather not converse, answer six questions in a terminal:
+Or, if you would rather not converse, answer the same nine questions in a terminal:
 
 ```
 python3 <plugin>/scripts/lastcall.py setup
@@ -451,7 +456,7 @@ thresholds, gates and templates, and per-session state is keyed by session id.
 
 ### A second opinion
 
-If `codex` or `gemini` is on `PATH`, setup offers it as a verification gate and
+If `codex`, `gemini` or `claude` is on `PATH`, setup offers it as a verification gate and
 renders it into the wrap-up as `{verifier}`:
 
 ```
@@ -473,48 +478,60 @@ After installing, run this once per project:
 python3 <plugin>/scripts/lastcall.py setup
 ```
 
-Six questions, each with a recommendation based on what is actually present
-on your machine — whether this is a git repository, whether git and the
-`claude` or `codex` CLI are on `PATH`:
+Nine questions (the last four only if you want handover), each with a
+recommendation based on what is actually present on your machine — whether
+the `claude` or `codex` CLI is on `PATH`, and which second-opinion CLIs are:
 
 ```
-1/6  How big is this project's context window (Claude Code)?
-  1) 200,000 tokens — standard  <- recommended
-  2) 1,000,000 tokens — extended
-     Or type any number of tokens, e.g. 500000. Codex reports its own
-     window, so this only matters for Claude Code sessions.
+1/9  When should Last Call warn that the context is filling?
+  p) percentages of the window — 40% and 55%  <- recommended
+  t) absolute token counts — e.g. 400,000 and 550,000, no window needed
+  Warn and stop at which percentages? Enter keeps 40 and 55.
+     Which window do this project's Claude models have?
+  1) 200,000 tokens for every Claude model — standard  <- recommended
+  2) 1,000,000 tokens for every Claude model — extended
+  3) different per model — type model=window pairs next
 
-2/6  Hand over to a fresh session automatically when context runs low?
-  y) yes — write a handoff, then start a successor session  <- recommended
-  n) no  — just warn me; the session ends there
-     git and the claude/codex CLI are present.
+2/9  What does wrap-up mean in this project?
+  > update docs/STATUS.md and the backlog; commit, never push
 
-3/6  What command proves this project's environment is actually up?
-  The successor runs this FIRST and must not start work until it passes.
-  > npm test && curl -sf localhost:3000/health
-
-4/6  What must PASS before this project hands over?
-  Tests, linters, a review gate — comma separated. The wrap-up shows
-  these to the assistant so it cannot hand over unverified work.
+3/9  What must PASS before this project hands over?
   > pytest -q, ruff check
 
-5/6  Have a SECOND model check the work before handing over?
-  Found on this machine: OpenAI Codex CLI, Google Gemini CLI
+4/9  Have a SECOND model check the work before handing over?
   1) use OpenAI Codex CLI  <- recommended
-  2) use Google Gemini CLI
+  2) use Claude Code CLI
   n) no second opinion
-     A different model reading the diff against your plan documents
-     catches what the session that wrote them cannot.
 
-6/6  Should the successor run UNATTENDED?
-  y) yes — remote control on, permission prompts skipped  <- recommended
-  n) no  — successor waits for permission like a normal session
-     Unattended means the successor runs tools without asking. It is
-     what lets a chain of sessions continue while you are away.
+5/9  Hand over to a fresh session automatically when context runs low?
+  y) yes — write a handoff, then start a successor session  <- recommended
+  n) no  — just warn me; the session ends there
+     Which agent should the successor be?
+  same) whichever agent is handing over  <- recommended
+  claude) always Claude Code
+  codex) always Codex
+  What command proves this project's environment is actually up?
+  > npm test && curl -sf localhost:3000/health
+
+6/9  Which model should drive the successor?
+  Claude successor: a model, then fallbacks, e.g. 'opus, fable, sonnet'.
+  > opus, fable, sonnet
+
+7/9  Should the successor run UNATTENDED (skip permission prompts)?
+  y) yes — the successor runs tools WITHOUT asking
+  n) no  — it asks for permission like a normal session  <- recommended
+
+8/9  Start a Claude successor with Remote Control?
+  y) yes — reach a Claude successor from anywhere  <- recommended
+
+9/9  Retire the OLD session once the successor has checked in?
+  y) yes — retire this session once the successor has checked in
+  n) no  — leave it open  <- recommended (yes when unattended)
 ```
 
-It writes `.lastcall.json`, creates `docs/handoff/TEMPLATE.md` seeded
-with that command, and tells you exactly what is and is not wired up:
+It writes `.lastcall.json`, puts your wrap-up rules in `.lastcall/wrapup.md`
+above the shipped steps, creates `docs/handoff/TEMPLATE.md` seeded with that
+command, and tells you exactly what is and is not wired up:
 
 ```
 automatic handover: READY
@@ -755,7 +772,7 @@ ignore this whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-626 tests, standard library only, no network. They cover the failure modes that
+640 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

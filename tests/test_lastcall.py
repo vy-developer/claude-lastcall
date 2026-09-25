@@ -9,6 +9,7 @@ re-armed after compaction, a transcript path derived by mangling cwd, and
 subagent usage records being read as the main session's context.
 """
 
+import io
 import json
 import os
 import shlex
@@ -18,12 +19,14 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "plugins", "lastcall", "scripts", "lastcall.py")
 sys.path.insert(0, os.path.dirname(SCRIPT))
 
 import lastcall as cg  # noqa: E402
+from lastcall_core import render, wizard  # noqa: E402
 
 # Never read the real ~/.lastcall/config.json: a machine-wide config would
 # change what every test here measures.
@@ -884,7 +887,10 @@ class TestSetupCommand(TempCase):
                          result.stdout.decode("utf-8", "replace"))
         with open(os.path.join(self.dir, ".lastcall.json")) as handle:
             written = json.load(handle)
-        self.assertEqual(written["context_window_tokens"], 200_000)
+        # The recommendation: the windows map, not a single figure that would
+        # override even the status line's exact one.
+        self.assertEqual(written["windows"], {"claude-*": 200_000})
+        self.assertNotIn("context_window_tokens", written)
         self.assertNotIn("template", written)
 
     def test_setup_preserves_unrelated_existing_settings(self):
@@ -946,6 +952,167 @@ class TestSetupRecommendations(TempCase):
         self.assertIn("make check", rendered)
         self.assertIn("2026-08-19", rendered)
         self.assertNotIn("{verify_block}", rendered)
+
+
+class _TTY(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class TestSetupWizardInterview(TempCase):
+    """`lastcall setup` is the third front end of ONE onboarding: it must ask
+    render.ONBOARDING_QUESTIONS in their order, recommend what the
+    conversational texts recommend, and write what was answered. PATH is
+    faked (claude and codex present, gemini and git absent) so every machine,
+    CI included, walks the same interview."""
+
+    ON_PATH = ("claude", "codex")
+
+    def run_wizard(self, answers, existing=None, on_path=ON_PATH):
+        target = os.path.join(self.dir, ".lastcall.json")
+        if existing is not None:
+            with open(target, "w") as fh:
+                json.dump(existing, fh)
+        feed = iter(answers)
+
+        def fake_input(prompt=""):
+            return next(feed, "")
+
+        def fake_which(name, *args, **kwargs):
+            return "/fake/bin/" + name if name in on_path else None
+
+        environ = {"CLAUDE_PROJECT_DIR": self.dir,
+                   "LASTCALL_HOME": os.path.join(self.dir, "home"),
+                   "LASTCALL_STATE_DIR": self.state}
+        out = io.StringIO()
+        cwd = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, cwd)
+        with mock.patch.dict(os.environ, environ), \
+                mock.patch("shutil.which", fake_which), \
+                mock.patch("sys.stdin", _TTY()), \
+                mock.patch("builtins.input", fake_input), \
+                mock.patch("sys.stdout", out):
+            code = wizard.setup([])
+        self.assertEqual(code, 0, out.getvalue())
+        with open(target) as fh:
+            return json.load(fh), out.getvalue()
+
+    @staticmethod
+    def numbered(text):
+        return [line for line in text.splitlines()
+                if line[:1].isdigit() and "/" in line.split()[0]]
+
+    def test_it_asks_the_shared_questions_in_their_order(self):
+        _written, out = self.run_wizard([])
+        total = len(render.ONBOARDING_QUESTIONS)
+        self.assertEqual(self.numbered(out),
+                         ["%d/%d  %s" % (n, total, q.ask)
+                          for n, q in enumerate(render.ONBOARDING_QUESTIONS, 1)])
+
+    def test_without_handover_it_stops_before_the_relay_questions(self):
+        # warn, its percentages, the window, wrap-up, gates, verifier: Enter.
+        _written, out = self.run_wizard(["", "", "", "", "", "", "n"])
+        asked = [q.ask for q in render.ONBOARDING_QUESTIONS if not q.handover_only]
+        self.assertEqual([line.split("  ", 1)[1] for line in self.numbered(out)], asked)
+
+    def test_enter_everywhere_never_runs_unattended(self):
+        """skip_permissions needs explicit consent, and the predecessor is
+        retired only when the handover is unattended — the rule the prompt
+        states."""
+        written, _out = self.run_wizard([])
+        self.assertFalse(written["relay"]["skip_permissions"])
+        self.assertFalse(written["relay"]["kill_predecessor"])
+        self.assertTrue(written["relay"]["remote_control"])
+        self.assertNotIn("agent", written["relay"])
+        self.assertEqual(written["template"], cg.RELAY_TEMPLATE)
+        self.assertEqual(written["windows"], render.ONBOARDING_RECOMMENDED["windows"])
+
+    def test_handover_is_not_recommended_without_an_agent_cli(self):
+        written, out = self.run_wizard([], on_path=())
+        self.assertNotIn("relay", written)
+        self.assertIn("none of codex, gemini, claude is on PATH", out)
+
+    def test_a_full_interview_writes_what_was_answered(self):
+        written, _out = self.run_wizard(
+            ["t", "300k 450k", "1m",
+             "update docs/STATUS.md {always}; never push",
+             "pytest -q, ruff check", "n",
+             "y", "codex", "make check", "gpt-5-codex", "yes", "n", ""])
+        self.assertEqual(written["zones"], [
+            {"name": "yellow", "at_tokens": 300_000},
+            {"name": "red", "at_tokens": 450_000, "block": True}])
+        self.assertEqual(written["min_window_tokens"], 1_000_000)
+        self.assertEqual(written["gates"], ["pytest -q", "ruff check"])
+        self.assertNotIn("verifier", written)
+        relay = written["relay"]
+        self.assertEqual(relay["agent"], "codex")
+        self.assertEqual(relay["codex_model"], "gpt-5-codex")
+        self.assertNotIn("model", relay)
+        self.assertTrue(relay["skip_permissions"])
+        self.assertFalse(relay["remote_control"])
+        # Unattended, so retiring the predecessor is the recommendation.
+        self.assertTrue(relay["kill_predecessor"])
+        self.assertEqual(written["template"], os.path.join(".lastcall", "wrapup.md"))
+        with open(os.path.join(self.dir, ".lastcall", "wrapup.md")) as fh:
+            wrapup = fh.read()
+        self.assertIn("never push", wrapup)
+        self.assertIn("{relay}", wrapup)
+        with open(os.path.join(self.dir, "docs", "handoff", "TEMPLATE.md")) as fh:
+            self.assertIn("make check", fh.read())
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.dir,
+                                          "LASTCALL_HOME": os.path.join(self.dir, "home")}):
+            config = cg.load_config({"cwd": self.dir})
+        message = cg.render(config, cg.resolve_zones(config)[0], 350_000, None)
+        self.assertIn("update docs/STATUS.md {always}", message)
+        self.assertIn("pytest -q", message)
+
+    def test_claude_models_and_a_per_model_window_map(self):
+        written, _out = self.run_wizard(
+            ["p", "35 50", "3", "claude-opus-5-5=1000000, claude-sonnet-*=200k",
+             "", "", "1",
+             "y", "claude", "", "opus, fable, sonnet", "n", "y", "n"],
+            existing={"context_window_tokens": 500_000, "mode": "advisory"})
+        self.assertEqual(written["windows"], {"claude-opus-5-5": 1_000_000,
+                                              "claude-sonnet-*": 200_000})
+        self.assertNotIn("context_window_tokens", written)
+        self.assertEqual((written["yellow_percent"], written["red_percent"]), (35, 50))
+        self.assertEqual(written["mode"], "advisory")
+        self.assertTrue(written["verifier"].startswith("codex exec"))
+        relay = written["relay"]
+        self.assertEqual(relay["agent"], "claude")
+        self.assertEqual(relay["model"], "opus")
+        self.assertEqual(relay["fallback_model"], "fable,sonnet")
+        self.assertNotIn("codex_model", relay)
+        self.assertFalse(relay["skip_permissions"])
+        self.assertFalse(relay["kill_predecessor"])
+
+    def test_nonsense_is_asked_again_not_swallowed(self):
+        written, out = self.run_wizard(["t", "banana", "550k 400k", "400k 550k"])
+        self.assertIn("lower first", out)
+        self.assertEqual(written["zones"][0]["at_tokens"], 400_000)
+
+
+class TestWizardParsing(unittest.TestCase):
+    def test_token_counts(self):
+        self.assertEqual(wizard.parse_tokens("400,000, 550,000"), [400_000, 550_000])
+        self.assertEqual(wizard.parse_tokens("400k 1.5m"), [400_000, 1_500_000])
+        self.assertIsNone(wizard.parse_tokens("lots"))
+
+    def test_pairs_must_ascend(self):
+        self.assertEqual(wizard.parse_pair("40% 55%", 100), [40, 55])
+        self.assertIsNone(wizard.parse_pair("55 40"))
+        self.assertIsNone(wizard.parse_pair("40 155", 100))
+
+    def test_window_pairs(self):
+        clean, problems = wizard.parse_windows("claude-opus-5-5=1m, claude:opus=1000000")
+        self.assertEqual(clean, {"claude-opus-5-5": 1_000_000, "claude:opus": 1_000_000})
+        self.assertEqual(problems, [])
+        self.assertTrue(wizard.parse_windows("opus")[1])
+
+    def test_yes_and_no_are_accepted_words(self):
+        self.assertEqual(cg.parse_answer("yes", {"y": "", "n": ""}), "y")
+        self.assertEqual(cg.parse_answer("No", {"y": "", "n": ""}), "n")
 
 
 class TestGatesAndTranscript(TempCase):

@@ -114,31 +114,30 @@ if __name__ == "__main__":
 
 class TestSetupWizardDocs(unittest.TestCase):
     """The README's wizard transcript drifted from the code once already: it
-    showed 1/3..3/3 after a fourth question was added, and none of the existing
-    doc tests looked at the numbering."""
+    showed 1/3..3/3 after a fourth question was added. The wizard now numbers
+    its questions from render.ONBOARDING_QUESTIONS, so the README is checked
+    against that."""
 
-    def source(self):
-        with open(os.path.join(ROOT, "plugins", "lastcall", "lib", "lastcall_core",
-                               "wizard.py"), encoding="utf-8") as handle:
-            return handle.read()
+    def questions(self):
+        from lastcall_core import render
+        return render.ONBOARDING_QUESTIONS
 
     def test_readme_shows_every_question_the_wizard_asks(self):
-        asked = sorted(set(re.findall(r'"(\d)/(\d)\s+[A-Z]', self.source())))
-        self.assertTrue(asked, "no numbered prompts found in setup()")
-        totals = {total for _n, total in asked}
-        self.assertEqual(len(totals), 1, "wizard prompts disagree on the total")
-        total = totals.pop()
-        shown = sorted(set(re.findall(r"^(\d)/(\d)\s+[A-Z]", readme(), re.M)))
-        self.assertEqual(len(shown), int(total),
-                         "README shows %d of the wizard's %s questions"
-                         % (len(shown), total))
-        self.assertEqual([n for n, _t in shown], [n for n, _t in asked])
+        questions = self.questions()
+        shown = re.findall(r"^(\d+/\d+  .+)$", readme(), re.M)
+        self.assertEqual(shown, ["%d/%d  %s" % (n, len(questions), q.ask)
+                                 for n, q in enumerate(questions, 1)])
 
     def test_prose_question_count_matches(self):
-        total = set(re.findall(r'"\d/(\d)\s+[A-Z]', self.source())).pop()
-        words = {"2": "Two", "3": "Three", "4": "Four", "5": "Five",
-                 "6": "Six", "7": "Seven", "8": "Eight", "9": "Nine"}
-        self.assertIn("%s questions" % words[total], readme())
+        words = {"2": "two", "3": "three", "4": "four", "5": "five", "6": "six",
+                 "7": "seven", "8": "eight", "9": "nine", "10": "ten"}
+        word = words[str(len(self.questions()))]
+        text = readme().lower()
+        self.assertTrue("%s questions" % word in text,
+                        "README never says %r" % ("%s questions" % word))
+        for other in sorted(set(words.values()) - {word}):
+            self.assertFalse("%s questions" % other in text,
+                             "README still says %r" % ("%s questions" % other))
 
 
 class TestReleaseHygiene(unittest.TestCase):
@@ -255,29 +254,58 @@ class TestOnboardingCoversTheFeatures(unittest.TestCase):
     """The onboarding text is what the assistant knows about this tool. It went
     stale once already: token thresholds, the window floor and model selection
     all shipped while the prompt still described an older, smaller tool, so the
-    assistant could not offer them."""
+    assistant could not offer them. There were also three onboarding flows that
+    each asked something different; now the prompt, /lastcall:onboard and the
+    wizard share render.ONBOARDING_QUESTIONS."""
 
-    def texts(self):
-        sys.path.insert(0, os.path.join(ROOT, "plugins", "lastcall", "scripts"))
-        import lastcall
+    def command(self):
         with open(os.path.join(ROOT, "plugins", "lastcall", "commands",
                                "onboard.md"), encoding="utf-8") as handle:
-            command = handle.read()
-        return {"SessionStart prompt": lastcall.ONBOARDING,
-                "/lastcall:onboard": command}
+            return handle.read()
+
+    def texts(self):
+        return {"SessionStart prompt": cg.ONBOARDING,
+                "/lastcall:onboard": self.command()}
 
     # Only the options a user is actually onboarded onto. debug, state_dir,
     # state_ttl_days, include_output_tokens and mode are deliberately excluded:
     # they are troubleshooting knobs, not setup questions.
-    MUST_MENTION = ("at_tokens", "context_window_tokens", "min_window_tokens",
-                    "template", "gates", "verifier", "relay", "handoff_dir",
-                    "skip_permissions", "remote_control", "fallback_model",
-                    "disabled")
+    MUST_MENTION = ("at_tokens", "windows", "context_window_tokens",
+                    "min_window_tokens", "template", "gates", "verifier",
+                    "relay", "handoff_dir", "agent", "model", "fallback_model",
+                    "codex_model", "skip_permissions", "remote_control",
+                    "kill_predecessor", "disabled", ".lastcall.json",
+                    "AGENTS.md", "CLAUDE.md")
 
     def test_both_onboarding_texts_cover_every_setup_option(self):
         for where, text in self.texts().items():
             for option in self.MUST_MENTION:
                 self.assertIn(option, text, "%s never mentions %r" % (where, option))
+
+    def test_onboard_md_carries_the_shared_questions_verbatim(self):
+        """The drift guard: edit the questions in render.py, then run
+        `python3 plugins/lastcall/lib/lastcall_core/render.py --write-onboard`."""
+        from lastcall_core import render
+        text = self.command()
+        begin, end = text.index(render.GENERATED_BEGIN), text.index(render.GENERATED_END)
+        generated = text[begin + len(render.GENERATED_BEGIN):end].strip("\n")
+        self.assertEqual(generated, render.onboard_command_block(),
+                         "onboard.md drifted from render.py; regenerate it with "
+                         "render.py --write-onboard")
+
+    def test_the_prompt_is_built_from_the_same_questions(self):
+        from lastcall_core import render
+        self.assertIn(render.onboarding_block(render.PROMPT_DOCTOR,
+                                              render.RELAY_TEMPLATE), cg.ONBOARDING)
+        for text in self.texts().values():
+            titles = [line.split(". ", 1)[1] for line in text.splitlines()
+                      if re.match(r"^\d+\. [A-Z][A-Z -]+$", line)]
+            self.assertEqual(titles, [q.title for q in render.ONBOARDING_QUESTIONS])
+
+    def test_the_prompt_fits_what_an_agent_will_inject(self):
+        """Codex caps a hook's additionalContext at roughly 2,500 tokens."""
+        from lastcall_core import render
+        self.assertLess(len(render.onboarding_message()), 8000)
 
     def test_they_say_gates_are_commands_not_descriptions(self):
         for where, text in self.texts().items():
@@ -288,9 +316,14 @@ class TestOnboardingCoversTheFeatures(unittest.TestCase):
             self.assertIn("ANY", text, where)
 
     def test_they_require_explicit_consent_for_unattended(self):
+        from lastcall_core import render
+        self.assertFalse(render.ONBOARDING_RECOMMENDED["skip_permissions"])
         for where, text in self.texts().items():
             self.assertIn("without asking", text, where)
+            self.assertIn("never enable it without a clear yes", text, where)
 
     def test_they_confine_writes_to_this_project(self):
         for where, text in self.texts().items():
             self.assertIn("THIS project", text, where)
+            self.assertIn("never your home", text, where)
+

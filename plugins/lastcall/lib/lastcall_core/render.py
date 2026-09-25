@@ -76,7 +76,10 @@ is what stops a fresh context relitigating settled questions.
 The handful of paths worth knowing on day one.
 """
 
-DEFAULT_TEMPLATE = """\
+# The generic wrap-up, in two parts: the steps (which `setup` also puts under
+# a project's own rules when handover is off), and the notice that nothing
+# carries the work forward, which only the unconfigured default shows.
+WRAPUP_STEPS = """\
 Wrap up this session rather than starting anything new.
 
   1. FINISH what is already in flight. Use your judgment about what is small
@@ -90,8 +93,9 @@ Wrap up this session rather than starting anything new.
      settled so they do not get re-litigated.
   4. VERIFY that record against the actual state of the repository, not
      against your memory of the session. Your memory is the thing that is
-     running out.
+     running out."""
 
+HANDOVER_NOT_SET_UP = """\
 AUTOMATIC HANDOVER IS NOT SET UP for this project, so nothing will start a
 successor session or carry this work forward — when you stop, the work stops.
 Tell the user that, once, and point them at:
@@ -100,6 +104,194 @@ Tell the user that, once, and point them at:
 
 Configure this text: set "template" in .lastcall.json."""
 
+DEFAULT_TEMPLATE = WRAPUP_STEPS + "\n\n" + HANDOVER_NOT_SET_UP
+
+
+# --------------------------------------------------------------------------
+# Onboarding: ONE list of questions behind three front ends
+#
+#   the SessionStart prompt   ONBOARDING, once per unconfigured project
+#   /lastcall:onboard         commands/onboard.md (Codex turns it into a skill)
+#   `lastcall setup`          wizard.py, the terminal wizard
+#
+# Both conversational texts embed onboarding_block() verbatim: the prompt
+# builds itself from it, and onboard.md carries it between the GENERATED
+# markers (tests/test_docs.py fails when they drift; regenerate with
+# `python3 plugins/lastcall/lib/lastcall_core/render.py --write-onboard`).
+# The wizard asks ONBOARDING_QUESTIONS in this order, numbers them from this
+# tuple, and takes its recommendations from ONBOARDING_RECOMMENDED.
+# --------------------------------------------------------------------------
+
+ONBOARDING_RECOMMENDED = {
+    "warn": "percent",              # the built-in ladder works on every model
+    "percent": (40, 55),            # yellow_percent, red_percent
+    "tokens": (400_000, 550_000),   # the example for at_tokens
+    "windows": {"claude-*": 200_000},
+    "handoff_dir": "docs/handoff",
+    "skip_permissions": False,      # only ever on an explicit yes
+    "remote_control": True,
+    # kill_predecessor: recommended exactly when skip_permissions is on
+}
+
+
+class OnboardingQuestion(object):
+    """key: stable id; title: the heading both conversational texts show;
+    ask: the wizard's prompt; body: what the assistant is told to settle;
+    handover_only: asked only once automatic handover was chosen."""
+
+    __slots__ = ("key", "title", "ask", "body", "handover_only")
+
+    def __init__(self, key, title, ask, body, handover_only=False):
+        self.key, self.title, self.ask = key, title, ask
+        self.body, self.handover_only = body, handover_only
+
+
+ONBOARDING_QUESTIONS = (
+    OnboardingQuestion(
+        "warn", "WHEN TO WARN",
+        "When should Last Call warn that the context is filling?",
+        """\
+Offer both. Percentages of the window ("at" on each zone; the built-in
+yellow_percent 40 and red_percent 55) are recommended: they work on every
+model. Absolute token counts ("at_tokens" on each zone, e.g. 400000 and
+550000) need no window at all. Keep the zone names "yellow" and "red", and
+"block": true on red.
+- Percentages under Claude Code: ask which Claude models the project runs and
+  store their windows in "windows", e.g. {"claude-opus-5-5": 1000000,
+  "claude-sonnet-*": 200000}. Accept ANY number, never argue with it: a
+  session that proves a bigger window corrects it by itself. Unsure?
+  {"claude-*": 200000}. Prefer this map to one "context_window_tokens",
+  which overrides even the status line's exact figure. Codex reports its own
+  window: never ask for it.
+- Token counts: if they sometimes run a smaller-window model, set
+  "min_window_tokens" so the guard stays silent there."""),
+    OnboardingQuestion(
+        "wrapup", "WHAT WRAP-UP MEANS HERE",
+        "What does wrap-up mean in this project?",
+        """\
+The important one. Which documents get updated, what must be committed,
+whether pushing is allowed, what the next session must be told. Write it
+into a template file (e.g. .lastcall/wrapup.md) and point "template" at it;
+do not leave the generic text. With automatic handover, build it on the
+shipped relay template ({relay_template}) so it
+still ends by running the relay: the "{relay}" placeholder."""),
+    OnboardingQuestion(
+        "gates", "GATES",
+        "What must PASS before this project hands over?",
+        """\
+"gates": the commands that must PASS before handing over. SHELL COMMANDS,
+not descriptions: "pytest -q", not "run the tests". Turn an intention into
+the real command, show it, and confirm. Nothing runs them automatically;
+the wrap-up shows them to the agent."""),
+    OnboardingQuestion(
+        "verifier", "A SECOND OPINION",
+        "Have a SECOND model check the work before handing over?",
+        """\
+If another agent CLI is on PATH (codex, gemini, claude), offer it as
+"verifier": a different model reading the diff against the plan documents,
+reporting what was specified but not implemented and what was claimed
+without evidence. Recommend one that is not the agent running now."""),
+    OnboardingQuestion(
+        "handover", "AUTOMATIC HANDOVER",
+        "Hand over to a fresh session automatically when context runs low?",
+        """\
+Whether a successor session starts when context runs out. Recommend yes if
+the claude or codex CLI is on PATH; git is optional and only proves the
+handoff is committed. If yes, settle under "relay": "repo" (only if not
+this directory), "handoff_dir" (default docs/handoff), and "agent": "claude"
+or "codex". Leave "agent" unset to hand over to whichever agent is running;
+set it to hand over ACROSS agents. Ask what command proves the environment
+is up: it becomes Step 0 of the handoff TEMPLATE.md."""),
+    OnboardingQuestion(
+        "models", "MODELS",
+        "Which model should drive the successor?",
+        """\
+"model" and "fallback_model" for a Claude successor, e.g. "opus" with
+"fable,sonnet" (Claude Code switches by itself when one is overloaded);
+"codex_model" for a Codex successor. Unset means the CLI's default.""",
+        handover_only=True),
+    OnboardingQuestion(
+        "unattended", "UNATTENDED",
+        "Should the successor run UNATTENDED (skip permission prompts)?",
+        """\
+"skip_permissions". Recommend no. Be explicit that the successor then runs
+tools without asking, and never enable it without a clear yes.""",
+        handover_only=True),
+    OnboardingQuestion(
+        "remote_control", "REMOTE CONTROL",
+        "Start a Claude successor with Remote Control?",
+        """\
+"remote_control": on by default, so you can reach a Claude successor from
+anywhere. Recommend yes.""",
+        handover_only=True),
+    OnboardingQuestion(
+        "retire", "RETIRE THE PREDECESSOR",
+        "Retire the OLD session once the successor has checked in?",
+        """\
+"kill_predecessor" (same as "retire_predecessor"): retire the old session
+once the successor has checked in; a desktop-app session is never killed.
+Off by default. Recommend it whenever the handover is unattended, because
+otherwise every handover leaves another session running forever.""",
+        handover_only=True),
+)
+
+ONBOARDING_LOOK_FIRST = """\
+Look first, so you ask about what is actually here: read AGENTS.md, CLAUDE.md,
+README and any docs index; look for a test command in package.json, Makefile,
+pyproject.toml or CI config; check `git rev-parse --show-toplevel`, what is on
+PATH (claude, codex, gemini, git), and what `{doctor}` reports. Never ask what
+you can check: propose what you found and ask only for confirmation.
+
+Ask a few questions at a time, in this order. Recommend an answer for each and
+say why in one line; if the user says "you decide", take the recommendation
+and say what you chose. Ask questions {handover_questions} only if they want
+automatic handover."""
+
+ONBOARDING_WRITE = """\
+Then write .lastcall.json at the root of THIS project only, or update its
+existing config file in place. Never a parent directory, never your home
+directory: each project carries its own configuration. Include only what the
+user chose. Write the wrap-up template and point "template" at it. If handover
+was chosen, create the handoff directory and its TEMPLATE.md, whose Step 0
+states the EXPECTED result of each command, so it can actually fail.
+
+If the user does not want Last Call here, write {"disabled": true} to
+.lastcall.json and stop.
+
+Finally run `{doctor}` and show the user the real output. If it prints any
+PROBLEM line, or "automatic handover: NOT SET UP" when they asked for
+handover, fix it before saying you are done."""
+
+
+def onboarding_questions_text():
+    """The numbered questions, as both conversational texts show them."""
+    out = []
+    for number, question in enumerate(ONBOARDING_QUESTIONS, 1):
+        body = "\n".join(("   " + line) if line else ""
+                         for line in question.body.split("\n"))
+        out.append("%d. %s\n%s" % (number, question.title, body))
+    return "\n\n".join(out)
+
+
+def onboarding_block(doctor, relay_template):
+    """Everything the SessionStart prompt and /lastcall:onboard share: how to
+    look, the questions, and how to write and prove the result. ``doctor``
+    runs doctor, and ``relay_template`` names the shipped relay template, as
+    seen from where the text will be read."""
+    numbers = [str(n) for n, q in enumerate(ONBOARDING_QUESTIONS, 1)
+               if q.handover_only]
+    text = "\n\n".join((ONBOARDING_LOOK_FIRST, onboarding_questions_text(),
+                        ONBOARDING_WRITE))
+    return (text.replace("{doctor}", doctor)
+            .replace("{relay_template}", relay_template)
+            .replace("{handover_questions}", "%s-%s" % (numbers[0], numbers[-1])))
+
+
+# The prompt knows the plugin's real path; a command file shipped in the
+# plugin does not, so it names the CLI and paths inside the plugin instead.
+PROMPT_DOCTOR = "python3 {setup} doctor"
+COMMAND_DOCTOR = "lastcall doctor"
+COMMAND_RELAY_TEMPLATE = "templates/handoff-relay.md in the plugin"
 
 ONBOARDING = """\
 LAST CALL IS INSTALLED HERE BUT NOT CONFIGURED for this project. It already
@@ -109,72 +301,33 @@ briefly, and configure it only if they want to — WITH the user,
 in this conversation. Do not interrupt the task they asked for, do not send
 them to a terminal wizard, and do not write anything until they have answered.
 
-Look first, so you ask about what is actually here rather than what might be:
-read AGENTS.md / CLAUDE.md / README, look for a test command in package.json,
-Makefile, pyproject.toml or CI config, check `git rev-parse --show-toplevel`,
-and check what is on PATH (claude, codex, gemini, git). Then propose answers
-and ask the user to confirm or correct them. Ask a few at a time.
+""" + onboarding_block(PROMPT_DOCTOR, RELAY_TEMPLATE)
 
-What you need to settle:
+ONBOARD_COMMAND = os.path.join(PLUGIN_ROOT, "commands", "onboard.md")
+GENERATED_BEGIN = ("<!-- BEGIN GENERATED from ONBOARDING_* in "
+                   "lib/lastcall_core/render.py. Edit it there, then run:\n"
+                   "     python3 plugins/lastcall/lib/lastcall_core/render.py "
+                   "--write-onboard -->")
+GENERATED_END = "<!-- END GENERATED -->"
 
-1. WHEN TO WARN. Offer BOTH ways and let them pick:
-   - absolute token counts, e.g. wrap up at 400k and stop at 550k. Use
-     "at_tokens" on each zone. This needs NO context window setting at all,
-     and is the simplest answer for anyone who thinks in tokens.
-   - percentages of the window, e.g. 40% and 55%, using "at" (the default).
 
-2. THE CONTEXT WINDOW ("context_window_tokens"), but ONLY if they chose
-   percentages AND this is Claude Code (Codex reports its window itself).
-   Accept ANY number — 200000, 500000, 1000000, whatever they say. Never
-   argue with it: if the session later holds more tokens than that, Last Call
-   corrects it by itself. If they chose token thresholds, do not ask this.
+def onboard_command_block():
+    """What onboard.md must carry between its GENERATED markers."""
+    return onboarding_block(COMMAND_DOCTOR, COMMAND_RELAY_TEMPLATE)
 
-3. WHICH MODELS THIS PROJECT RUNS ON. If the thresholds are absolute and they
-   sometimes use a smaller-window model, set "min_window_tokens" so the guard
-   stays silent there — 400k means nothing on a 200k model.
 
-4. WHAT WRAP-UP MEANS HERE. The important one. Which documents get updated,
-   what must be committed, whether pushing is allowed, what the next session
-   must be told. Write it into a template file; do not leave the generic text.
-
-5. GATES ("gates"): the commands that must PASS before handing over. These are SHELL
-   COMMANDS, not descriptions — "pytest -q", not "run the tests". If the user
-   describes an intention, turn it into the actual command, show them, and
-   confirm.
-
-6. A SECOND OPINION, if another agent CLI (codex, claude, gemini) is on PATH:
-   a different model reading the diff against the plan documents and reporting
-   what was specified but not implemented, and what was claimed without
-   evidence. Store it as "verifier".
-
-7. AUTOMATIC HANDOVER: whether a fresh session should be spawned when context
-   runs out. The relay needs the claude or codex CLI; git is optional and
-   only proves the handoff is committed. If yes, settle all of these under
-   "relay":
-   - "repo": which directory to hand over, if not this one
-   - "handoff_dir": where handoffs live, default docs/handoff
-   - "agent": "claude" or "codex" for the successor. Leave it unset to hand
-     over to whichever agent is running; set it to hand over ACROSS agents.
-   - "model" and "fallback_model": which model drives a Claude successor,
-     e.g. "opus" with "fable,sonnet" as fallback; "codex_model" for Codex.
-   - "skip_permissions": UNATTENDED. Be explicit that this means the successor
-     runs tools without asking, and never enable it without a clear yes.
-   - "remote_control": on by default, so you can reach the successor later.
-   - "kill_predecessor": retire the OLD session once the successor has checked
-     in (a desktop-app session is never killed). Off by default. Recommend it whenever the handover is unattended,
-     because otherwise every handover leaves another session running forever.
-
-Then write .lastcall.json at the root of THIS project only — never a parent
-directory, never your home directory. Write the wrap-up template and point
-"template" at it. If handover was chosen, create the handoff directory and a
-TEMPLATE.md whose Step 0 states the EXPECTED result of each command, so it can
-actually fail.
-
-Finally run:  python3 {setup} doctor
-and show the user the real output. If it prints any PROBLEM line, fix it.
-
-If the user does not want Last Call here, write {{"disabled": true}} to
-.lastcall.json so it stays quiet in this project."""
+def write_onboard_command(path=ONBOARD_COMMAND):
+    """Rewrite the generated part of onboard.md in place. True if it changed."""
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    start = text.index(GENERATED_BEGIN) + len(GENERATED_BEGIN)
+    end = text.index(GENERATED_END)
+    updated = text[:start] + "\n\n" + onboard_command_block() + "\n\n" + text[end:]
+    if updated == text:
+        return False
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(updated)
+    return True
 
 
 COMPACTION_NOTE = """\
@@ -327,7 +480,8 @@ def block_reason(zone):
 
 
 def onboarding_message():
-    return ONBOARDING.format(setup=SCRIPT_PATH)
+    # replace, not format: the text is full of JSON braces.
+    return ONBOARDING.replace("{setup}", SCRIPT_PATH)
 
 
 def compaction_message(config, previous_zone=None):
@@ -339,3 +493,11 @@ def compaction_message(config, previous_zone=None):
     if previous_zone and previous_zone != "green":
         text += "\n\n" + COMPACTION_AFTER_WARNING.format(zone=previous_zone.upper())
     return text
+
+
+if __name__ == "__main__":
+    import sys
+    if sys.argv[1:] != ["--write-onboard"]:
+        sys.exit("usage: render.py --write-onboard")
+    print("%s %s" % ("rewrote" if write_onboard_command() else "unchanged",
+                     ONBOARD_COMMAND))

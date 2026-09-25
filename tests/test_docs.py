@@ -9,7 +9,6 @@ ladder moved to 40/55, and the test count went stale twice.
 import json
 import os
 import re
-import subprocess
 import sys
 import unittest
 
@@ -73,8 +72,6 @@ class TestReadmeMatchesTheCode(unittest.TestCase):
         config = dict(cg.DEFAULTS, _project_dir=ROOT, _config_path=None)
         zone = cg.resolve_zones(config)[0]
         for name in advertised:
-            rendered = cg.render(dict(config), zone, 450_000, 1_000_000,
-                                 transcript="/tmp/x.jsonl")
             probe = dict(config, template=None,
                          zones=[dict(zone, message="<<{%s}>>" % name)])
             out = cg.render(probe, cg.resolve_zones(probe)[0], 450_000,

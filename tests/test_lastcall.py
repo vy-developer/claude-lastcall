@@ -548,7 +548,12 @@ class TestStateAndRearm(TempCase):
     def test_reset_rearms(self):
         config = self.config()
         self.assertIsNotNone(self.run_stop(config, 145_000))
-        cg.handle_reset(config, {"session_id": "s1"})
+        import contextlib
+        import io
+        # Unconfigured, SessionStart prints the onboarding prompt; keep it
+        # out of the test run's output.
+        with contextlib.redirect_stdout(io.StringIO()):
+            cg.handle_reset(config, {"session_id": "s1"})
         self.assertIsNotNone(self.run_stop(config, 145_000))
 
     def test_sessions_do_not_share_state(self):

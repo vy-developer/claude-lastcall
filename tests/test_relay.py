@@ -122,7 +122,6 @@ class TestPreconditions(RelayCase):
 
     def test_refuses_when_tmux_is_missing(self):
         os.remove(os.path.join(self.bin, "tmux"))
-        env = dict(os.environ)
         result = self.relay(self.repo(), "--dry-run",
                             env_extra={"TMUX_BIN": "definitely-not-tmux"})
         self.assertEqual(result.returncode, 1)

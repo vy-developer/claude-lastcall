@@ -1152,7 +1152,6 @@ def handover_status(config):
                 or "handoff.sh" in text)
 
     wired = any(invokes_relay(b) for b in bodies)
-    body = bodies[0] if bodies else None
     checks = {
         "template configured": bool(bodies),
         "template invokes the relay": wired,

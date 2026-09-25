@@ -20,7 +20,6 @@ sends, which is the way to check the field names below against reality.
 
 import json
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

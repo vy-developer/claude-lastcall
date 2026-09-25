@@ -781,7 +781,8 @@ class TestLibraryHygiene(unittest.TestCase):
         data = usage.to_dict()
         self.assertEqual(set(data), {"tokens", "window", "window_source", "model", "compacted",
                                      "session_id", "agent", "turn_id", "measured_at", "stale",
-                                     "record_id", "fresh", "compaction_id"})
+                                     "record_id", "fresh", "compaction_id",
+                                     "compaction_pre_tokens"})
         json.dumps(data)
 
     def test_library_parses_as_python_3_9_and_uses_only_the_standard_library(self):

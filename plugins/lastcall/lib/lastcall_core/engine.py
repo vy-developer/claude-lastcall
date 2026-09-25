@@ -39,7 +39,7 @@ from .render import (block_reason, compaction_message, onboarding_message,
                      render)
 from .state import (SessionState, mark_onboarded, prune_state, session_lock,
                     was_onboarded, write_debug)
-from .windows import learn, load_learned
+from .windows import LEARNED_WINDOW_NOTE, check_compaction, learn, load_learned
 from .zones import effective_window as _effective_window
 from .zones import resolve_window, resolve_zones, zone_for, zone_threshold
 
@@ -229,6 +229,12 @@ def _judge(agent, config, payload, event, env, out, state, usage, signature,
         key = usage.compaction_id or "%s|%s" % (usage.record_id, usage.measured_at)
         if state.get("compaction_key") != key:
             state["compaction_key"] = key
+            try:
+                # An auto-compaction far below a learned window proves the
+                # model also runs smaller: stop trusting what was learned.
+                check_compaction(config, agent.name, state, usage)
+            except Exception:  # noqa: BLE001 - learning is a bonus, never a failure
+                pass
             _rearm(state)
             peak = 0
     if usage.stale:
@@ -303,8 +309,13 @@ def _judge(agent, config, payload, event, env, out, state, usage, signature,
         state.save()
         return 0
 
+    # A learned window is assumed for a different reason than the fallback
+    # one, and says so itself.
+    learned = assumed and source == "learned"
     message = render(config, zone, tokens, window, transcript=transcript,
-                     assumed=assumed, agent=agent.name)
+                     assumed=assumed and not learned, agent=agent.name)
+    if learned:
+        message += "\n\n" + LEARNED_WINDOW_NOTE.format(window=window)
     if stop and need_block:
         output = agent.format_output("Stop", message, block_reason(zone))
     elif stop and "Stop" not in agent.context_events:

@@ -216,6 +216,17 @@ def compaction_identity(boundary):
     return None
 
 
+def compaction_pre_tokens(boundary):
+    """preTokens of an AUTOMATIC compaction, else None (see Usage)."""
+    if not isinstance(boundary, dict):
+        return None
+    meta = boundary.get("compactMetadata")
+    if not isinstance(meta, dict) or meta.get("trigger") != "auto":
+        return None
+    pre = as_int(meta.get("preTokens"))
+    return pre if pre and pre > 0 else None
+
+
 def _is_fresh(found, last_assistant_message, previous_record_id):
     """True / False when there is a way to tell, None when there is not."""
     if last_assistant_message is None and previous_record_id is None:
@@ -347,6 +358,7 @@ class ClaudeAgent(Agent):
             record_id=_message_id(entry) if entry else None,
             fresh=fresh,
             compaction_id=compaction_identity(found.get("compaction")),
+            compaction_pre_tokens=compaction_pre_tokens(found.get("compaction")),
         )
 
     def format_output(self, event, message=None, block_reason=None,

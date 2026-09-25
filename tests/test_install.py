@@ -794,6 +794,31 @@ class TestSubcommands(Sandbox):
         self.assertIn("CONTEXT", out)
         self.assertIn("51k", out, "the usage provider was not registered")
 
+    def test_status_notes_a_model_whose_learned_window_is_conflicted(self):
+        sid = "11111111-2222-3333-4444-666666666666"
+        dump(os.path.join(self.claude_home, "sessions", "%d.json" % os.getpid()),
+             {"pid": os.getpid(), "sessionId": sid, "cwd": self.tmp, "status": "idle",
+              "entrypoint": "cli"})
+        transcript = os.path.join(self.claude_home, "projects", "-synthetic", sid + ".jsonl")
+        os.makedirs(os.path.dirname(transcript))
+        with open(transcript, "w") as fh:
+            fh.write(json.dumps({
+                "type": "assistant", "isSidechain": False, "sessionId": sid,
+                "timestamp": "2026-09-25T10:00:00.000Z",
+                "message": {"id": "msg_1", "model": "claude-synthetic",
+                            "usage": {"input_tokens": 1000, "cache_read_input_tokens": 50000,
+                                      "cache_creation_input_tokens": 0, "output_tokens": 10}},
+            }) + "\n")
+        dump(os.path.join(self.lastcall_home, "state", "windows.json"), {"version": 1, "models": {
+            "claude:claude-synthetic": {"agent": "claude", "model": "claude-synthetic",
+                                        "window": 1000000, "source": "evidence", "at": 1,
+                                        "conflict": {"pre_tokens": 160000, "window": 1000000,
+                                                     "at": 2}}}})
+        code, out = self.run_cli("status", "--agent", "claude")
+        self.assertEqual(code, 0, out)
+        self.assertIn("claude-synthetic ran with more than one context window", out)
+        self.assertIn('Pin it in "windows"', out)
+
     def test_register_usage_providers_covers_both_agents(self):
         from lastcall_core import sessions
         with mock.patch.dict(sessions.USAGE_PROVIDERS, {}, clear=True):

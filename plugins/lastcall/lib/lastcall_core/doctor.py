@@ -13,7 +13,8 @@ from .config import load_config, state_dir
 from .engine import effective_window, read_usage
 from .render import RELAY_SCRIPT, read_template
 from .state import read_state
-from .windows import learned_path, learned_window, load_learned, match_window
+from .windows import (learned_conflict, learned_path, learned_window, load_learned,
+                      match_window)
 from .zones import describe_threshold, resolve_zones, zone_for
 
 
@@ -92,6 +93,13 @@ def windows_report(config):
             lines.append("    learned  %-34s %s  from %s, %s%s" % (
                 key, _fmt(entry["window"]), entry.get("source") or "?",
                 _when(entry.get("at")), note))
+            conflict = entry.get("conflict")
+            if isinstance(conflict, dict):
+                lines.append("             CONFLICT: a session on this model auto-compacted at "
+                             "%s tokens (%s), so it also runs with a smaller window." % (
+                                 _fmt(conflict.get("pre_tokens") or 0), _when(conflict.get("at"))))
+                lines.append("             The learned window is IGNORED (assumed fallback "
+                             "instead): pin the model in \"windows\".")
     else:
         lines.append("    learned  (none yet: %s)" % learned_path(config))
     return lines
@@ -202,7 +210,14 @@ def doctor(argv, version="?", env=None):
         print("          number by Claude Code (see README).")
         return 1
     percent = (tokens * 100.0) / window
-    if assumed:
+    conflict = learned_conflict(load_learned(config), agent.name, usage.model) \
+        if agent.name == "claude" else None
+    if assumed and source == "learned":
+        print("  window        : %s tokens (LEARNED from another session on this "
+              "model, not proven by this one; zones warn but never block)" % _fmt(window))
+        print("                  The same model id runs with 200K or 1M: pin it in "
+              "\"windows\" to make it exact.")
+    elif assumed:
         print("  window        : %s tokens (ASSUMED — nothing reported the "
               "window; zones warn but never block)" % _fmt(window))
         print("                  Set context_window_tokens or install the "
@@ -210,6 +225,12 @@ def doctor(argv, version="?", env=None):
     else:
         print("  window        : %s tokens (%s)" % (_fmt(window), source))
     print("  window source : %s" % source)
+    if conflict and source not in ("map", "config", "statusline"):
+        print("  NOTE          : %s has been seen with more than one window (a session "
+              "auto-compacted at %s), so what was learned about it is ignored."
+              % (usage.model, _fmt(conflict.get("pre_tokens") or 0)))
+        print("                  Pin it in \"windows\", e.g. {\"%s\": 200000}."
+              % usage.model)
     if source == "map":
         _w, key = match_window(config.get("windows"), agent.name, usage.model)
         print("                  matched windows[\"%s\"]" % key)

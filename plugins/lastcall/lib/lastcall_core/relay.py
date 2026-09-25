@@ -95,6 +95,11 @@ LEDGER_DIR_ENV = "LASTCALL_RELAY_DIR"
 AGENTS = ("claude", "codex")
 SEP = " · "
 
+# Every wait the relay does (the spawn, the check-in, remote control, naming
+# the thread) comes out of one budget. Claude Code's Bash tool gives a command
+# 2 minutes by default; the default budget fits inside that with room to spare.
+DEFAULT_MAX_WAIT = 105.0
+
 # Session-identity variables a predecessor leaks into anything it spawns. A
 # successor that inherits CLAUDE_CODE_SESSION_ID or the desktop host's
 # messaging socket believes it is part of the predecessor; one that inherits
@@ -1471,8 +1476,10 @@ class Relay:
                              config.get("kill_predecessor", False)))
         o.kill_delay = float(pick(o.kill_delay, "kill_delay", 5.0))
         o.require_git = bool(o.require_git or config.get("require_git"))
-        for label, value in (("--timeout", o.timeout), ("--kill-delay", o.kill_delay)):
-            if not 0 <= value <= 86400 or (label == "--timeout" and value <= 0):
+        o.max_wait = float(pick(o.max_wait, "max_wait_seconds", DEFAULT_MAX_WAIT))
+        for label, value in (("--timeout", o.timeout), ("--kill-delay", o.kill_delay),
+                             ("--max-wait", o.max_wait)):
+            if not 0 <= value <= 86400 or (label in ("--timeout", "--max-wait") and value <= 0):
                 raise ValueError("%s must be between 0 and 86400 seconds, got %g"
                                  % (label, value))
         o.codex_sandbox = pick(o.codex_sandbox, "codex_sandbox", "workspace-write")
@@ -1628,10 +1635,31 @@ class Relay:
 
     # -- spawn & prove --------------------------------------------------------
 
+    def worst_case(self):
+        """The longest this run can take, in seconds: every wait it may do,
+        capped by the --max-wait budget."""
+        o = self.o
+        if o.agent == "claude":
+            total = o.spawn_timeout + o.timeout + (o.rc_timeout if o.remote_control else 0)
+        else:
+            total = o.timeout * (2 if o.codex_mode == "app" else 1) + 20
+        return min(total, o.max_wait)
+
+    def left(self, cap):
+        """What remains of the budget, at most ``cap`` seconds."""
+        deadline = getattr(self, "deadline", None)
+        if deadline is None:
+            return cap
+        return max(0.0, min(cap, deadline - time.time()))
+
     def run(self):
         code = self.build()
         if code is not None:
             return code
+        self.say("this can take up to %ds — run it with a tool timeout above that (Claude "
+                 "Code's Bash tool defaults to 120s) or in the background; --max-wait "
+                 "(relay.max_wait_seconds) sets the budget" % int(self.worst_case() + 0.999))
+        self.deadline = time.time() + self.o.max_wait
         self.describe()
         if self.o.dry_run:
             self.say("dry run — nothing spawned")
@@ -1658,7 +1686,7 @@ class Relay:
         """First ledger check-in of THIS spawn (its nonce) satisfying `match`,
         else what `extra` finds."""
         p = self.plan
-        deadline = time.time() + self.o.timeout
+        deadline = time.time() + self.left(self.o.timeout)
         while True:
             for record in read_ledger(p["ledger"]):
                 if record.get("event") == "checkin" and record.get("chain") == p["chain"] \
@@ -1680,12 +1708,13 @@ class Relay:
         # `claude --bg` has even returned. --bg picks the session id itself, so
         # the check-in is matched by chain + generation, and the id comes from it.
         self._spawn_record()
+        spawn_timeout = max(1.0, self.left(o.spawn_timeout))
         try:
             spawned = subprocess.run(p["argv"], cwd=p["repo"], env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     universal_newlines=True, timeout=o.spawn_timeout)
+                                     universal_newlines=True, timeout=spawn_timeout)
         except subprocess.TimeoutExpired:
-            return self.fail(EXIT_UNPROVEN, "`claude --bg` did not return in %ds" % o.spawn_timeout)
+            return self.fail(EXIT_UNPROVEN, "`claude --bg` did not return in %ds" % spawn_timeout)
         output = spawned.stdout.strip()
         if spawned.returncode != 0:
             append_record(p["ledger"], {"event": "spawn-failed", "chain": p["chain"],
@@ -1744,7 +1773,8 @@ class Relay:
             if short:
                 self.say("attach:  %s attach %s" % (o.claude_bin, short))
                 self.say("logs:    %s logs %s" % (o.claude_bin, short))
-            return self.fail(EXIT_UNPROVEN, "successor never checked in within %ds" % o.timeout)
+            return self.fail(EXIT_UNPROVEN, "successor never checked in within %ds"
+                             % min(o.timeout, o.max_wait))
         sid = record.get("session_id")
         if record.get("via") == "transcript":
             self.say("WARNING: no hook check-in — proved by the transcript existing instead")
@@ -1757,7 +1787,8 @@ class Relay:
         rc_ok = True
         if o.remote_control:
             evidence = None
-            deadline = time.time() + o.rc_timeout
+            rc_wait = self.left(o.rc_timeout)
+            deadline = time.time() + rc_wait
             while True:
                 evidence = remote_control_evidence(sid, transcript, self.env, short=short)
                 if evidence or time.time() >= deadline:
@@ -1768,7 +1799,7 @@ class Relay:
             else:
                 rc_ok = False
                 self.say("remote control did NOT connect — no bridgeSessionId for %s after %ds"
-                         % (sid, o.rc_timeout))
+                         % (sid, rc_wait))
         append_record(p["ledger"], {"event": "verified", "chain": p["chain"],
                                     "generation": generation, "session_id": sid,
                                     "bg_id": short,
@@ -1967,7 +1998,12 @@ class Relay:
                      "keeps `codex app-server` up until the turn completes (max %gs)"
                      % (record.get("source"), record.get("runner_pid"), o.codex_app_max))
         elif thread and o.name_thread:
-            ok, detail = codex_set_thread_name(o.codex_bin, thread, p["name"], env)
+            budget = self.left(20.0)
+            if budget >= 1:
+                ok, detail = codex_set_thread_name(o.codex_bin, thread, p["name"], env,
+                                                   timeout=budget)
+            else:
+                ok, detail = False, "the --max-wait budget is spent"
             self.say("thread name: %s — %s" % ("set" if ok else "NOT set", detail))
         append_record(p["ledger"], {"event": "verified", "chain": p["chain"],
                                     "generation": p["generation"], "session_id": thread,
@@ -2068,11 +2104,15 @@ def parser(prog="relay.py"):
     p.add_argument("--dirty-baseline", help="comma-separated paths that may be dirty")
     p.add_argument("--chain", help="relay chain id (default: inherited, else new)")
     p.add_argument("--ledger-dir", help="default ~/.lastcall/relay")
-    p.add_argument("--timeout", type=float, default=180.0, help="check-in timeout (s)")
-    p.add_argument("--rc-timeout", type=float, default=45.0, help="remote-control wait (s)")
+    p.add_argument("--timeout", type=float, default=60.0, help="check-in timeout (s)")
+    p.add_argument("--rc-timeout", type=float, default=20.0, help="remote-control wait (s)")
     p.add_argument("--hook-grace", type=float, default=20.0,
                    help="claude: how long a transcript may exist without a hook check-in")
-    p.add_argument("--spawn-timeout", type=float, default=60.0)
+    p.add_argument("--spawn-timeout", type=float, default=25.0)
+    p.add_argument("--max-wait", type=float,
+                   help="total seconds for every wait together — spawn, check-in, remote "
+                        "control (default %g, config relay.max_wait_seconds): under Claude "
+                        "Code's 2-minute Bash tool timeout" % DEFAULT_MAX_WAIT)
     p.add_argument("--poll", type=float, default=1.0, help=argparse.SUPPRESS)
     p.add_argument("--dry-run", action="store_true", help="print the plan, spawn nothing")
     p.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"))

@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1334,6 +1335,41 @@ class TestCommittedMeansCommitted(RelayV2Case):
         result = self.relay(repo, "--dry-run", "--allow-dirty")
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("handoff is not committed", result.stdout)
+
+
+
+class TestTheRelayFitsInABashCall(RelayV2Case):
+    """Review finding: the relay's waits (spawn 60s + check-in 180s + remote
+    control 45s) could run ~285s, past Claude Code's 2-minute default Bash
+    tool timeout, which kills it mid-handover."""
+
+    def plain(self, repo, *args, extra=None):
+        return subprocess.run([sys.executable, RELAY, "--repo", repo] + list(args),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              env=self.env(extra), cwd=self.tmp, universal_newlines=True)
+
+    def test_by_default_every_wait_together_fits_under_two_minutes(self):
+        for agent in ("claude", "codex"):
+            result = self.plain(self.repo(name=agent), "--dry-run", "--agent", agent)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            first = result.stdout.splitlines()[0]
+            self.assertIn("run it with a tool timeout above that", first)
+            self.assertIn("or in the background", first)
+            seconds = int(re.search(r"take up to (\d+)s", first).group(1))
+            self.assertLessEqual(seconds, 110, first)
+
+    def test_the_budget_caps_every_wait_and_is_configurable(self):
+        repo = self.repo()
+        started = time.time()
+        result = self.plain(repo, "--timeout", "30", "--max-wait", "1", "--poll", "0.05",
+                            extra={"FAKE_NO_HOOK": "1", "FAKE_NO_TRANSCRIPT": "1"})
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertLess(time.time() - started, 15)
+        self.assertIn("take up to 1s", result.stdout)
+        with open(os.path.join(repo, ".lastcall.json"), "w") as fh:
+            json.dump({"relay": {"max_wait_seconds": 50}}, fh)
+        result = self.plain(repo, "--dry-run", "--allow-dirty")
+        self.assertIn("take up to 50s", result.stdout)
 
 
 if __name__ == "__main__":

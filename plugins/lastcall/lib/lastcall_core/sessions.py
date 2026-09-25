@@ -611,7 +611,7 @@ def codex_open_rollouts(timeout: float = 5.0) -> Optional[Dict[str, int]]:
     None when lsof is unavailable or fails, so callers can fall back."""
     try:
         proc = subprocess.run(["lsof", "-w", "-c", "codex", "-Fpn"], capture_output=True,
-                              text=True, timeout=timeout)
+                              timeout=timeout, encoding="utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode not in (0, 1):
@@ -632,7 +632,7 @@ def codex_open_rollouts(timeout: float = 5.0) -> Optional[Dict[str, int]]:
 def codex_running() -> bool:
     try:
         proc = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True,
-                              timeout=5)
+                              timeout=5, encoding="utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError):
         return False
     return any(os.path.basename(l.strip()).startswith("codex")

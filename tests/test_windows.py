@@ -85,7 +85,7 @@ class Case(unittest.TestCase):
         path = os.path.join(self.state_dir, "windows.json")
         if not os.path.exists(path):
             return {}
-        with open(path) as handle:
+        with open(path, encoding="utf-8") as handle:
             return json.load(handle)["models"]
 
 
@@ -166,11 +166,11 @@ class TestMapValidation(Case):
     def test_global_and_project_maps_merge(self):
         home = self.env["LASTCALL_HOME"]
         os.makedirs(home)
-        with open(os.path.join(home, "config.json"), "w") as handle:
+        with open(os.path.join(home, "config.json"), "w", encoding="utf-8") as handle:
             json.dump({"windows": {"claude-opus": ONE_M, "claude-sonnet": 200_000}}, handle)
         project = os.path.join(self.dir, "project")
         os.makedirs(os.path.join(project, ".git"))
-        with open(os.path.join(project, ".lastcall.json"), "w") as handle:
+        with open(os.path.join(project, ".lastcall.json"), "w", encoding="utf-8") as handle:
             json.dump({"windows": {"claude-sonnet": ONE_M}}, handle)
         config = load_config({"cwd": project}, self.env)
         self.assertEqual(config["windows"], {"claude-opus": ONE_M, "claude-sonnet": ONE_M})
@@ -393,7 +393,7 @@ class TestLearning(Case):
     def test_a_corrupt_file_is_ignored_and_then_repaired(self):
         config = self.config()
         os.makedirs(self.state_dir)
-        with open(os.path.join(self.state_dir, "windows.json"), "w") as handle:
+        with open(os.path.join(self.state_dir, "windows.json"), "w", encoding="utf-8") as handle:
             handle.write("{ not json")
         self.assertEqual(W.load_learned(config), {})
         self.assertTrue(W.record_learned(config, "claude", "m", ONE_M, "evidence"))
@@ -454,7 +454,7 @@ class TestDoctorAndStatus(Case):
         os.makedirs(os.path.join(self.project, ".git"))
 
     def write_config(self, data):
-        with open(os.path.join(self.project, ".lastcall.json"), "w") as handle:
+        with open(os.path.join(self.project, ".lastcall.json"), "w", encoding="utf-8") as handle:
             json.dump(data, handle)
 
     def test_windows_section_lists_the_map_and_what_was_learned(self):
@@ -649,7 +649,7 @@ class TestLearnedWindowsEndToEnd(HookCase):
     def test_codex_rollout_windows_are_recorded(self):
         self.codex_tokens(50_000)
         self.run_hook("PostToolUse", self.codex_payload("PostToolUse"))
-        with open(os.path.join(self.lastcall_home, "state", "windows.json")) as handle:
+        with open(os.path.join(self.lastcall_home, "state", "windows.json"), encoding="utf-8") as handle:
             entry = json.load(handle)["models"]["codex:gpt-test"]
         self.assertEqual((entry["window"], entry["source"]), (258_400, "rollout"))
 
@@ -690,7 +690,7 @@ class TestHookLauncher(unittest.TestCase):
 
     def fake(self, path, name=None, body=None):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as handle:
+        with open(path, "w", encoding="utf-8") as handle:
             handle.write(body if body is not None else FAKE % {"name": name or path})
         os.chmod(path, 0o755)
         return path
@@ -704,7 +704,7 @@ class TestHookLauncher(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         if not os.path.exists(self.out):
             return None
-        with open(self.out) as handle:
+        with open(self.out, encoding="utf-8") as handle:
             text = handle.read()
         os.remove(self.out)
         return text
@@ -780,7 +780,7 @@ class TestHookLauncher(unittest.TestCase):
                          "b")
 
     def test_the_default_list_includes_pyenv_and_conda_under_home(self):
-        with open(LAUNCHER) as handle:
+        with open(LAUNCHER, encoding="utf-8") as handle:
             text = handle.read()
         for location in ("/opt/homebrew/bin/python3", "/usr/local/bin/python3",
                          "$HOME/.pyenv/shims/python3", "$CONDA_PREFIX/bin/python3",

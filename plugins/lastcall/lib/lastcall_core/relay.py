@@ -403,7 +403,7 @@ def successor_session_start(payload, env=None, agent=None):
 
 def _git(repo, *args):
     return subprocess.run(["git", "-C", repo] + list(args), stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, universal_newlines=True)
+                          stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
 
 
 def is_git_repo(repo):
@@ -524,7 +524,7 @@ def resolve_repo(explicit, config, env, cwd, base=None):
     if shutil.which("git"):
         top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             universal_newlines=True)
+                             encoding="utf-8", errors="replace")
         if top.returncode == 0 and top.stdout.strip():
             return top.stdout.strip()
     return cwd
@@ -607,7 +607,7 @@ def claude_agents(claude_bin, env=None, timeout=15.0):
     try:
         out = subprocess.run([claude_bin, "agents", "--json"], stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             universal_newlines=True, timeout=timeout, env=env)
+                             timeout=timeout, env=env, encoding="utf-8", errors="replace")
         data = json.loads(out.stdout or "null")
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return []
@@ -1288,7 +1288,7 @@ def permission_summary(opts, agent, why):
 def _ps(pid, field):
     out = subprocess.run(["ps", "-o", "%s=" % field, "-p", str(pid)],
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                         universal_newlines=True)
+                         encoding="utf-8", errors="replace")
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
@@ -1359,7 +1359,8 @@ def detect_predecessor(env, agent=None, session_id=None, tmux_bin="tmux",
         home = claude_home(env)
         if pred["pid"]:
             try:
-                with open(os.path.join(home, "sessions", "%d.json" % pred["pid"])) as fh:
+                with open(os.path.join(home, "sessions", "%d.json" % pred["pid"]),
+                          encoding="utf-8") as fh:
                     registry = json.load(fh)
                 if registry.get("sessionId") == pred["session_id"] or not pred["session_id"]:
                     pred["session_id"] = registry.get("sessionId")
@@ -1372,7 +1373,8 @@ def detect_predecessor(env, agent=None, session_id=None, tmux_bin="tmux",
         sid = pred["session_id"]
         if sid:
             try:
-                with open(os.path.join(home, "jobs", sid[:8], "state.json")) as fh:
+                with open(os.path.join(home, "jobs", sid[:8], "state.json"),
+                          encoding="utf-8") as fh:
                     if json.load(fh).get("sessionId") == sid:
                         pred["kind"], pred["bg_short"] = "background", sid[:8]
             except (OSError, ValueError, AttributeError):
@@ -1385,7 +1387,7 @@ def detect_predecessor(env, agent=None, session_id=None, tmux_bin="tmux",
         shown = subprocess.run([tmux_bin, "display-message", "-p", "-t", pane,
                                 "#{pane_pid}\t#S"],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               universal_newlines=True).stdout.strip()
+                               encoding="utf-8", errors="replace").stdout.strip()
         pane_pid, _tab, name = shown.partition("\t")
         try:
             pane_pid = int(pane_pid)
@@ -1488,7 +1490,7 @@ def schedule_retirement(plan, delay, python_bin=None, ledger=None, record=None):
     launched = subprocess.run([python_bin or sys.executable, "-c", _LAUNCH_SCRIPT,
                                _RETIRE_SCRIPT, json.dumps(plan), str(delay)] + extra,
                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, universal_newlines=True)
+                              stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace")
     try:
         return int(launched.stdout.strip())
     except ValueError:
@@ -1837,7 +1839,7 @@ class Relay:
         try:
             spawned = subprocess.run(p["argv"], cwd=p["repo"], env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     universal_newlines=True, timeout=spawn_timeout)
+                                     timeout=spawn_timeout, encoding="utf-8", errors="replace")
         except subprocess.TimeoutExpired:
             return self.fail(EXIT_UNPROVEN, "`claude --bg` did not return in %ds" % spawn_timeout)
         output = spawned.stdout.strip()
@@ -2043,7 +2045,7 @@ class Relay:
         self._spawn_record(tmux_session=p["tmux_session"], mode="tmux")
         spawned = subprocess.run(p["argv"], cwd=p["repo"], env=env, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 universal_newlines=True)
+                                 encoding="utf-8", errors="replace")
         if spawned.returncode != 0:
             return self.fail(EXIT_PRECONDITION, "tmux could not start %s: %s"
                              % (p["tmux_session"], spawned.stdout.strip()))
@@ -2079,7 +2081,7 @@ class Relay:
             dead = subprocess.run([o.tmux_bin, "display-message", "-p", "-t",
                                    "=%s:0.0" % p["tmux_session"], "#{pane_dead}"],
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                  universal_newlines=True)
+                                  encoding="utf-8", errors="replace")
             if dead.returncode != 0 or dead.stdout.strip() == "1":
                 return {"died": "pane"}
             return None
@@ -2275,7 +2277,26 @@ def checkin_main(argv, stdin=None):
     return 0
 
 
+def _utf8_stdio():
+    """UTF-8 on the standard streams: a redirected stream on Windows is
+    cp1252, which cannot encode SEP, and the check-in hook reads the agent's
+    UTF-8 JSON. Inline, not lastcall_core.textio: this file also runs as a
+    standalone script."""
+    streams = [sys.stdout, sys.stderr]
+    try:
+        if sys.stdin is not None and not sys.stdin.isatty():
+            streams.append(sys.stdin)
+    except (AttributeError, ValueError, OSError):
+        pass
+    for stream in streams:
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main(argv=None, prog="relay.py"):
+    _utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["checkin"]:
         return checkin_main(argv[1:])

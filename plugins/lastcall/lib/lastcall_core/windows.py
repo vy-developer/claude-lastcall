@@ -238,7 +238,7 @@ class _Lock(object):
         except ImportError:  # Windows: atomic replace alone
             return self
         try:
-            self.handle = open(self.path, "a+")
+            self.handle = open(self.path, "a+", encoding="utf-8")
         except OSError:
             return self
         deadline = time.time() + LOCK_TIMEOUT

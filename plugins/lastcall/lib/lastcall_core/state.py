@@ -178,7 +178,7 @@ class SessionLock(object):
         if fcntl is None and msvcrt is None:
             return self._marker(deadline)
         try:
-            self.handle = open(self.path, "a+")
+            self.handle = open(self.path, "a+", encoding="utf-8")
         except OSError:
             return self
         while True:

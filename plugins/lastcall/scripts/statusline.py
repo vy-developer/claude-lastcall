@@ -67,7 +67,18 @@ def gauge(percent, width=10):
     return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
+def utf8_stdio():
+    """Claude Code pipes UTF-8 JSON in and reads UTF-8 back; a redirected
+    stream on Windows would be cp1252. Self-contained, for a standalone copy."""
+    for stream in (sys.stdin, sys.stdout):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main(argv):
+    utf8_stdio()
     raw = sys.stdin.read() if not sys.stdin.isatty() else "{}"
     try:
         payload = json.loads(raw or "{}")

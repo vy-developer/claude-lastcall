@@ -79,14 +79,14 @@ class HookCase(unittest.TestCase):
         return path
 
     def configure_globally(self, settings):
-        with open(os.path.join(self.lastcall_home, "config.json"), "w") as handle:
+        with open(os.path.join(self.lastcall_home, "config.json"), "w", encoding="utf-8") as handle:
             json.dump(settings, handle)
 
     def state_file(self, agent, session=SID):
         return os.path.join(self.lastcall_home, "state", "%s-%s.json" % (agent, session))
 
     def state(self, agent, session=SID):
-        with open(self.state_file(agent, session)) as handle:
+        with open(self.state_file(agent, session), encoding="utf-8") as handle:
             return json.load(handle)
 
     # -- running the hook --------------------------------------------------
@@ -115,7 +115,7 @@ class HookCase(unittest.TestCase):
                             "%s.jsonl" % session)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if not os.path.exists(path):
-            open(path, "w").close()
+            open(path, "w", encoding="utf-8").close()
         return path
 
     def claude_reply(self, tokens, text=None, model="claude-test-1", session=SID):
@@ -174,7 +174,7 @@ class HookCase(unittest.TestCase):
                             "rollout-2026-09-25T10-00-00-%s.jsonl" % session)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if not os.path.exists(path):
-            with open(path, "w") as handle:
+            with open(path, "w", encoding="utf-8") as handle:
                 for line in (
                         {"type": "session_meta", "payload": {"id": session}},
                         {"type": "turn_context", "payload": {"turn_id": "t1", "model": "gpt-test"}},
@@ -407,7 +407,7 @@ class TestClaudeDelivery(HookCase):
     def test_pre_2_state_is_picked_up_so_an_upgrade_does_not_rewarn(self):
         legacy = os.path.join(self.home, ".claude", "lastcall")
         os.makedirs(legacy)
-        with open(os.path.join(legacy, "%s.json" % SID), "w") as handle:
+        with open(os.path.join(legacy, "%s.json" % SID), "w", encoding="utf-8") as handle:
             json.dump({"band": "yellow", "peak": 88000, "max_observed": 88000}, handle)
         self.claude_reply(90000)
         self.assertIsNone(self.run_hook("PostToolUse", self.claude_payload("PostToolUse")))
@@ -457,14 +457,14 @@ class TestClaudeZeroConfig(HookCase):
         self.assertNotIn("assumed", text)
 
     def test_a_1m_model_in_settings_counts(self):
-        with open(os.path.join(self.claude_dir, "settings.json"), "w") as handle:
+        with open(os.path.join(self.claude_dir, "settings.json"), "w", encoding="utf-8") as handle:
             json.dump({"model": "claude-test-1[1m]"}, handle)
         self.claude_reply(150000)
         self.assertIsNone(self.run_hook("PostToolUse", self.claude_payload("PostToolUse")))
         self.assertIn("configured model", self.state("claude")["window_source"])
 
     def test_a_1m_model_for_a_different_model_does_not(self):
-        with open(os.path.join(self.claude_dir, "settings.json"), "w") as handle:
+        with open(os.path.join(self.claude_dir, "settings.json"), "w", encoding="utf-8") as handle:
             json.dump({"model": "claude-other-9[1m]"}, handle)
         self.claude_reply(90000)
         self.assertIsNotNone(self.run_hook("PostToolUse", self.claude_payload("PostToolUse")))
@@ -498,13 +498,13 @@ class TestOnboarding(HookCase):
         file alone suppressed the onboarding offer for good."""
         sys.path.insert(0, os.path.join(PLUGIN, "lib"))
         from lastcall_core.cli import global_config_text
-        with open(os.path.join(self.lastcall_home, "config.json"), "w") as handle:
+        with open(os.path.join(self.lastcall_home, "config.json"), "w", encoding="utf-8") as handle:
             handle.write(global_config_text())
         output = self.run_hook("SessionStart", self.claude_payload("SessionStart"))
         self.assertIn("NOT CONFIGURED", self.context_of(output, "SessionStart"))
 
     def test_a_broken_config_file_still_counts_as_configured(self):
-        with open(os.path.join(self.lastcall_home, "config.json"), "w") as handle:
+        with open(os.path.join(self.lastcall_home, "config.json"), "w", encoding="utf-8") as handle:
             handle.write("{not json")
         self.assertIsNone(self.run_hook("SessionStart", self.claude_payload("SessionStart")))
 
@@ -760,6 +760,16 @@ class TestDoctorAcrossAgents(HookCase):
         self.assertIn("258,400 tokens (transcript)", out)
         self.assertIn("band          : YELLOW", out)
         self.assertIn("compaction    : none", out)
+
+    def test_doctor_speaks_utf8_on_a_cp1252_stream(self):
+        """CI finding: on Windows a redirected stdout is cp1252, so doctor's
+        em dashes reached the reader as undecodable bytes."""
+        self.claude_reply(90000)
+        self.env["PYTHONIOENCODING"] = "cp1252"
+        result = self.run_script("doctor", self.claude_transcript())
+        out = result.stdout.decode("utf-8")   # strict: a cp1252 byte raises
+        self.assertEqual(result.returncode, 0, out + result.stderr.decode("utf-8", "replace"))
+        self.assertIn("\u2014", out)
 
     def test_doctor_reports_a_codex_compaction(self):
         self.codex_tokens(150000)

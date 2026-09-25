@@ -562,7 +562,7 @@ class TestCodexUsage(TempDirCase):
 
     def test_window_falls_back_to_the_models_cache(self):
         os.makedirs(self.codex_home(), exist_ok=True)
-        with open(os.path.join(self.codex_home(), "models_cache.json"), "w") as handle:
+        with open(os.path.join(self.codex_home(), "models_cache.json"), "w", encoding="utf-8") as handle:
             json.dump({"models": [
                 {"slug": "gpt-test", "context_window": 272000,
                  "effective_context_window_percent": 95},
@@ -815,6 +815,43 @@ class TestLibraryHygiene(unittest.TestCase):
                         continue
                     for root in roots:
                         self.assertTrue(is_stdlib(root), "%s imports %s" % (path, root))
+
+    def test_every_text_stream_names_its_encoding(self):
+        """CI finding: Windows reads and writes text in cp1252 by default, so
+        a plan.json with a middle dot, doctor's em dashes and the status
+        table's check marks broke there. Every text-mode open() and every
+        text-mode subprocess in the shipped code must say encoding=."""
+        sources = [os.path.join(ROOT, "install.py"), os.path.join(PLUGIN, "bin", "lastcall")]
+        for folder in (os.path.join(LIB, "lastcall_core"), os.path.join(PLUGIN, "scripts")):
+            for base, _dirs, files in os.walk(folder):
+                sources += [os.path.join(base, n) for n in files if n.endswith(".py")]
+        subprocess_calls = ("run", "Popen", "call", "check_call", "check_output")
+        offenders = []
+        for path in sources:
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read(), path)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = getattr(func, "id", None) or getattr(func, "attr", None)
+                keywords = {k.arg: k.value for k in node.keywords}
+                if "encoding" in keywords:
+                    continue
+                if name == "open" and not (isinstance(func, ast.Attribute)
+                                           and getattr(func.value, "id", None) == "os"):
+                    mode = keywords.get("mode") or (node.args[1] if len(node.args) > 1 else None)
+                    if mode is None or (isinstance(mode, ast.Constant) and "b" not in mode.value):
+                        offenders.append("%s:%d open()" % (path, node.lineno))
+                    elif not isinstance(mode, ast.Constant):
+                        offenders.append("%s:%d open() with a computed mode" % (path, node.lineno))
+                elif name in ("read_text", "write_text"):
+                    offenders.append("%s:%d %s()" % (path, node.lineno, name))
+                elif name in subprocess_calls:
+                    text = keywords.get("text") or keywords.get("universal_newlines")
+                    if text is not None and not (isinstance(text, ast.Constant) and not text.value):
+                        offenders.append("%s:%d %s(text)" % (path, node.lineno, name))
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

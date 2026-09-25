@@ -46,6 +46,7 @@ try:
     from lastcall_core.state import (prune_state, read_state,  # noqa: F401
                                      update_state, write_debug, write_state)
     from lastcall_core.tail import iter_lines_reverse  # noqa: F401
+    from lastcall_core.textio import utf8_stdio
     from lastcall_core.zones import (DEFAULT_HEADLINES,  # noqa: F401
                                      EXTENDED_WINDOW, KNOWN_WINDOWS,
                                      STANDARD_WINDOW, band_for,
@@ -88,15 +89,11 @@ def setup(argv):
 
 
 def main(argv):
-    # setup and doctor print em dashes and arrows. A Windows console running
-    # cp437 cannot encode those, and print() would raise UnicodeEncodeError.
-    # Degrade the character instead of the command. The hook path is
-    # unaffected: json.dumps escapes non-ASCII.
-    if argv and argv[0] in ("doctor", "--doctor", "setup", "--setup"):
-        try:
-            sys.stdout.reconfigure(errors="replace")
-        except (AttributeError, ValueError, OSError):
-            pass
+    # setup and doctor print em dashes and arrows, which a redirected stream
+    # on Windows (cp1252) cannot encode; the hook reads the agent's UTF-8
+    # JSON from stdin. Speak UTF-8 on every stream, in every mode. The hook's
+    # own output is json.dumps, ASCII either way.
+    utf8_stdio()
 
     if argv and argv[0] in ("doctor", "--doctor"):
         return doctor(argv[1:])

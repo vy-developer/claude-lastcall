@@ -45,7 +45,7 @@ import json, os, sys
 name = os.path.basename(sys.argv[0])
 folder = os.environ["FAKE_AGENT_DIR"]
 args = sys.argv[1:]
-with open(os.path.join(folder, name + ".argv.jsonl"), "a") as fh:
+with open(os.path.join(folder, name + ".argv.jsonl"), "a", encoding="utf-8") as fh:
     fh.write(json.dumps(args) + "\n")
 fail = os.environ.get("FAKE_AGENT_FAIL")
 if fail and fail in args:
@@ -53,22 +53,22 @@ if fail and fail in args:
     sys.exit(3)
 once = os.environ.get("FAKE_AGENT_FAIL_ONCE")
 if once and once in args and not os.path.exists(os.path.join(folder, name + ".failed")):
-    open(os.path.join(folder, name + ".failed"), "w").close()
+    open(os.path.join(folder, name + ".failed"), "w", encoding="utf-8").close()
     sys.stderr.write("fake failure\n")
     sys.exit(3)
 state_path = os.path.join(folder, name + ".state.json")
 try:
-    with open(state_path) as fh:
+    with open(state_path, encoding="utf-8") as fh:
         state = json.load(fh)
 except (OSError, ValueError):
     state = {"markets": {}, "plugins": {}}
 
 def save():
-    with open(state_path, "w") as fh:
+    with open(state_path, "w", encoding="utf-8") as fh:
         json.dump(state, fh)
 
 def market_name(src):
-    with open(os.path.join(src, ".claude-plugin", "marketplace.json")) as fh:
+    with open(os.path.join(src, ".claude-plugin", "marketplace.json"), encoding="utf-8") as fh:
         return json.load(fh)["name"]
 
 def source_of(pid):
@@ -76,10 +76,10 @@ def source_of(pid):
     src = state["markets"][pid.split("@")[1]]
     if not os.path.isdir(src):          # a GitHub-style source: pretend
         return None, os.environ.get("FAKE_REMOTE_VERSION", "1.8.0")
-    with open(os.path.join(src, ".claude-plugin", "marketplace.json")) as fh:
+    with open(os.path.join(src, ".claude-plugin", "marketplace.json"), encoding="utf-8") as fh:
         entry = json.load(fh)["plugins"][0]
     root = os.path.normpath(os.path.join(src, entry["source"]))
-    with open(os.path.join(root, ".claude-plugin", "plugin.json")) as fh:
+    with open(os.path.join(root, ".claude-plugin", "plugin.json"), encoding="utf-8") as fh:
         return root, json.load(fh)["version"]
 
 def copy_to_cache(pid):
@@ -204,7 +204,7 @@ class Sandbox(unittest.TestCase):
 
     def add_fake(self, agent):
         path = os.path.join(self.fake_bin, agent)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(FAKE_AGENT % {"python": sys.executable})
         os.chmod(path, 0o755)
 
@@ -241,7 +241,7 @@ class Sandbox(unittest.TestCase):
         path = os.path.join(self.fake_dir, agent + ".argv.jsonl")
         if not os.path.isfile(path):
             return []
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
 
     def mutations(self, agent):
@@ -418,7 +418,7 @@ class TestRefresh(Sandbox):
         self.assertEqual(code, 0, out)
         cache = os.path.join(self.codex_home, "plugins", "cache", MARKET, "lastcall",
                              cli.version())
-        with open(os.path.join(cache, "scripts", "lastcall.py"), "a") as fh:
+        with open(os.path.join(cache, "scripts", "lastcall.py"), "a", encoding="utf-8") as fh:
             fh.write("# stale\n")                    # the checkout moved on
         code, out = self.refresh("--codex", extra_env=env)
         self.assertEqual(code, 0, out)
@@ -500,8 +500,8 @@ class TestTreeDigest(unittest.TestCase):
         shutil.copytree(a, b)
         self.addCleanup(shutil.rmtree, b, True)
         os.makedirs(os.path.join(b, "x", "__pycache__"))
-        open(os.path.join(b, "x", "__pycache__", "one.cpython-39.pyc"), "w").close()
-        open(os.path.join(b, ".DS_Store"), "w").close()
+        open(os.path.join(b, "x", "__pycache__", "one.cpython-39.pyc"), "w", encoding="utf-8").close()
+        open(os.path.join(b, ".DS_Store"), "w", encoding="utf-8").close()
         self.assertEqual(cli.tree_digest(a), cli.tree_digest(b))
         dump(os.path.join(b, "x", "one.json"), {"v": 2})
         self.assertNotEqual(cli.tree_digest(a), cli.tree_digest(b))
@@ -576,7 +576,7 @@ class TestHooksMethod(Sandbox):
         os.makedirs(folder)
         fake = os.path.join(folder, "python3")
         record = os.path.join(self.tmp, "ran.txt")
-        with open(fake, "w") as fh:
+        with open(fake, "w", encoding="utf-8") as fh:
             fh.write('#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\n' % record)
         os.chmod(fake, 0o755)
         code, out = self.call("install", "--claude", "--method", "hooks", "--no-link-bin",
@@ -588,7 +588,7 @@ class TestHooksMethod(Sandbox):
         proc = subprocess.run(["/bin/sh", "-c", stop], env=env, input=b"{}",
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
         self.assertEqual(proc.returncode, 0, proc.stdout)
-        with open(record) as fh:
+        with open(record, encoding="utf-8") as fh:
             self.assertEqual(fh.read().splitlines(), [HOOK_SCRIPT, "Stop"])
 
     def test_reinstall_replaces_every_older_command_shape(self):
@@ -684,12 +684,12 @@ class TestHooksMethod(Sandbox):
 
     def test_an_unreadable_file_is_refused_not_overwritten(self):
         os.makedirs(self.codex_home)
-        with open(self.codex_hooks, "w") as fh:
+        with open(self.codex_hooks, "w", encoding="utf-8") as fh:
             fh.write("{ not json")
         code, out = self.install()
         self.assertEqual(code, 1)
         self.assertIn("refusing to overwrite", out)
-        with open(self.codex_hooks) as fh:
+        with open(self.codex_hooks, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "{ not json")
         self.assertTrue(our_commands(load(self.claude_settings)),
                         "one agent's broken file must not block the other")
@@ -754,7 +754,7 @@ class TestMachineSetup(Sandbox):
         self.assertEqual([k for k in doc if not k.startswith("_")], [],
                          "the example must not switch anything on")
         self.assertIn("yellow_percent", doc["_example"])
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write('{"yellow_percent": 30}\n')
         self.call("install", "--claude", "--method", "hooks", "--python", "python3", "--no-link-bin")
         self.assertEqual(load(path), {"yellow_percent": 30}, "user edits were overwritten")
@@ -775,12 +775,12 @@ class TestMachineSetup(Sandbox):
     def test_an_existing_foreign_command_is_not_clobbered(self):
         os.makedirs(self.local_bin)
         other = os.path.join(self.local_bin, "lastcall")
-        with open(other, "w") as fh:
+        with open(other, "w", encoding="utf-8") as fh:
             fh.write("#!/bin/sh\necho someone else\n")
         code, out = self.call("install", "--claude", "--method", "hooks", "--python", "python3",
                               "--link-bin", self.local_bin)
         self.assertIn("not ours", out)
-        with open(other) as fh:
+        with open(other, encoding="utf-8") as fh:
             self.assertIn("someone else", fh.read())
 
     @posix_only
@@ -846,7 +846,8 @@ class TestDoctorInstallState(Sandbox):
 
     def write_codex_config(self, text, append=False):
         os.makedirs(self.codex_home, exist_ok=True)
-        with open(os.path.join(self.codex_home, "config.toml"), "a" if append else "w") as fh:
+        with open(os.path.join(self.codex_home, "config.toml"), "a" if append else "w",
+                  encoding="utf-8") as fh:
             fh.write(text)
 
     def trust(self, source, events=SNAKE_EVENTS):
@@ -997,7 +998,7 @@ class TestSubcommands(Sandbox):
               "entrypoint": "cli"})
         transcript = os.path.join(self.claude_home, "projects", "-synthetic", sid + ".jsonl")
         os.makedirs(os.path.dirname(transcript))
-        with open(transcript, "w") as fh:
+        with open(transcript, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "type": "assistant", "isSidechain": False, "sessionId": sid,
                 "timestamp": "2026-09-25T10:00:00.000Z",
@@ -1010,6 +1011,19 @@ class TestSubcommands(Sandbox):
         self.assertIn("CONTEXT", out)
         self.assertIn("51k", out, "the usage provider was not registered")
 
+    def test_status_speaks_utf8_on_a_cp1252_stream(self):
+        """CI finding: on Windows a redirected stdout is cp1252, and the
+        status table's check marks raised UnicodeEncodeError."""
+        sid = "11111111-2222-3333-4444-888888888888"
+        dump(os.path.join(self.claude_home, "sessions", "%d.json" % os.getpid()),
+             {"pid": os.getpid(), "sessionId": sid, "cwd": self.tmp, "status": "idle",
+              "entrypoint": "cli", "name": "caf\u00e9 \u2014 \u2713"})
+        code, out = self.run_cli("status", "--agent", "claude",
+                                 extra_env={"PYTHONIOENCODING": "cp1252"})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("\ufffd", out)
+        self.assertIn("caf\u00e9 \u2014 \u2713", out)
+
     def test_status_json_carries_the_context_the_table_shows(self):
         """Live-QA finding: `status --json` had no CONTEXT data at all."""
         sid = "11111111-2222-3333-4444-777777777777"
@@ -1018,7 +1032,7 @@ class TestSubcommands(Sandbox):
               "entrypoint": "cli"})
         transcript = os.path.join(self.claude_home, "projects", "-synthetic", sid + ".jsonl")
         os.makedirs(os.path.dirname(transcript))
-        with open(transcript, "w") as fh:
+        with open(transcript, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "type": "assistant", "isSidechain": False, "sessionId": sid,
                 "timestamp": "2026-09-25T10:00:00.000Z",
@@ -1043,7 +1057,7 @@ class TestSubcommands(Sandbox):
               "entrypoint": "cli"})
         transcript = os.path.join(self.claude_home, "projects", "-synthetic", sid + ".jsonl")
         os.makedirs(os.path.dirname(transcript))
-        with open(transcript, "w") as fh:
+        with open(transcript, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "type": "assistant", "isSidechain": False, "sessionId": sid,
                 "timestamp": "2026-09-25T10:00:00.000Z",

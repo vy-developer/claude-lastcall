@@ -63,7 +63,7 @@ exit 0
 
     def stub(self, name, body):
         path = os.path.join(self.bin, name)
-        with open(path, "w") as handle:
+        with open(path, "w", encoding="utf-8") as handle:
             handle.write(body)
         os.chmod(path, 0o755)
 
@@ -77,25 +77,25 @@ exit 0
         self.git(path, "init", "-q")
         self.git(path, "config", "user.email", "t@example.com")
         self.git(path, "config", "user.name", "t")
-        with open(os.path.join(path, "README.md"), "w") as fh:
+        with open(os.path.join(path, "README.md"), "w", encoding="utf-8") as fh:
             fh.write("seed\n")
         self.git(path, "add", "-A")
         self.git(path, "commit", "-qm", "seed")
         if handoff:
-            with open(os.path.join(path, "docs", "handoff", "2026-08-18.md"), "w") as fh:
+            with open(os.path.join(path, "docs", "handoff", "2026-08-18.md"), "w", encoding="utf-8") as fh:
                 fh.write("do the thing\n")
             if commit:
                 self.git(path, "add", "-A")
                 self.git(path, "commit", "-qm", "handoff")
         if dirty:
-            with open(os.path.join(path, "README.md"), "a") as fh:
+            with open(os.path.join(path, "README.md"), "a", encoding="utf-8") as fh:
                 fh.write("uncommitted\n")
         return path
 
     def configured(self, name="myproject", **relay):
         repo = self.repo(name)
         os.makedirs(os.path.join(repo, ".claude"))
-        with open(os.path.join(repo, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(repo, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": relay}, fh)
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "-qm", "cfg")
@@ -113,7 +113,7 @@ exit 0
         result = subprocess.run([self.shell, RELAY] + list(args),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=self.environ(env_extra), cwd=cwd or self.tmp,
-                                universal_newlines=True)
+                                universal_newlines=True, encoding="utf-8")
         result.out = result.stdout + result.stderr
         return result
 
@@ -125,7 +125,7 @@ exit 0
         records = []
         for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
             if name.endswith(".jsonl"):
-                with open(os.path.join(folder, name)) as fh:
+                with open(os.path.join(folder, name), encoding="utf-8") as fh:
                     records += [json.loads(line) for line in fh if line.strip()]
         return records
 
@@ -169,12 +169,12 @@ class TestShim(RelayCase):
 
     def test_trust_is_ignored_and_claude_json_is_never_touched(self):
         claude_json = os.path.join(self.tmp, ".claude.json")
-        with open(claude_json, "w") as handle:
+        with open(claude_json, "w", encoding="utf-8") as handle:
             json.dump({"projects": {}, "numStartups": 42}, handle)
         result = self.relay(self.repo(), "--dry-run", "--trust")
         self.assertEqual(result.returncode, 0, result.out)
         self.assertIn("--trust is ignored", result.stderr)
-        with open(claude_json) as handle:
+        with open(claude_json, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle), {"projects": {}, "numStartups": 42})
 
     def test_environment_maps_to_flags_and_a_flag_wins(self):
@@ -277,7 +277,7 @@ class TestResolution(RelayCase):
     def test_custom_handoff_dir(self):
         repo = self.repo()
         os.makedirs(os.path.join(repo, "notes"))
-        with open(os.path.join(repo, "notes", "next.md"), "w") as fh:
+        with open(os.path.join(repo, "notes", "next.md"), "w", encoding="utf-8") as fh:
             fh.write("go\n")
         self.git(repo, "add", "-A")
         self.git(repo, "commit", "-qm", "notes")
@@ -288,7 +288,7 @@ class TestResolution(RelayCase):
     def add_template(self, repo, commit=True):
         """A TEMPLATE.md edited after the real handoff, so it is the newest."""
         path = os.path.join(repo, "docs", "handoff", "TEMPLATE.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("# Session handoff — YYYY-MM-DD\n")
         later = os.path.getmtime(os.path.join(repo, "README.md")) + 60
         os.utime(path, (later, later))
@@ -315,7 +315,7 @@ class TestResolution(RelayCase):
     def test_the_committed_fallback_never_suggests_the_template(self):
         repo = self.repo()
         self.add_template(repo)
-        with open(os.path.join(repo, "docs", "handoff", "2026-08-19.md"), "w") as fh:
+        with open(os.path.join(repo, "docs", "handoff", "2026-08-19.md"), "w", encoding="utf-8") as fh:
             fh.write("not yet committed\n")
         result = self.relay(repo, "--dry-run")
         self.assertEqual(result.returncode, 1, result.out)
@@ -340,7 +340,7 @@ class TestConfigResolution(RelayCase):
         os.rename(repo, os.path.join(parent, "frontend"))
         repo = os.path.join(parent, "frontend")
         config.setdefault("repo", repo)
-        with open(os.path.join(parent, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(parent, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": config}, fh)
         return parent, repo
 
@@ -364,7 +364,7 @@ class TestConfigResolution(RelayCase):
         parent, repo = self.parent_layout({"name_prefix": "fromparent"})
         elsewhere = os.path.join(self.tmp, "elsewhere")
         os.makedirs(os.path.join(elsewhere, ".claude"))
-        with open(os.path.join(elsewhere, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(elsewhere, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": {"repo": repo, "name_prefix": "fromflag"}}, fh)
         result = self.run_from(parent, "--config-dir", elsewhere)
         self.assertIn("name:        fromflag · handoff 1", result.stdout)
@@ -380,7 +380,7 @@ class TestConfigResolution(RelayCase):
     def test_a_config_in_the_home_claude_directory_is_not_picked_up(self):
         """~/.claude is Claude Code's user directory, not a project."""
         os.makedirs(os.path.join(self.tmp, ".claude"))
-        with open(os.path.join(self.tmp, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.tmp, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": {"name_prefix": "fromhome"}}, fh)
         repo = self.repo()
         result = self.run_from(repo, "--repo", repo)
@@ -400,9 +400,9 @@ class TestGitIsOptional(RelayCase):
         path = os.path.join(self.tmp, name)
         os.makedirs(os.path.join(path, "docs", "handoff"))
         os.makedirs(os.path.join(path, ".claude"))
-        with open(os.path.join(path, "docs", "handoff", "2026-08-19.md"), "w") as fh:
+        with open(os.path.join(path, "docs", "handoff", "2026-08-19.md"), "w", encoding="utf-8") as fh:
             fh.write("next steps\n")
-        with open(os.path.join(path, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(path, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": {"name_prefix": "plain"}}, fh)
         return path
 
@@ -523,7 +523,7 @@ class TestPredecessorRetirement(RelayCase):
         result = self.handover("%1")
         self.assertEqual(result.returncode, 0, result.out)
         self.assertEqual(self.outcome()["event"], "retired")
-        with open(self.kills) as handle:
+        with open(self.kills, encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "%1\n")
 
     def test_a_session_name_is_never_run_as_shell(self):
@@ -532,7 +532,7 @@ class TestPredecessorRetirement(RelayCase):
         result = self.handover(old)
         self.assertEqual(result.returncode, 0, result.out)
         self.outcome()
-        with open(self.kills) as handle:
+        with open(self.kills, encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "%s\n" % old)
         self.assertFalse(os.path.exists(marker))
 
@@ -562,7 +562,7 @@ class TestInstallerSafety(unittest.TestCase):
         self.settings = os.path.join(self.tmp, ".claude", "settings.json")
 
     def write(self, data):
-        with open(self.settings, "w") as handle:
+        with open(self.settings, "w", encoding="utf-8") as handle:
             json.dump(data, handle)
         os.chmod(self.settings, 0o644)
 
@@ -589,7 +589,7 @@ class TestInstallerSafety(unittest.TestCase):
             {"type": "command", "command": foreign}]}]}})
         self.install()
         self.install("--uninstall")
-        with open(self.settings) as handle:
+        with open(self.settings, encoding="utf-8") as handle:
             after = json.load(handle)
         commands = [entry["command"]
                     for groups in after.get("hooks", {}).values()
@@ -600,7 +600,7 @@ class TestInstallerSafety(unittest.TestCase):
         self.write({"permissions": {"allow": ["Bash"]}})
         self.install()
         self.install("--uninstall")
-        with open(self.settings) as handle:
+        with open(self.settings, encoding="utf-8") as handle:
             after = json.load(handle)
         self.assertNotIn("hooks", after)
         self.assertEqual(after["permissions"], {"allow": ["Bash"]})

@@ -115,6 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    from .textio import utf8_stdio
+    utf8_stdio()
     args = build_parser().parse_args(argv)
     return args.func(args)
 

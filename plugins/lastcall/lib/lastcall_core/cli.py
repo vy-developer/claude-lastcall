@@ -1113,6 +1113,8 @@ def build_parser():
 
 
 def main(argv=None):
+    from .textio import utf8_stdio
+    utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in DELEGATES:
         return DELEGATES[argv[0]][1](argv[0], argv[1:])

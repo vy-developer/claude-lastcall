@@ -220,7 +220,7 @@ class TestReverseReader(TempCase):
 
     def test_empty_file_yields_nothing(self):
         path = os.path.join(self.dir, "empty.jsonl")
-        open(path, "w").close()
+        open(path, "w", encoding="utf-8").close()
         self.assertEqual(list(cg.iter_lines_reverse(path)), [])
 
 
@@ -320,7 +320,7 @@ class TestMeasure(TempCase):
 class TestConfig(TempCase):
     def test_file_overrides_defaults(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"yellow_percent": 50, "mode": "advisory"}, fh)
         config = cg.load_config({"cwd": self.dir})
         self.assertEqual(config["yellow_percent"], 50)
@@ -329,7 +329,7 @@ class TestConfig(TempCase):
 
     def test_env_overrides_file_field_by_field(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"yellow_percent": 50, "mode": "advisory"}, fh)
         os.environ["LASTCALL_YELLOW_PERCENT"] = "33"
         self.addCleanup(os.environ.pop, "LASTCALL_YELLOW_PERCENT", None)
@@ -352,7 +352,7 @@ class TestConfig(TempCase):
 
     def test_broken_config_does_not_raise(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             fh.write("{ broken")
         config = cg.load_config({"cwd": self.dir})
         self.assertEqual(config["yellow_percent"], cg.DEFAULTS["yellow_percent"])
@@ -396,7 +396,7 @@ class TestTemplate(TempCase):
 
     def test_user_template_is_used_and_interpolated(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("at {percent:.0f}% with {remaining:,} left")
         config = self.config(template=path)
         message = cg.render(config, self.zone(config, "yellow"), 140_000, 200_000)
@@ -404,7 +404,7 @@ class TestTemplate(TempCase):
 
     def test_template_with_stray_braces_still_warns(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("use {unknown_placeholder} here")
         config = self.config(template=path)
         message = cg.render(config, self.zone(config, "red"), 180_000, 200_000)
@@ -476,10 +476,10 @@ class TestZones(TempCase):
 
     def test_per_zone_template_file_beats_the_global_one(self):
         specific = os.path.join(self.dir, "closing.md")
-        with open(specific, "w") as fh:
+        with open(specific, "w", encoding="utf-8") as fh:
             fh.write("closing instructions at {percent:.0f}%")
         shared = os.path.join(self.dir, "shared.md")
-        with open(shared, "w") as fh:
+        with open(shared, "w", encoding="utf-8") as fh:
             fh.write("shared instructions")
         config = self.config(template=shared, zones=[
             {"name": "early", "at": 50},
@@ -646,7 +646,7 @@ class TestParallelHooks(TempCase):
         config = self.config(state_ttl_days=1)
         lock = os.path.join(self.state, "claude-old.json.lock")
         os.makedirs(self.state, exist_ok=True)
-        open(lock, "w").close()
+        open(lock, "w", encoding="utf-8").close()
         os.utime(lock, (time.time() - 3 * 86400,) * 2)
         cg.prune_state(config)
         self.assertFalse(os.path.exists(lock))
@@ -792,7 +792,7 @@ class TestEndToEnd(TempCase):
         )
         target = os.path.join(self.state, "last-payload.json")
         self.assertTrue(os.path.exists(target))
-        with open(target) as handle:
+        with open(target, encoding="utf-8") as handle:
             self.assertNotIn("SECRET", handle.read())
 
     def test_unknown_window_is_silent_end_to_end_without_a_fallback(self):
@@ -843,7 +843,7 @@ class TestTemplateWhitespace(TempCase):
 
     def test_leading_indentation_of_the_first_line_survives(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n\n  1. FINISH what is in flight.\n     continued here\n  2. THEN this.\n\n")
         config = self.config(template=path)
         body = cg.zone_body(config, cg.resolve_zones(config)[0])
@@ -854,7 +854,7 @@ class TestTemplateWhitespace(TempCase):
         """A wrap-up template says "run {relay}" and must get a real command,
         so nobody has to hand-edit a path that changes with every update."""
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("step 6: run {relay}")
         config = self.config(template=path)
         message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
@@ -868,7 +868,7 @@ class TestTemplateWhitespace(TempCase):
         """Older templates say "bash {relay}"; {relay} is now a python command,
         and `bash python3 ...` would fail, so render drops the shell."""
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("run bash {relay} --dry-run, or sh {relay}")
         config = self.config(template=path)
         message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
@@ -888,14 +888,14 @@ class TestTemplateWhitespace(TempCase):
 
     def test_surrounding_blank_lines_are_still_trimmed(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n\nbody\n\n\n")
         config = self.config(template=path)
         self.assertEqual(cg.zone_body(config, cg.resolve_zones(config)[0]), "body")
 
     def test_whitespace_only_template_falls_back(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n   \n")
         config = self.config(template=path)
         self.assertEqual(cg.zone_body(config, cg.resolve_zones(config)[0]),
@@ -922,7 +922,7 @@ class TestHandoverReadiness(TempCase):
 
     def test_a_plain_template_is_configured_but_not_wired(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("just write some notes")
         ready, checks = cg.handover_status(self.config(template=path))
         self.assertTrue(checks["template configured"])
@@ -951,7 +951,7 @@ class TestHandoverReadiness(TempCase):
         for line in ("lastcall relay --agent codex", "python3 /x/relay.py",
                      "bash /x/relay/handoff.sh"):
             path = os.path.join(self.dir, "wrap.md")
-            with open(path, "w") as fh:
+            with open(path, "w", encoding="utf-8") as fh:
                 fh.write("finally: " + line)
             _ready, checks = cg.handover_status(self.config(template=path))
             self.assertTrue(checks["template invokes the relay"], line)
@@ -990,7 +990,7 @@ class TestSetupCommand(TempCase):
         result = self.run_setup(self.dir)
         self.assertEqual(result.returncode, 0,
                          result.stdout.decode("utf-8", "replace"))
-        with open(os.path.join(self.dir, ".lastcall.json")) as handle:
+        with open(os.path.join(self.dir, ".lastcall.json"), encoding="utf-8") as handle:
             written = json.load(handle)
         # The recommendation: the windows map, not a single figure that would
         # override even the status line's exact one.
@@ -1001,10 +1001,10 @@ class TestSetupCommand(TempCase):
     def test_setup_preserves_unrelated_existing_settings(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
         target = os.path.join(self.dir, ".claude", "lastcall.json")
-        with open(target, "w") as fh:
+        with open(target, "w", encoding="utf-8") as fh:
             json.dump({"mode": "advisory", "yellow_percent": 33}, fh)
         self.run_setup(self.dir)
-        with open(target) as handle:
+        with open(target, encoding="utf-8") as handle:
             written = json.load(handle)
         self.assertEqual(written["mode"], "advisory")
         self.assertEqual(written["yellow_percent"], 33)
@@ -1033,7 +1033,7 @@ class TestSetupRecommendations(TempCase):
         result = self.run_setup(root)
         self.assertEqual(result.returncode, 0,
                          result.stdout.decode("utf-8", "replace"))
-        with open(os.path.join(root, ".lastcall.json")) as handle:
+        with open(os.path.join(root, ".lastcall.json"), encoding="utf-8") as handle:
             written = json.load(handle)
         self.assertNotIn("template", written)
         self.assertFalse(os.path.exists(
@@ -1076,7 +1076,7 @@ class TestSetupWizardInterview(TempCase):
     def run_wizard(self, answers, existing=None, on_path=ON_PATH):
         target = os.path.join(self.dir, ".lastcall.json")
         if existing is not None:
-            with open(target, "w") as fh:
+            with open(target, "w", encoding="utf-8") as fh:
                 json.dump(existing, fh)
         feed = iter(answers)
 
@@ -1100,7 +1100,7 @@ class TestSetupWizardInterview(TempCase):
                 mock.patch("sys.stdout", out):
             code = wizard.setup([])
         self.assertEqual(code, 0, out.getvalue())
-        with open(target) as fh:
+        with open(target, encoding="utf-8") as fh:
             return json.load(fh), out.getvalue()
 
     @staticmethod
@@ -1160,11 +1160,11 @@ class TestSetupWizardInterview(TempCase):
         # Unattended, so retiring the predecessor is the recommendation.
         self.assertTrue(relay["kill_predecessor"])
         self.assertEqual(written["template"], os.path.join(".lastcall", "wrapup.md"))
-        with open(os.path.join(self.dir, ".lastcall", "wrapup.md")) as fh:
+        with open(os.path.join(self.dir, ".lastcall", "wrapup.md"), encoding="utf-8") as fh:
             wrapup = fh.read()
         self.assertIn("never push", wrapup)
         self.assertIn("{relay}", wrapup)
-        with open(os.path.join(self.dir, "docs", "handoff", "TEMPLATE.md")) as fh:
+        with open(os.path.join(self.dir, "docs", "handoff", "TEMPLATE.md"), encoding="utf-8") as fh:
             self.assertIn("make check", fh.read())
         with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.dir,
                                           "LASTCALL_HOME": os.path.join(self.dir, "home")}):
@@ -1257,7 +1257,7 @@ class TestGatesAndTranscript(TempCase):
 
     def test_transcript_path_reaches_the_template(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("audit against {transcript}")
         config = self.config(template=path)
         message = cg.render(config, cg.resolve_zones(config)[0],
@@ -1266,7 +1266,7 @@ class TestGatesAndTranscript(TempCase):
 
     def test_transcript_placeholder_degrades_without_a_path(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("audit against {transcript}")
         config = self.config(template=path)
         message = cg.render(config, cg.resolve_zones(config)[0], 150_000, 200_000)
@@ -1285,7 +1285,7 @@ class TestGatesAndTranscript(TempCase):
 
     def test_relay_template_covers_the_full_sequence(self):
         with open(os.path.join(ROOT, "plugins", "lastcall", "templates",
-                               "handoff-relay.md")) as handle:
+                               "handoff-relay.md"), encoding="utf-8") as handle:
             text = handle.read().lower()
         for step in ("update", "gates", "audit", "commit", "hand over",
                      "subagent", "teammate", "workflow", "no user prompt"):
@@ -1321,7 +1321,7 @@ class TestPlaceholderFormatting(TempCase):
 
     def body(self, template_text, tokens=439_373, window=500_000):
         path = os.path.join(self.dir, "t.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(template_text)
         config = self.config(template=path)
         rendered = cg.render(config, cg.resolve_zones(config)[0], tokens, window)
@@ -1367,13 +1367,13 @@ class TestConfigValidation(TempCase):
 
     def load(self, raw):
         os.makedirs(os.path.join(self.dir, ".claude"), exist_ok=True)
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump(raw, fh)
         return cg.load_config({"cwd": self.dir})
 
     def write_raw(self, text):
         os.makedirs(os.path.join(self.dir, ".claude"), exist_ok=True)
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             fh.write(text)
 
     def scrubbed_env(self):
@@ -1459,7 +1459,7 @@ class TestPruneOwnership(TempCase):
     def aged(self, name, content):
         os.makedirs(self.state, exist_ok=True)
         path = os.path.join(self.state, name)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(content, fh)
         old = time.time() - (400 * 86400)
         os.utime(path, (old, old))
@@ -1475,7 +1475,7 @@ class TestPruneOwnership(TempCase):
     def test_state_files_carry_the_marker_that_makes_them_ours(self):
         config = self.config()
         cg.write_state(config, "s1", {"band": "red"})
-        with open(os.path.join(self.state, "claude-s1.json")) as fh:
+        with open(os.path.join(self.state, "claude-s1.json"), encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["_lastcall"], 1)
 
     def test_generic_keys_are_not_ownership(self):
@@ -1496,7 +1496,7 @@ class TestPruneOwnership(TempCase):
     def test_unparseable_json_is_left_alone(self):
         os.makedirs(self.state, exist_ok=True)
         path = os.path.join(self.state, "broken.json")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("{not json")
         old = time.time() - (400 * 86400)
         os.utime(path, (old, old))
@@ -1512,7 +1512,7 @@ class TestHandoverAcrossZones(TempCase):
 
     def layout(self, yellow_text, red_text):
         for name, text in (("winddown.md", yellow_text), ("wrapup.md", red_text)):
-            with open(os.path.join(self.dir, name), "w") as fh:
+            with open(os.path.join(self.dir, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
         return self.config(zones=[
             {"name": "yellow", "at": 40,
@@ -1557,7 +1557,7 @@ class TestVerifier(TempCase):
 
     def test_verifier_reaches_the_template(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("second opinion: {verifier}")
         config = self.config(template=path, verifier="codex review")
         message = cg.render(config, cg.resolve_zones(config)[0], 150_000, 200_000)
@@ -1581,7 +1581,7 @@ class TestProjectIsolation(TempCase):
     def project(self, name, **settings):
         root = os.path.join(self.dir, name)
         os.makedirs(os.path.join(root, ".claude"))
-        with open(os.path.join(root, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(root, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump(settings, fh)
         return root
 
@@ -1716,13 +1716,13 @@ class TestSessionStartOnboarding(TempCase):
 
     def test_a_configured_project_is_silent(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"context_window_tokens": 500_000}, fh)
         self.assertEqual(self.session_start(self.dir).stdout, b"")
 
     def test_declining_silences_it(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"disabled": True}, fh)
         self.assertEqual(self.session_start(self.dir).stdout, b"")
 
@@ -1768,7 +1768,7 @@ class TestDisprovenWindow(unittest.TestCase):
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "s.jsonl")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(assistant_line(743_106, model="claude-opus-5") + "\n")
         config = self.config(200_000)
         tokens, window, source, _model = cg.measure(
@@ -1830,7 +1830,7 @@ class TestAbsoluteZones(TempCase):
 
     def run_script(self, script, *args, stdin=b""):
         os.makedirs(os.path.join(self.dir, ".claude"), exist_ok=True)
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"zones": self.zones()}, fh)
         env = dict(os.environ)
         env["CLAUDE_PROJECT_DIR"] = self.dir
@@ -1985,7 +1985,7 @@ class TestConfigSearch(TempCase):
 
     def write(self, path, data):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as handle:
+        with open(path, "w", encoding="utf-8") as handle:
             json.dump(data, handle)
 
     def test_global_config_is_read(self):
@@ -2035,7 +2035,7 @@ class TestConfigSearch(TempCase):
         worktree = os.path.join(self.dir, "worktree")
         subdir = os.path.join(worktree, "src", "deep")
         os.makedirs(subdir)
-        with open(os.path.join(worktree, ".git"), "w") as handle:
+        with open(os.path.join(worktree, ".git"), "w", encoding="utf-8") as handle:
             handle.write("gitdir: /elsewhere/.git/worktrees/worktree\n")
         config = lc_config.load_config({"cwd": subdir}, self.env)
         self.assertEqual(config["_project_dir"], worktree)

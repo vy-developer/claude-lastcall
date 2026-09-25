@@ -50,12 +50,12 @@ _REAL_OPEN_ROLLOUTS = S.codex_open_rollouts  # setUp stubs the module attribute
 
 
 def read(path, mode="rb"):
-    with open(path, mode) as fh:
+    with open(path, mode, encoding=None if "b" in mode else "utf-8") as fh:
         return fh.read()
 
 
 def load(path):
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -81,7 +81,7 @@ class Homes(unittest.TestCase):
         os.makedirs(os.path.join(self.repo, ".git", "worktrees", "wt"))
         self.worktree = os.path.join(self.tmp, "src", "widget-wt")
         os.makedirs(self.worktree)
-        with open(os.path.join(self.worktree, ".git"), "w") as fh:
+        with open(os.path.join(self.worktree, ".git"), "w", encoding="utf-8") as fh:
             fh.write("gitdir: %s\n" % os.path.join(self.repo, ".git", "worktrees", "wt"))
         self.plain = os.path.join(self.tmp, "scratch")
         os.makedirs(self.plain)
@@ -122,9 +122,9 @@ class Homes(unittest.TestCase):
                  "updatedAt": 1_790_000_100_000, "kind": "interactive"}
         if name:
             entry.update(name=name, nameSource="user")
-        with open(os.path.join(folder, "%d.json" % pid), "w") as fh:
+        with open(os.path.join(folder, "%d.json" % pid), "w", encoding="utf-8") as fh:
             json.dump(entry, fh)
-        with open(os.path.join(folder, "%d.deadbeef.key" % pid), "w") as fh:
+        with open(os.path.join(folder, "%d.deadbeef.key" % pid), "w", encoding="utf-8") as fh:
             fh.write(dump({"pid": 1, "sessionId": "from-key-file"}))
 
     # -- Codex fixtures
@@ -156,7 +156,7 @@ class Homes(unittest.TestCase):
 
     def index(self, *entries):
         os.makedirs(self.codex, exist_ok=True)
-        with open(os.path.join(self.codex, "session_index.jsonl"), "a") as fh:
+        with open(os.path.join(self.codex, "session_index.jsonl"), "a", encoding="utf-8") as fh:
             for sid, name in entries:
                 fh.write(dump({"id": sid, "thread_name": name,
                                "updated_at": "2026-09-20T10:00:00.000000Z"}) + "\n")
@@ -326,11 +326,11 @@ class TestClaudeScan(Homes):
 
     def test_empty_and_garbage_transcripts(self):
         path = self.transcript("s6")
-        open(path, "w").close()
+        open(path, "w", encoding="utf-8").close()
         rec = S.scan_claude_transcript(path)
         self.assertEqual(rec.session_id, "s6")
         self.assertIsNone(rec.title)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write('{"type":"custom-title", broken\nnot json\n')
         self.assertIsNone(S.scan_claude_transcript(path).title)
 
@@ -342,7 +342,7 @@ class TestClaudeScan(Homes):
         self.transcript("main")
         sub = os.path.join(self.claude, "projects", "-proj", "main", "subagents")
         os.makedirs(sub)
-        with open(os.path.join(sub, "agent-1.jsonl"), "w") as fh:
+        with open(os.path.join(sub, "agent-1.jsonl"), "w", encoding="utf-8") as fh:
             fh.write(dump({"type": "user", "cwd": self.repo}) + "\n")
         self.assertEqual([r.session_id for r in S.claude_sessions(self.claude)], ["main"])
 
@@ -355,7 +355,7 @@ class TestClaudeScan(Homes):
         folder = os.path.join(self.claude, "projects", "-p")
         os.makedirs(folder)
         path = os.path.join(folder, "s9.jsonl")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(dump({"type": "user", "toolUseResult": {}, "message": {
                 "content": [{"type": "text", "text": "tool noise"}]}}) + "\n")
             fh.write(dump({"type": "user", "message": {
@@ -470,7 +470,7 @@ class TestCodex(Homes):
         folder = os.path.join(self.codex, "x")
         os.makedirs(folder)
         path = os.path.join(folder, "r.jsonl")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             for text in ("# AGENTS.md instructions", "real ask here"):
                 fh.write(dump({"type": "response_item", "payload": {
                     "type": "message", "role": "user",
@@ -649,7 +649,7 @@ class TestApply(Homes):
         recs = S.all_sessions(self.claude, self.codex, codex_open_files={})
         plan = S.build_plan(recs, self.claude, self.codex, **kw)
         path = os.path.join(self.tmp, "plan.json")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(S.plan_to_json(plan))
         return path, plan
 
@@ -672,7 +672,7 @@ class TestApply(Homes):
         self.assertEqual(result["skipped"], [])
         rec = S.scan_claude_transcript(named)
         self.assertEqual((rec.title, rec.title_source), ("widget · Fix doctor crash", "custom"))
-        with open(named) as fh:
+        with open(named, encoding="utf-8") as fh:
             for line in fh:
                 json.loads(line)  # missing trailing newline was repaired, not glued
         self.assertEqual(S.scan_claude_transcript(untitled).title, "widget · " + DERIVED)
@@ -729,7 +729,7 @@ class TestApply(Homes):
                 it["action"] = "skip"
             if it["session_id"] == "c":
                 it["proposed_title"] = "My own name\nwith a newline"
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
         result = self.apply(path)
         self.assertEqual(sorted(a["session_id"] for a in result["applied"]), ["b", "c"])
@@ -752,7 +752,7 @@ class TestApply(Homes):
             S.apply_plan(path, os.path.join(self.tmp, "elsewhere"), self.codex,
                          codex_open_files={})
         bogus = os.path.join(self.tmp, "bogus.json")
-        with open(bogus, "w") as fh:
+        with open(bogus, "w", encoding="utf-8") as fh:
             json.dump({"items": []}, fh)
         with self.assertRaises(S.PlanError):
             self.apply(bogus)
@@ -763,11 +763,11 @@ class TestApply(Homes):
         self.transcript("a", lines=[{"type": "ai-title", "aiTitle": "Alpha job"}])
         path, _ = self.make_plan()
         outside = os.path.join(self.tmp, "a.jsonl")
-        with open(outside, "w") as fh:
+        with open(outside, "w", encoding="utf-8") as fh:
             fh.write("{}\n")
         data = load(path)
         data["items"][0]["transcript_path"] = outside
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
         result = self.apply(path)
         self.assertEqual(result["skipped"][0]["reason"],
@@ -780,7 +780,7 @@ class TestApply(Homes):
         path, _ = self.make_plan()
         data = load(path)
         data["items"][0]["action"] = "rename"  # a hand edit cannot bypass the gate
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
         self.assertEqual(self.apply(path)["skipped"][0]["reason"], "desktop session")
         path, _ = self.make_plan(include_desktop=True)
@@ -852,7 +852,7 @@ class TestCli(Homes):
                    LASTCALL_CODEX_HOME=self.codex)
         proc = subprocess.run([sys.executable, "-m", "lastcall_core.cli_sessions", "tidy", "--json",
                                "--agent", "claude"], env=env, capture_output=True, text=True,
-                              timeout=60)
+                              timeout=60, encoding="utf-8")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(json.loads(proc.stdout)["claude_home"], self.claude)
 

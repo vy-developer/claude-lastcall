@@ -38,7 +38,7 @@ FAKE_CLAUDE = r'''#!%(python)s
 import json, os, re, subprocess, sys, uuid
 args = sys.argv[1:]
 home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.environ["HOME"], ".claude")
-with open(os.environ["FAKE_LOG"], "a") as fh:
+with open(os.environ["FAKE_LOG"], "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"argv": args, "cwd": os.getcwd(),
                          "leak": os.environ.get("CLAUDE_CODE_SESSION_ID"),
                          "bedrock": os.environ.get("CLAUDE_CODE_USE_BEDROCK"),
@@ -47,7 +47,7 @@ if args[:2] == ["agents", "--json"]:
     agents = []
     jobs = os.path.join(home, "jobs")
     for short in sorted(os.listdir(jobs)) if os.path.isdir(jobs) else []:
-        with open(os.path.join(jobs, short, "state.json")) as fh:
+        with open(os.path.join(jobs, short, "state.json"), encoding="utf-8") as fh:
             state = json.load(fh)
         agents.append({"id": short, "sessionId": state.get("sessionId"), "name": state.get("name"),
                        "state": "running", "kind": "background"})
@@ -70,20 +70,21 @@ state = {"sessionId": sid, "name": name, "respawnFlags": ["--bg"]}
 if "--remote-control" in args and not os.environ.get("FAKE_NO_BRIDGE"):
     state["bridgeSessionId"] = "cse_fake"
 os.makedirs(os.path.join(home, "jobs", short), exist_ok=True)
-with open(os.path.join(home, "jobs", short, "state.json"), "w") as fh:
+with open(os.path.join(home, "jobs", short, "state.json"), "w", encoding="utf-8") as fh:
     json.dump(state, fh)
 folder = os.path.join(home, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.getcwd()))
 os.makedirs(folder, exist_ok=True)
 transcript = os.path.join(folder, sid + ".jsonl")
 if not os.environ.get("FAKE_NO_TRANSCRIPT"):
-    with open(transcript, "w") as fh:
+    with open(transcript, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"type": "custom-title", "sessionId": sid, "customTitle": name}) + "\n")
 if not os.environ.get("FAKE_NO_HOOK"):
     payload = json.dumps({"session_id": sid, "transcript_path": transcript, "cwd": os.getcwd(),
                           "source": "startup", "hook_event_name": "SessionStart"})
     for group in settings["hooks"]["SessionStart"]:
         for hook in group["hooks"]:
-            subprocess.run(hook["command"], shell=True, input=payload, universal_newlines=True)
+            subprocess.run(hook["command"], shell=True, input=payload, universal_newlines=True,
+                           encoding="utf-8")
 if not os.environ.get("FAKE_QUIET_BG"):
     print("backgrounded · %%s · %%s" %% (short, name))
 '''
@@ -96,7 +97,7 @@ if not os.environ.get("FAKE_QUIET_BG"):
 FAKE_CODEX = r'''#!%(python)s
 import json, os, subprocess, sys, time
 args = sys.argv[1:]
-with open(os.environ["FAKE_LOG"], "a") as fh:
+with open(os.environ["FAKE_LOG"], "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"argv": args, "cwd": os.getcwd()}) + "\n")
 home = os.environ.get("CODEX_HOME") or os.path.join(os.environ["HOME"], ".codex")
 day = os.path.join(home, "sessions", "2026", "09", "25")
@@ -104,7 +105,7 @@ day = os.path.join(home, "sessions", "2026", "09", "25")
 def rollout(tid, source):
     os.makedirs(day, exist_ok=True)
     path = os.path.join(day, "rollout-2026-09-25T00-00-00-%%s.jsonl" %% tid)
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"type": "session_meta", "payload": {
             "id": tid, "cwd": os.getcwd(), "source": source}}) + "\n")
     return path
@@ -121,8 +122,8 @@ if args[:1] == ["exec"]:
                               "hook_event_name": "SessionStart", "source": "startup"})
         out = subprocess.run([sys.executable, os.environ["FAKE_PLUGIN_HOOK"], "SessionStart"],
                              input=payload, stdout=subprocess.PIPE,
-                             universal_newlines=True).stdout
-        with open(os.environ["FAKE_HOOK_OUT"], "w") as fh:
+                             universal_newlines=True, encoding="utf-8").stdout
+        with open(os.environ["FAKE_HOOK_OUT"], "w", encoding="utf-8") as fh:
             fh.write(out)
     if not os.environ.get("FAKE_NO_THREAD_EVENT"):
         print(json.dumps({"type": "thread.started", "thread_id": tid}), flush=True)
@@ -141,7 +142,7 @@ def send(message):
 
 def log(message):
     if os.environ.get("FAKE_RPC"):
-        with open(os.environ["FAKE_RPC"], "a") as fh:
+        with open(os.environ["FAKE_RPC"], "a", encoding="utf-8") as fh:
             fh.write(json.dumps(message) + "\n")
 
 tid, turn = "01a0d9c7-0000-7000-8000-%%012d" %% os.getpid(), None
@@ -160,7 +161,7 @@ for line in sys.stdin:
         send({"id": message["id"], "error": {"code": -32603, "message": "scripted failure"}})
         continue
     if method == "thread/name/set" and os.environ.get("FAKE_NAMES"):
-        with open(os.environ["FAKE_NAMES"], "a") as fh:
+        with open(os.environ["FAKE_NAMES"], "a", encoding="utf-8") as fh:
             fh.write(json.dumps(params) + "\n")
     if method == "initialize":
         log({"env": {k: os.environ.get(k) for k in ("LASTCALL_RELAY_CHAIN", "CODEX_THREAD_ID",
@@ -222,7 +223,7 @@ class RelayCoreCase(unittest.TestCase):
 
     def stub(self, name, body):
         path = os.path.join(self.bin, name)
-        with open(path, "w") as handle:
+        with open(path, "w", encoding="utf-8") as handle:
             handle.write(body)
         os.chmod(path, 0o755)
 
@@ -234,18 +235,18 @@ class RelayCoreCase(unittest.TestCase):
         run("git", "init", "-q")
         run("git", "config", "user.email", "t@example.com")
         run("git", "config", "user.name", "t")
-        with open(os.path.join(path, "README.md"), "w") as fh:
+        with open(os.path.join(path, "README.md"), "w", encoding="utf-8") as fh:
             fh.write("seed\n")
         run("git", "add", "-A")
         run("git", "commit", "-qm", "seed")
         if handoff is not None:
-            with open(os.path.join(path, "docs", "handoff", "2026-09-25.md"), "w") as fh:
+            with open(os.path.join(path, "docs", "handoff", "2026-09-25.md"), "w", encoding="utf-8") as fh:
                 fh.write(handoff)
             if commit:
                 run("git", "add", "-A")
                 run("git", "commit", "-qm", "handoff")
         if dirty:
-            with open(os.path.join(path, "README.md"), "a") as fh:
+            with open(os.path.join(path, "README.md"), "a", encoding="utf-8") as fh:
                 fh.write("uncommitted\n")
         return path
 
@@ -260,19 +261,19 @@ class RelayCoreCase(unittest.TestCase):
         argv = [sys.executable, RELAY, "--repo", repo, "--poll", "0.05",
                 "--timeout", "5", "--rc-timeout", "1", "--hook-grace", "0.3"] + list(args)
         result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                env=self.env(extra), cwd=self.tmp, universal_newlines=True)
+                                env=self.env(extra), cwd=self.tmp, universal_newlines=True, encoding="utf-8")
         return result
 
     def calls(self):
         try:
-            with open(self.log) as fh:
+            with open(self.log, encoding="utf-8") as fh:
                 return [json.loads(line) for line in fh]
         except OSError:
             return []
 
     def rpc_messages(self, method=None):
         try:
-            with open(self.rpc) as fh:
+            with open(self.rpc, encoding="utf-8") as fh:
                 messages = [json.loads(line) for line in fh]
         except OSError:
             return []
@@ -311,7 +312,7 @@ class TestHandoffAndNaming(RelayCoreCase):
         for name, age in (("2026-09-01.md", 300), ("2026-09-02.md", 200),
                           ("TEMPLATE.md", 0), ("notes.txt", 0)):
             path = os.path.join(folder, name)
-            with open(path, "w") as fh:
+            with open(path, "w", encoding="utf-8") as fh:
                 fh.write("x")
             os.utime(path, (time.time() - age, time.time() - age))
         self.assertEqual(os.path.basename(relay.pick_handoff(folder)), "2026-09-02.md")
@@ -319,20 +320,20 @@ class TestHandoffAndNaming(RelayCoreCase):
     def test_no_handoff_at_all_is_none(self):
         folder = os.path.join(self.tmp, "empty")
         os.makedirs(folder)
-        with open(os.path.join(folder, "TEMPLATE.md"), "w") as fh:
+        with open(os.path.join(folder, "TEMPLATE.md"), "w", encoding="utf-8") as fh:
             fh.write("x")
         self.assertIsNone(relay.pick_handoff(folder))
         self.assertIsNone(relay.pick_handoff(os.path.join(self.tmp, "missing")))
 
     def test_topic_comes_from_the_first_heading(self):
         path = os.path.join(self.tmp, "2026-09-25.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n# Handoff: wire the Codex adapter\n\nbody\n")
         self.assertEqual(relay.handoff_topic(path), "wire the Codex adapter")
 
     def test_topic_falls_back_to_the_filename_without_its_date(self):
         path = os.path.join(self.tmp, "2026-09-25-1430-fix-remote-control.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("no heading here\n")
         self.assertEqual(relay.handoff_topic(path), "fix remote control")
 
@@ -487,7 +488,7 @@ class TestPreconditions(RelayCoreCase):
         folder = os.path.join(self.tmp, ".codex")
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, "config.toml")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         return path
 
@@ -498,14 +499,14 @@ class TestPreconditions(RelayCoreCase):
         repo = self.repo()
         config = self.write_codex_config('model = "gpt-x"\n[projects."/elsewhere"]\n'
                                          'trust_level = "trusted"\n')
-        with open(config) as fh:
+        with open(config, encoding="utf-8") as fh:
             before = fh.read()
         result = self.relay(repo, "--agent", "codex", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("NOTE: Codex will mark %s as a trusted project in %s (Codex does this "
                       "itself when the app-server starts a workspace-write thread)"
                       % (repo, config), result.stdout)
-        with open(config) as fh:
+        with open(config, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), before, "the check must be read-only")
         self.write_codex_config('[projects."%s"] # added by Codex\ntrust_level = "trusted"\n'
                                 % repo)
@@ -550,7 +551,7 @@ class TestPreconditions(RelayCoreCase):
     def test_unknown_codex_mode_in_config_is_refused(self):
         repo = self.repo()
         os.makedirs(os.path.join(repo, ".claude"))
-        with open(os.path.join(repo, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(repo, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": {"agent": "codex", "codex_mode": "desktop"}}, fh)
         subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
         subprocess.run(["git", "-C", repo, "commit", "-qm", "cfg"], check=True)
@@ -566,7 +567,7 @@ class TestPreconditions(RelayCoreCase):
     def test_config_supplies_model_and_prefix(self):
         repo = self.repo()
         os.makedirs(os.path.join(repo, ".claude"))
-        with open(os.path.join(repo, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(repo, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": {"model": "fable", "fallback_model": "opus",
                                  "name_prefix": "lc"}}, fh)
         subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
@@ -607,7 +608,7 @@ class TestClaudeRelay(RelayCoreCase):
         result = self.relay(self.repo(), "--require-remote-control")
         self.assertEqual(result.returncode, 0, result.stdout)
         transcript = [r for r in self.ledger() if r["event"] == "checkin"][0]["transcript_path"]
-        with open(transcript) as fh:
+        with open(transcript, encoding="utf-8") as fh:
             self.assertNotIn("bridge-session", fh.read())
 
     def test_short_id_falls_back_to_claude_agents_json(self):
@@ -627,7 +628,7 @@ class TestClaudeRelay(RelayCoreCase):
         sid = "c0815a37-2222-3333-4444-555555555555"
         folder = os.path.join(self.tmp, ".claude", "jobs", "c0815a37")
         os.makedirs(folder)
-        with open(os.path.join(folder, "state.json"), "w") as fh:
+        with open(os.path.join(folder, "state.json"), "w", encoding="utf-8") as fh:
             json.dump({"sessionId": sid, "bridgeSessionId": "cse_job"}, fh)
         env = {"HOME": self.tmp}
         self.assertIn("cse_job", relay.remote_control_evidence(sid, None, env, short="c0815a37"))
@@ -639,7 +640,7 @@ class TestClaudeRelay(RelayCoreCase):
         sid = "11111111-2222-3333-4444-555555555555"
         folder = os.path.join(self.tmp, ".claude", "sessions")
         os.makedirs(folder)
-        with open(os.path.join(folder, "123.json"), "w") as fh:
+        with open(os.path.join(folder, "123.json"), "w", encoding="utf-8") as fh:
             json.dump({"sessionId": sid, "bridgeSessionId": "cse_x"}, fh)
         evidence = relay.remote_control_evidence(sid, None, {"HOME": self.tmp})
         self.assertIn("cse_x", evidence)
@@ -668,7 +669,7 @@ class TestClaudeRelay(RelayCoreCase):
         pred = "abcdef12-0000-4000-8000-000000000000"
         jobs = os.path.join(self.tmp, ".claude", "jobs", pred[:8])
         os.makedirs(jobs)
-        with open(os.path.join(jobs, "state.json"), "w") as fh:
+        with open(os.path.join(jobs, "state.json"), "w", encoding="utf-8") as fh:
             json.dump({"sessionId": pred}, fh)
         result = self.relay(self.repo(), "--retire-predecessor", "--kill-delay", "0",
                             extra={"CLAUDE_CODE_SESSION_ID": pred})
@@ -695,7 +696,7 @@ class TestCodexRelay(RelayCoreCase):
                             "--model", "gpt-x")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("via exec-json", result.stdout)
-        with open(self.names) as fh:
+        with open(self.names, encoding="utf-8") as fh:
             named = json.loads(fh.readline())
         self.assertEqual(named["name"], "proj · handoff 1 · Ship the parser")
         checkin = [r for r in self.ledger() if r["event"] == "checkin"][0]
@@ -751,7 +752,7 @@ class TestCodexAppMode(RelayCoreCase):
         self.assertEqual(env, {"LASTCALL_RELAY_CHAIN": chain, "CODEX_THREAD_ID": None,
                                "CODEX_SANDBOX": None})
         spawn = [r for r in self.ledger() if r["event"] == "spawn"][0]
-        with open(spawn["log"]) as fh:
+        with open(spawn["log"], encoding="utf-8") as fh:
             runner_log = fh.read()
         self.assertIn("checked in", runner_log)
         self.assertIn("app-server stopped", runner_log)
@@ -845,7 +846,7 @@ class TestCheckinAndRetirement(RelayCoreCase):
         result = subprocess.run([sys.executable, RELAY, "checkin", "--ledger", ledger,
                                  "--chain", "c1", "--generation", "2", "--agent", "codex"],
                                 input=payload, stdout=subprocess.PIPE, universal_newlines=True,
-                                env=scrubbed_environ())
+                                env=scrubbed_environ(), encoding="utf-8")
         self.assertEqual((result.returncode, result.stdout), (0, ""))
         record = relay.read_ledger(ledger)[0]
         self.assertEqual((record["session_id"], record["chain"], record["generation"],
@@ -884,7 +885,7 @@ class TestLayeredConfig(RelayCoreCase):
 
     def write(self, path, data):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
 
     def committed(self, repo, rel, data):
@@ -944,7 +945,7 @@ class TestLayeredConfig(RelayCoreCase):
                    {"relay": {"repo": "frontend", "name_prefix": "ws"}})
         result = subprocess.run([sys.executable, RELAY, "--dry-run"], cwd=parent,
                                 env=self.env(), stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, universal_newlines=True)
+                                stderr=subprocess.STDOUT, universal_newlines=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("repo:        %s" % repo, result.stdout)
         self.assertIn("ws · handoff 1", result.stdout)
@@ -977,7 +978,7 @@ class TestLayeredConfig(RelayCoreCase):
     def test_require_git(self):
         plain = os.path.join(self.tmp, "plain")
         os.makedirs(os.path.join(plain, "docs", "handoff"))
-        with open(os.path.join(plain, "docs", "handoff", "next.md"), "w") as fh:
+        with open(os.path.join(plain, "docs", "handoff", "next.md"), "w", encoding="utf-8") as fh:
             fh.write("go\n")
         self.assertEqual(self.relay(plain, "--dry-run").returncode, 0)
         result = self.relay(plain, "--dry-run", "--require-git")
@@ -986,7 +987,7 @@ class TestLayeredConfig(RelayCoreCase):
 
     def test_uncommitted_handoff_suggests_the_newest_committed_one(self):
         repo = self.repo()
-        with open(os.path.join(repo, "docs", "handoff", "2026-09-26.md"), "w") as fh:
+        with open(os.path.join(repo, "docs", "handoff", "2026-09-26.md"), "w", encoding="utf-8") as fh:
             fh.write("# newer\n")
         result = self.relay(repo, "--dry-run")
         self.assertEqual(result.returncode, 1, result.stdout)
@@ -1020,7 +1021,7 @@ class TestAgentDefault(RelayCoreCase):
 
     def test_config_agent_beats_detection(self):
         repo = self.repo()
-        with open(os.path.join(repo, ".lastcall.json"), "w") as fh:
+        with open(os.path.join(repo, ".lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": {"agent": "codex"}}, fh)
         subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
         subprocess.run(["git", "-C", repo, "commit", "-qm", "cfg"], check=True)
@@ -1117,7 +1118,7 @@ class TestSuccessorPermissions(RelayCoreCase):
         """What the predecessor's hooks leave behind (engine.note_permission_mode)."""
         folder = os.path.join(self.tmp, ".lastcall", "state")
         os.makedirs(folder, exist_ok=True)
-        with open(os.path.join(folder, "%s-%s.json" % (agent, session)), "w") as fh:
+        with open(os.path.join(folder, "%s-%s.json" % (agent, session)), "w", encoding="utf-8") as fh:
             json.dump({"permission_mode": mode, "agent": agent, "_lastcall": 1}, fh)
 
     def claude_pred(self, mode=None):
@@ -1131,7 +1132,7 @@ class TestSuccessorPermissions(RelayCoreCase):
         return {"CODEX_THREAD_ID": self.CODEX_TID}
 
     def configure(self, repo, relay_block):
-        with open(os.path.join(repo, ".lastcall.json"), "w") as fh:
+        with open(os.path.join(repo, ".lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": relay_block}, fh)
         subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
         subprocess.run(["git", "-C", repo, "commit", "-qm", "cfg"], check=True)
@@ -1305,14 +1306,14 @@ class TestSuccessorPermissions(RelayCoreCase):
     def test_the_hook_record_reaches_the_relay(self):
         """End to end: the real hook script records the mode, the relay reads it."""
         transcript = os.path.join(self.tmp, "t.jsonl")
-        open(transcript, "w").close()
+        open(transcript, "w", encoding="utf-8").close()
         payload = {"session_id": self.CLAUDE_SID, "hook_event_name": "PostToolUse",
                    "transcript_path": transcript, "cwd": self.tmp, "tool_name": "Bash",
                    "permission_mode": "bypassPermissions"}
         hook = subprocess.run([sys.executable, HOOK_SCRIPT, "PostToolUse"],
                               input=json.dumps(payload), stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, universal_newlines=True,
-                              env=self.env(), cwd=self.tmp)
+                              env=self.env(), cwd=self.tmp, encoding="utf-8")
         self.assertEqual(hook.returncode, 0, hook.stderr)
         out = self.dry(extra=self.claude_pred())
         self.assertIn("--dangerously-skip-permissions", self.spawn(out))
@@ -1362,7 +1363,7 @@ class TestPluginCheckin(RelayCoreCase):
 
     def test_unwritable_ledger_is_silent(self):
         blocker = os.path.join(self.tmp, "file")
-        with open(blocker, "w") as fh:
+        with open(blocker, "w", encoding="utf-8") as fh:
             fh.write("x")
         env = self.relay_env(os.path.join(blocker, "sub", "l.jsonl"))
         self.assertIsNone(relay.successor_session_start({"session_id": "S"}, env, "claude"))
@@ -1372,7 +1373,7 @@ class TestPluginCheckin(RelayCoreCase):
         return subprocess.run([sys.executable, HOOK_SCRIPT, "SessionStart"],
                               input=json.dumps(payload), stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, universal_newlines=True, env=env,
-                              cwd=self.tmp)
+                              cwd=self.tmp, encoding="utf-8")
 
     def test_engine_session_start_checks_in_and_injects_the_note(self):
         ledger = os.path.join(self.tmp, "relay", "chainX.jsonl")
@@ -1404,7 +1405,7 @@ class TestPluginCheckin(RelayCoreCase):
 
     def test_engine_survives_a_broken_ledger(self):
         blocker = os.path.join(self.tmp, "file")
-        with open(blocker, "w") as fh:
+        with open(blocker, "w", encoding="utf-8") as fh:
             fh.write("x")
         result = self.run_hook(self.relay_env(os.path.join(blocker, "l.jsonl")),
                                {"hook_event_name": "SessionStart", "source": "startup",
@@ -1422,7 +1423,7 @@ class TestPluginCheckin(RelayCoreCase):
                                    "FAKE_NO_THREAD_EVENT": "1"})
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("via session-start", result.stdout)
-        with open(hook_out) as fh:
+        with open(hook_out, encoding="utf-8") as fh:
             context = json.loads(fh.read())["hookSpecificOutput"]["additionalContext"]
         self.assertIn("generation 1 of relay chain", context)
         self.assertIn("docs/handoff/2026-09-25.md first", context)
@@ -1449,11 +1450,11 @@ class TestLastcallRelayCommand(RelayCoreCase):
         result = subprocess.run([sys.executable, launcher, "relay", "--repo", self.repo(),
                                  "--dry-run", "--agent", "codex"], env=self.env(),
                                 cwd=self.tmp, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, universal_newlines=True)
+                                stderr=subprocess.STDOUT, universal_newlines=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("relay — codex successor", result.stdout)
         help_text = subprocess.run([sys.executable, launcher, "relay", "--help"],
-                                   stdout=subprocess.PIPE, universal_newlines=True).stdout
+                                   stdout=subprocess.PIPE, universal_newlines=True, encoding="utf-8").stdout
         self.assertIn("usage: lastcall relay", help_text)
 
 
@@ -1481,7 +1482,7 @@ day = os.path.join(home, "sessions", "2026", "09", "25")
 os.makedirs(day, exist_ok=True)
 tid = os.environ.get("FAKE_TUI_ID") or str(uuid.uuid4())
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%%Y-%%m-%%dT%%H:%%M:%%S.%%fZ")
-with open(os.path.join(day, "rollout-2026-09-25T00-00-01-%%s.jsonl" %% tid), "w") as fh:
+with open(os.path.join(day, "rollout-2026-09-25T00-00-01-%%s.jsonl" %% tid), "w", encoding="utf-8") as fh:
     fh.write(json.dumps({"timestamp": now, "type": "session_meta", "payload": {
         "id": tid, "timestamp": now, "cwd": os.getcwd(), "source": "cli"}}) + "\n")
 time.sleep(5)
@@ -1495,7 +1496,7 @@ def write_rollout(home, tid, cwd, created, source="cli"):
     meta = {"id": tid, "cwd": cwd, "source": source}
     if created is not None:
         meta["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(created))
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"type": "session_meta", "payload": meta}) + "\n")
     return path
 
@@ -1629,7 +1630,7 @@ class TestRetriesNeverVerifyAStaleSuccessor(RelayCoreCase):
 
     def test_an_old_exec_log_is_never_read_for_the_new_thread(self):
         folder = self.seed({"event": "note"})
-        with open(os.path.join(folder, "chainR-1.log"), "w") as fh:
+        with open(os.path.join(folder, "chainR-1.log"), "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"type": "thread.started", "thread_id": "stale-thread"}) + "\n")
         result = self.relay(self.repo(), "--agent", "codex", "--codex-mode", "exec",
                             "--no-name-thread", extra={relay.CHAIN_ENV: "chainR",
@@ -1655,11 +1656,11 @@ class TestCommittedMeansCommitted(RelayCoreCase):
 
     def test_a_gitignored_handoff_is_not_committed(self):
         repo = self.repo(handoff=None)
-        with open(os.path.join(repo, ".gitignore"), "w") as fh:
+        with open(os.path.join(repo, ".gitignore"), "w", encoding="utf-8") as fh:
             fh.write("docs/handoff/\n")
         subprocess.run(["git", "-C", repo, "add", ".gitignore"], check=True)
         subprocess.run(["git", "-C", repo, "commit", "-qm", "ignore"], check=True)
-        with open(os.path.join(repo, "docs", "handoff", "2026-09-25.md"), "w") as fh:
+        with open(os.path.join(repo, "docs", "handoff", "2026-09-25.md"), "w", encoding="utf-8") as fh:
             fh.write("# Secretly local\n")
         result = self.relay(repo, "--dry-run")
         self.assertEqual(result.returncode, 1, result.stdout)
@@ -1668,7 +1669,7 @@ class TestCommittedMeansCommitted(RelayCoreCase):
 
     def test_staged_but_uncommitted_changes_do_not_count(self):
         repo = self.repo()
-        with open(os.path.join(repo, "docs", "handoff", "2026-09-25.md"), "a") as fh:
+        with open(os.path.join(repo, "docs", "handoff", "2026-09-25.md"), "a", encoding="utf-8") as fh:
             fh.write("more\n")
         subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
         result = self.relay(repo, "--dry-run", "--allow-dirty")
@@ -1685,7 +1686,7 @@ class TestTheRelayFitsInABashCall(RelayCoreCase):
     def plain(self, repo, *args, extra=None):
         return subprocess.run([sys.executable, RELAY, "--repo", repo] + list(args),
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              env=self.env(extra), cwd=self.tmp, universal_newlines=True)
+                              env=self.env(extra), cwd=self.tmp, universal_newlines=True, encoding="utf-8")
 
     def test_by_default_every_wait_together_fits_under_two_minutes(self):
         for agent in ("claude", "codex"):
@@ -1705,7 +1706,7 @@ class TestTheRelayFitsInABashCall(RelayCoreCase):
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertLess(time.time() - started, 15)
         self.assertIn("take up to 1s", result.stdout)
-        with open(os.path.join(repo, ".lastcall.json"), "w") as fh:
+        with open(os.path.join(repo, ".lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"relay": {"max_wait_seconds": 50}}, fh)
         result = self.plain(repo, "--dry-run", "--allow-dirty")
         self.assertIn("take up to 50s", result.stdout)

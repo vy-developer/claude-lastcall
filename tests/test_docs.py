@@ -146,16 +146,16 @@ class TestReleaseHygiene(unittest.TestCase):
     latest version". The fixes were upstream and unreachable."""
 
     def versions(self):
-        with open(os.path.join(ROOT, ".claude-plugin", "marketplace.json")) as fh:
+        with open(os.path.join(ROOT, ".claude-plugin", "marketplace.json"), encoding="utf-8") as fh:
             market = json.load(fh)
         with open(os.path.join(ROOT, "plugins", "lastcall", ".claude-plugin",
-                               "plugin.json")) as fh:
+                               "plugin.json"), encoding="utf-8") as fh:
             plugin = json.load(fh)
         with open(os.path.join(ROOT, "plugins", "lastcall", ".codex-plugin",
-                               "plugin.json")) as fh:
+                               "plugin.json"), encoding="utf-8") as fh:
             codex_plugin = json.load(fh)
         with open(os.path.join(ROOT, "plugins", "lastcall", "scripts",
-                               "lastcall.py")) as fh:
+                               "lastcall.py"), encoding="utf-8") as fh:
             code = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M).group(1)
         return {
             "marketplace.metadata": market["metadata"]["version"],
@@ -203,7 +203,7 @@ class TestLineEndings(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(ROOT, ".gitattributes")))
 
     def test_shell_scripts_are_pinned_to_lf(self):
-        with open(os.path.join(ROOT, ".gitattributes")) as handle:
+        with open(os.path.join(ROOT, ".gitattributes"), encoding="utf-8") as handle:
             rules = handle.read()
         self.assertRegex(rules, r"(?m)^\*\.sh\s+text\s+eol=lf")
 

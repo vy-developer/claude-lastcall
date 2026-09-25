@@ -801,7 +801,8 @@ class TestCheckinAndRetirement(RelayV2Case):
     def test_plan_prefers_claude_stop_then_tmux_then_signal(self):
         self.assertEqual(relay.plan_retirement({"bg_short": "abc"})["argv"],
                          ["claude", "stop", "abc"])
-        self.assertEqual(relay.plan_retirement({"tmux_session": "t", "agent": "claude",
+        self.assertEqual(relay.plan_retirement({"tmux_session": "t", "tmux_pane": "%1",
+                                                "agent": "claude",
                                                 "entrypoint": "cli"})["method"], "tmux")
         self.assertEqual(relay.plan_retirement({"agent": "claude", "entrypoint": "cli",
                                                 "pid": 42, "kind": "interactive"})["pid"], 42)
@@ -892,12 +893,14 @@ class TestLayeredConfig(RelayV2Case):
             self.assertIn("not requested", off.stdout, key)
 
     def test_kill_delay_comes_from_the_config(self):
-        self.stub("tmux", "#!/bin/sh\necho old-session\n")
+        self.stub("tmux", "#!/bin/sh\nprintf '%d\\told-session\\n'\n" % os.getpid())
         repo = self.repo()
         self.committed(repo, ".lastcall.json", {"relay": {"kill_predecessor": True,
                                                           "kill_delay": 7}})
-        result = self.relay(repo, "--dry-run", extra={"TMUX_PANE": "%1"})
-        self.assertIn("in 7s: tmux kill-session -t =old-session", result.stdout)
+        result = self.relay(repo, "--dry-run", extra={
+            "TMUX_PANE": "%1", "CLAUDE_CODE_SESSION_ID": "p", "CLAUDE_PID": str(os.getpid()),
+            "CLAUDE_CODE_ENTRYPOINT": "cli"})
+        self.assertIn("in 7s: tmux kill-pane -t %1", result.stdout)
 
     def test_a_bad_flag_is_a_precondition_failure_not_exit_2(self):
         result = self.relay(self.repo(), "--dry-run", "--timeout", "abc")
@@ -1187,6 +1190,59 @@ class TestTmuxSuccessorIdentity(RelayV2Case):
         self.assertEqual(result.returncode, 0, result.stdout)
         checkin = [r for r in self.ledger() if r["event"] == "checkin"]
         self.assertEqual([r["session_id"] for r in checkin], [self.SUCC], result.stdout)
+
+
+
+class TestRetirementScope(RelayV2Case):
+    """Review finding: retirement trusted an inherited TMUX_PANE and ran
+    `tmux kill-session` — the user's whole workspace — and the Codex
+    desktop/app-server exclusion only ran after the tmux branch."""
+
+    def fake_tmux(self, pane_pid, session="work"):
+        self.stub("tmux", "#!/bin/sh\nprintf '%s\\t%s\\n'\n" % (pane_pid, session))
+        return os.path.join(self.bin, "tmux")
+
+    def test_a_codex_desktop_thread_in_a_tmux_shell_is_never_killed(self):
+        plan = relay.plan_retirement({"agent": "codex", "tmux_session": "work",
+                                      "tmux_pane": "%3"}, find_codex=lambda: None)
+        self.assertEqual(plan["method"], "none")
+
+    def test_the_predecessors_pane_is_killed_not_the_users_session(self):
+        plan = relay.plan_retirement({"agent": "claude", "entrypoint": "cli",
+                                      "tmux_session": "work", "tmux_pane": "%3"})
+        self.assertEqual(plan["argv"], ["tmux", "kill-pane", "-t", "%3"])
+        owned = relay.plan_retirement({"agent": "claude", "entrypoint": "cli",
+                                       "tmux_session": "work", "tmux_pane": "%3",
+                                       "tmux_owned": True})
+        self.assertEqual(owned["argv"], ["tmux", "kill-session", "-t", "=work"])
+
+    def test_an_inherited_tmux_pane_is_ignored_when_the_predecessor_is_not_in_it(self):
+        victim = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: victim.poll() is None and victim.kill())
+        env = {"CLAUDE_CODE_SESSION_ID": "s", "CLAUDE_PID": str(victim.pid),
+               "CLAUDE_CODE_ENTRYPOINT": "cli", "TMUX_PANE": "%3", "HOME": self.tmp}
+        # The pane's shell is not above the predecessor: an inherited variable.
+        pred = relay.detect_predecessor(env, tmux_bin=self.fake_tmux(999999))
+        self.assertIsNone(pred["tmux_session"])
+        self.assertIsNone(pred["tmux_pane"])
+        # The pane's shell IS above it (this test process is its parent).
+        pred = relay.detect_predecessor(env, tmux_bin=self.fake_tmux(os.getpid()))
+        self.assertEqual((pred["tmux_session"], pred["tmux_pane"], pred["tmux_owned"]),
+                         ("work", "%3", False))
+
+    def test_a_tmux_session_the_relay_created_is_recognised(self):
+        victim = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: victim.poll() is None and victim.kill())
+        ledger = os.path.join(self.tmp, "chainT.jsonl")
+        relay.append_record(ledger, {"event": "spawn", "chain": "chainT", "generation": 2,
+                                     "tmux_session": "work", "mode": "tmux"})
+        env = {"CODEX_THREAD_ID": "t", "TMUX_PANE": "%3", "HOME": self.tmp,
+               relay.LEDGER_ENV: ledger, relay.CHAIN_ENV: "chainT",
+               relay.GENERATION_ENV: "2"}
+        pred = relay.detect_predecessor(env, tmux_bin=self.fake_tmux(os.getpid()),
+                                        find_codex=lambda: victim.pid)
+        self.assertTrue(pred["tmux_owned"])
+        self.assertEqual(relay.plan_retirement(pred)["argv"][:2], ["tmux", "kill-session"])
 
 
 if __name__ == "__main__":

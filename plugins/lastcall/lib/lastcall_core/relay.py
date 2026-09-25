@@ -41,8 +41,9 @@ What it does, in order, refusing at the first failure:
      "remote control did NOT connect" when it did not;
      codex: names the thread through `codex app-server` (thread/name/set);
   6. optionally retires the predecessor — `claude stop <id>` for a background
-     job, `tmux kill-session` for a tmux pane, a delayed SIGTERM for a plain
-     CLI process — from a detached Python child (no `setsid` binary needed).
+     job, `tmux kill-pane` for the pane the predecessor really runs in (the
+     whole session only when a relay created it), a delayed SIGTERM for a
+     plain CLI process — from a detached Python child (no `setsid` needed).
      A desktop-app session is never killed; the relay says so instead.
 
 Settings: the `relay` block of the layered Last Call config (lastcall_core.
@@ -1163,10 +1164,42 @@ def find_codex_ancestor(start=None, hops=30):
     return None
 
 
-def detect_predecessor(env, agent=None, session_id=None, tmux_bin="tmux"):
-    """Who is handing over. Everything is optional: no TTY, no tmux is fine."""
+def pid_ancestors(pid, hops=40):
+    """`pid` and every ancestor of it, nearest first (stops at init)."""
+    chain = []
+    while pid and pid > 1 and len(chain) < hops and pid not in chain:
+        chain.append(pid)
+        try:
+            pid = int(_ps(pid, "ppid") or 0)
+        except ValueError:
+            break
+    return chain
+
+
+def _relay_made_tmux(env, session):
+    """Whether `session` is a tmux session an earlier relay created for this
+    very successor (its spawn record on the chain's ledger names it)."""
+    ledger = env.get(LEDGER_ENV)
+    if not ledger or not session:
+        return False
+    return any(r.get("event") == "spawn" and r.get("tmux_session") == session
+               and r.get("chain") == env.get(CHAIN_ENV)
+               and str(r.get("generation")) == str(env.get(GENERATION_ENV))
+               for r in read_ledger(ledger))
+
+
+def detect_predecessor(env, agent=None, session_id=None, tmux_bin="tmux",
+                       find_codex=find_codex_ancestor, ancestors=pid_ancestors):
+    """Who is handing over. Everything is optional: no TTY, no tmux is fine.
+
+    TMUX_PANE is only believed when that pane's process is an ancestor of the
+    predecessor's: the variable is inherited by anything started from a tmux
+    shell — a desktop app, an IDE — and retiring "the pane" of a session that
+    does not live in it would close some unrelated part of the user's
+    workspace."""
     pred = {"agent": agent, "session_id": session_id, "pid": None,
-            "entrypoint": None, "kind": None, "tmux_session": None, "bg_short": None}
+            "entrypoint": None, "kind": None, "tmux_session": None, "tmux_pane": None,
+            "tmux_owned": False, "bg_short": None}
     if not pred["agent"]:
         if env.get("CLAUDE_CODE_SESSION_ID") or env.get("CLAUDECODE"):
             pred["agent"] = "claude"
@@ -1202,16 +1235,31 @@ def detect_predecessor(env, agent=None, session_id=None, tmux_bin="tmux"):
                 pass
     elif pred["agent"] == "codex":
         pred["session_id"] = pred["session_id"] or env.get("CODEX_THREAD_ID")
-    if env.get("TMUX_PANE") and shutil.which(tmux_bin):
-        name = subprocess.run([tmux_bin, "display-message", "-p", "-t", env["TMUX_PANE"], "#S"],
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              universal_newlines=True).stdout.strip()
-        pred["tmux_session"] = name or None
+        pred["pid"] = find_codex()     # None under the desktop app / app-server
+    pane = env.get("TMUX_PANE")
+    if pane and pred["pid"] and shutil.which(tmux_bin):
+        shown = subprocess.run([tmux_bin, "display-message", "-p", "-t", pane,
+                                "#{pane_pid}\t#S"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               universal_newlines=True).stdout.strip()
+        pane_pid, _tab, name = shown.partition("\t")
+        try:
+            pane_pid = int(pane_pid)
+        except ValueError:
+            pane_pid = None
+        if pane_pid and name and pane_pid in ancestors(pred["pid"]):
+            pred["tmux_pane"], pred["tmux_session"] = pane, name
+            pred["tmux_owned"] = _relay_made_tmux(env, name)
     return pred
 
 
 def plan_retirement(pred, claude_bin="claude", tmux_bin="tmux", find_codex=find_codex_ancestor):
-    """How to retire the predecessor: {"method", "why", "argv"|"pid"}."""
+    """How to retire the predecessor: {"method", "why", "argv"|"pid"}.
+
+    What the app owns is ruled out first, for both agents: a Claude desktop /
+    IDE session, a Codex thread with no `codex` CLI process above it (the
+    desktop app or app-server). Only then tmux — the predecessor's own pane,
+    or the whole session when an earlier relay created it — and signals."""
     if pred.get("bg_short"):
         return {"method": "claude-stop", "argv": [claude_bin, "stop", pred["bg_short"]],
                 "why": "background Claude session %s" % pred["bg_short"]}
@@ -1220,19 +1268,25 @@ def plan_retirement(pred, claude_bin="claude", tmux_bin="tmux", find_codex=find_
         return {"method": "none",
                 "why": "predecessor is a %s session — the app owns that process, so the "
                        "relay will not kill it; close or archive it in the app" % entry}
-    if pred.get("tmux_session"):
+    codex_pid = None
+    if pred.get("agent") == "codex":
+        codex_pid = pred.get("pid") or find_codex()
+        if not codex_pid:
+            return {"method": "none", "why": "no codex CLI process found above this one "
+                    "(desktop app or app-server) — close the predecessor thread yourself"}
+    if pred.get("tmux_session") and pred.get("tmux_owned"):
         return {"method": "tmux", "argv": [tmux_bin, "kill-session", "-t",
                                            "=" + pred["tmux_session"]],
-                "why": "tmux session %s" % pred["tmux_session"]}
+                "why": "tmux session %s (created by the relay)" % pred["tmux_session"]}
+    if pred.get("tmux_pane"):
+        return {"method": "tmux", "argv": [tmux_bin, "kill-pane", "-t", pred["tmux_pane"]],
+                "why": "tmux pane %s in session %s" % (pred["tmux_pane"],
+                                                        pred.get("tmux_session") or "?")}
     if pred.get("agent") == "claude" and pred.get("pid") and pred.get("kind") == "interactive":
         return {"method": "signal", "pid": pred["pid"],
                 "why": "Claude CLI process %d" % pred["pid"]}
-    if pred.get("agent") == "codex":
-        pid = find_codex()
-        if pid:
-            return {"method": "signal", "pid": pid, "why": "codex CLI process %d" % pid}
-        return {"method": "none", "why": "no codex CLI process found above this one "
-                "(desktop app or app-server) — close the predecessor thread yourself"}
+    if codex_pid:
+        return {"method": "signal", "pid": codex_pid, "why": "codex CLI process %d" % codex_pid}
     return {"method": "none", "why": "no predecessor to retire could be identified"}
 
 

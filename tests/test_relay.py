@@ -47,11 +47,12 @@ class RelayCase(unittest.TestCase):
         self.bin = os.path.join(self.tmp, "bin")
         os.makedirs(self.bin)
         self.fake_log = os.path.join(self.tmp, "fake.log")
-        # tmux stub: names the predecessor session, records every kill.
+        # tmux stub: names the predecessor's pane process and session,
+        # records every kill.
         self.stub("tmux", r'''#!/bin/sh
 case "$1" in
-    display-message) [ -n "$OLD_SESSION" ] && printf '%s\n' "$OLD_SESSION" ;;
-    kill-session)
+    display-message) [ -n "$OLD_SESSION" ] && printf '%s\t%s\n' "$PANE_PID" "$OLD_SESSION" ;;
+    kill-session|kill-pane)
         printf '%s\n' "$3" >> "$KILLS"
         echo "no such session" >&2
         exit "${KILL_EXIT:-0}" ;;
@@ -464,7 +465,11 @@ class TestPredecessorRetirement(RelayCase):
     """Retirement happens only after the successor checked in, detached,
     because the relay runs inside the session it retires."""
 
-    TMUX = {"TMUX_PANE": "%1", "OLD_SESSION": "old-session"}
+    # A Claude CLI predecessor that really runs in the pane: the pane's
+    # process is an ancestor of (here: the same as) CLAUDE_PID.
+    TMUX = {"TMUX_PANE": "%1", "OLD_SESSION": "old-session", "PANE_PID": str(os.getpid()),
+            "CLAUDE_CODE_SESSION_ID": "pred-session", "CLAUDE_PID": str(os.getpid()),
+            "CLAUDE_CODE_ENTRYPOINT": "cli"}
 
     def test_off_by_default(self):
         out = self.relay(self.repo(), "--dry-run", env_extra=self.TMUX).stdout
@@ -473,7 +478,7 @@ class TestPredecessorRetirement(RelayCase):
     def test_config_turns_it_on(self):
         out = self.relay(self.configured(kill_predecessor=True), "--dry-run",
                          env_extra=self.TMUX).stdout
-        self.assertIn("tmux kill-session -t =old-session", out)
+        self.assertIn("tmux kill-pane -t %1", out)
 
     def test_flag_and_environment_map_to_retire_predecessor(self):
         repo = self.repo()
@@ -481,7 +486,7 @@ class TestPredecessorRetirement(RelayCase):
                           ([], {"LASTCALL_KILL_PREDECESSOR": "1"})):
             env = dict(self.TMUX, **env)
             out = self.relay(repo, "--dry-run", *args, env_extra=env).stdout
-            self.assertIn("tmux kill-session -t =old-session", out, (args, env))
+            self.assertIn("tmux kill-pane -t %1", out, (args, env))
 
     def test_flag_can_turn_it_back_off(self):
         env = dict(self.TMUX, LASTCALL_KILL_PREDECESSOR="1")
@@ -496,12 +501,12 @@ class TestPredecessorRetirement(RelayCase):
         self.assertIn("being retired automatically", out)
         self.assertNotIn("and only then run: tmux kill-session", out)
 
-    def handover(self, old, kill_exit=0):
+    def handover(self, pane, kill_exit=0):
         self.kills = os.path.join(self.tmp, "kills")
         repo = self.configured(kill_predecessor=True)
-        return self.relay(repo, *FAST, env_extra={
-            "TMUX_PANE": "%1", "OLD_SESSION": old, "KILLS": self.kills,
-            "KILL_EXIT": str(kill_exit), "LASTCALL_KILL_DELAY": "0"})
+        return self.relay(repo, *FAST, env_extra=dict(
+            self.TMUX, TMUX_PANE=pane, KILLS=self.kills,
+            KILL_EXIT=str(kill_exit), LASTCALL_KILL_DELAY="0"))
 
     def outcome(self):
         deadline = time.time() + 10
@@ -513,11 +518,11 @@ class TestPredecessorRetirement(RelayCase):
         self.fail("no retirement outcome in the ledger: %s" % self.ledger())
 
     def test_the_predecessor_is_actually_retired(self):
-        result = self.handover("old-session")
+        result = self.handover("%1")
         self.assertEqual(result.returncode, 0, result.out)
         self.assertEqual(self.outcome()["event"], "retired")
         with open(self.kills) as handle:
-            self.assertEqual(handle.read(), "=old-session\n")
+            self.assertEqual(handle.read(), "%1\n")
 
     def test_a_session_name_is_never_run_as_shell(self):
         marker = os.path.join(self.tmp, "pwned")
@@ -526,11 +531,11 @@ class TestPredecessorRetirement(RelayCase):
         self.assertEqual(result.returncode, 0, result.out)
         self.outcome()
         with open(self.kills) as handle:
-            self.assertEqual(handle.read(), "=%s\n" % old)
+            self.assertEqual(handle.read(), "%s\n" % old)
         self.assertFalse(os.path.exists(marker))
 
     def test_a_failed_kill_is_logged_as_a_failure(self):
-        result = self.handover("old-session", kill_exit=1)
+        result = self.handover("%1", kill_exit=1)
         self.assertEqual(result.returncode, 0, result.out)
         self.assertIn("retirement outcome will be logged", result.stdout)
         outcome = self.outcome()

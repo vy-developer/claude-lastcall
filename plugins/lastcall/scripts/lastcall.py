@@ -362,16 +362,26 @@ def load_config(payload):
     root = project_dir(payload)
 
     path = os.path.join(root, ".claude", "lastcall.json")
+    unreadable = None
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as handle:
-                for key, value in (json.load(handle) or {}).items():
-                    if key in config:
-                        config[key] = value
-        except (OSError, ValueError):
-            # A broken config must not take the session with it. The doctor
-            # command reports this loudly; the hook path stays quiet.
-            pass
+                loaded = json.load(handle)
+            if loaded is None:
+                loaded = {}
+            if not isinstance(loaded, dict):
+                raise ValueError("expected a JSON object, got %s"
+                                 % type(loaded).__name__)
+            for key, value in loaded.items():
+                if key in config:
+                    config[key] = value
+        except (OSError, ValueError) as error:
+            # A broken config must not take the session with it, so the hook
+            # path stays quiet. But it is recorded, because doctor has to say
+            # it: a config that fails to parse leaves the guard running on
+            # defaults, which looks exactly like a config that parsed.
+            unreadable = "cannot read %s (%s) — every setting in it is " \
+                         "ignored and the defaults apply" % (path, error)
 
     # Environment overrides individual fields rather than replacing the whole
     # config, so LASTCALL_RED_PERCENT=90 for one run keeps everything else.
@@ -391,7 +401,7 @@ def load_config(payload):
 
     config["_project_dir"] = root
     config["_config_path"] = path if os.path.isfile(path) else None
-    config["_problems"] = validate(config)
+    config["_problems"] = ([unreadable] if unreadable else []) + validate(config)
     return config
 
 

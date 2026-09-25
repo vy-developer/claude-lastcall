@@ -1011,6 +1011,49 @@ class TestConfigValidation(TempCase):
             json.dump(raw, fh)
         return cg.load_config({"cwd": self.dir})
 
+    def write_raw(self, text):
+        os.makedirs(os.path.join(self.dir, ".claude"), exist_ok=True)
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+            fh.write(text)
+
+    def scrubbed_env(self):
+        env = {k: v for k, v in os.environ.items()
+               if not k.upper().startswith("LASTCALL_")}
+        env["CLAUDE_PROJECT_DIR"] = self.dir
+        env["LASTCALL_STATE_DIR"] = self.state
+        return env
+
+    def test_a_config_that_does_not_parse_is_reported_by_doctor(self):
+        """It used to be skipped in silence, leaving the guard on defaults —
+        which looks exactly like a config that parsed."""
+        self.write_raw('{"mode": "advisory",}')
+        result = subprocess.run([sys.executable, SCRIPT, "doctor"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=self.scrubbed_env(), cwd=self.dir)
+        out = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertRegex(out, r"PROBLEM\s+: cannot read .*lastcall\.json")
+
+    def test_a_config_that_is_not_an_object_is_reported(self):
+        self.write_raw('["yellow", 40]')
+        config = cg.load_config({"cwd": self.dir})
+        self.assertTrue(any("JSON object" in p for p in config["_problems"]))
+        self.assertEqual(config["mode"], cg.DEFAULTS["mode"])
+
+    def test_the_hook_stays_silent_on_a_config_that_does_not_parse(self):
+        self.write_raw("{not json")
+        path = self.transcript([assistant_line(20_000)])
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "Stop"],
+            input=json.dumps({"transcript_path": path, "session_id": "s1",
+                              "hook_event_name": "Stop",
+                              "cwd": self.dir}).encode(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=self.scrubbed_env())
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"")
+
     def test_wrong_type_falls_back_and_is_reported(self):
         config = self.load({"yellow_percent": "quite full"})
         self.assertEqual(config["yellow_percent"], cg.DEFAULTS["yellow_percent"])

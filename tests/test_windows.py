@@ -499,7 +499,10 @@ class TestDoctorAndStatus(Case):
     def test_session_window_is_what_the_hooks_would_use(self):
         config = self.config()
         W.record_learned(config, "claude", "claude-opus-5-5", ONE_M, "evidence")
+        # Learned from another session: assumed until this one proves it.
         self.assertEqual(session_window(usage(90_000), config, env=self.env),
+                         (ONE_M, "learned", True))
+        self.assertEqual(session_window(usage(250_000), config, env=self.env),
                          (ONE_M, "learned", False))
         update_state(config, "s1", {"window_from_statusline": 400_000}, "claude")
         self.assertEqual(session_window(usage(90_000), config, env=self.env),
@@ -514,6 +517,92 @@ class TestDoctorAndStatus(Case):
         self.assertEqual(session_window(usage(90_000, "claude-new-9"), self.config(),
                                         env=self.env),
                          (200_000, "assumed", True))
+
+
+def _boundary(path, pre_tokens, post_tokens=20_000, session="s1", trigger="auto", uuid="b-1"):
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "system", "subtype": "compact_boundary", "sessionId": session,
+            "isSidechain": False, "uuid": uuid, "timestamp": "2026-09-25T10:00:00.000Z",
+            "compactMetadata": {"trigger": trigger, "preTokens": pre_tokens,
+                                "postTokens": post_tokens}}) + "\n")
+
+
+class TestLearnedIsNotProof(Case):
+    """Review finding: one 1M session taught claude:<model> = 1M, and every
+    later 200K session on the same model id was judged against 1M and never
+    warned — learning only ever corrected upwards."""
+
+    MODEL = "claude-opus-5-5"
+
+    def hook(self, config, event, transcript, session="s1"):
+        out = io.StringIO()
+        handle_event(event, {"session_id": session, "transcript_path": transcript,
+                             "hook_event_name": event, "cwd": self.dir},
+                     env=self.env, out=out, config=config, agent=get_agent("claude"))
+        return out.getvalue()
+
+    def test_a_learned_1m_is_assumed_until_this_session_proves_it(self):
+        config = self.config()
+        W.record_learned(config, "claude", self.MODEL, ONE_M, "evidence")
+        self.assertEqual(effective_window(config, {}, usage(90_000), "claude", self.env),
+                         (ONE_M, "learned", True))
+        self.assertEqual(effective_window(config, {}, usage(250_000), "claude", self.env),
+                         (ONE_M, "learned", False))
+        # A learned 200K is no claim of headroom; a user's map entry is the user's.
+        W.record_learned(config, "claude", "claude-sonnet-5", 200_000, "statusline")
+        self.assertFalse(effective_window(config, {}, usage(90_000, "claude-sonnet-5"),
+                                          "claude", self.env)[2])
+        mapped = self.config(windows={self.MODEL: ONE_M})
+        self.assertEqual(effective_window(mapped, {}, usage(90_000), "claude", self.env),
+                         (ONE_M, "map", False))
+
+    def test_a_learned_window_never_blocks_and_says_where_it_came_from(self):
+        config = self.config(mode="block_once", zones=[
+            {"name": "yellow", "at": 10}, {"name": "red", "at": 15, "block": True}])
+        W.record_learned(config, "claude", self.MODEL, ONE_M, "evidence")
+        transcript = os.path.join(self.dir, "s1.jsonl")
+        _transcript(transcript, 160_000)
+        output = json.loads(self.hook(config, "Stop", transcript))
+        self.assertNotIn("decision", output)
+        text = output["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("LEARNED from another session", text)
+        self.assertNotIn("assumed the\nstandard", text)
+
+    def test_an_auto_compaction_far_below_the_learned_window_ends_the_trust(self):
+        config = self.config()
+        W.record_learned(config, "claude", self.MODEL, ONE_M, "evidence")
+        transcript = os.path.join(self.dir, "s1.jsonl")
+        _transcript(transcript, 150_000)
+        self.hook(config, "PostToolUse", transcript)
+        _boundary(transcript, 160_000)
+        self.hook(config, "PostToolUse", transcript)
+        entry = self.learned()["claude:%s" % self.MODEL]
+        self.assertEqual(entry["conflict"]["pre_tokens"], 160_000)
+        # The next session on that model: the assumed fallback, not the 1M.
+        self.assertEqual(effective_window(config, {}, usage(90_000, session="s2"), "claude",
+                                          self.env), (200_000, "assumed", True))
+        # A later 1M proof does not clear it: only the user's map settles it.
+        W.record_learned(config, "claude", self.MODEL, ONE_M, "evidence")
+        self.assertIn("conflict", self.learned()["claude:%s" % self.MODEL])
+        mapped = self.config(windows={self.MODEL: ONE_M})
+        self.assertEqual(effective_window(mapped, {}, usage(90_000), "claude", self.env),
+                         (ONE_M, "map", False))
+        lines = "\n".join(windows_report(config))
+        self.assertIn("CONFLICT", lines)
+        self.assertIn('pin the model in "windows"', lines)
+
+    def test_manual_or_near_the_window_compactions_prove_nothing(self):
+        config = self.config()
+        W.record_learned(config, "claude", self.MODEL, ONE_M, "evidence")
+        transcript = os.path.join(self.dir, "s1.jsonl")
+        _transcript(transcript, 150_000)
+        _boundary(transcript, 150_000, trigger="manual", uuid="b-1")
+        self.hook(config, "PostToolUse", transcript)
+        _transcript(transcript, 160_000)
+        _boundary(transcript, 900_000, uuid="b-2")
+        self.hook(config, "PostToolUse", transcript)
+        self.assertNotIn("conflict", self.learned()["claude:%s" % self.MODEL])
 
 
 # --------------------------------------------------------------------------

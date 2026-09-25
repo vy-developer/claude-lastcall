@@ -27,8 +27,9 @@ What it does, in order, refusing at the first failure:
        claude  its SessionStart hook (injected via --settings) runs
                `relay.py checkin ...` which appends session_id + transcript_path
        codex   app: the runner, once turn/start is accepted; exec: the
-               `thread.started` event on `codex exec --json`; tmux: a new
-               rollout whose cwd is the repo;
+               `thread.started` event on `codex exec --json`; tmux: the
+               plugin's check-in, else the one rollout created after the
+               spawn whose cwd is the repo (never the predecessor's);
        any     with the Last Call plugin installed, the engine's SessionStart
                hook also checks in (successor_session_start) and tells the
                successor which generation it is and which handoff to read;
@@ -40,8 +41,9 @@ What it does, in order, refusing at the first failure:
      "remote control did NOT connect" when it did not;
      codex: names the thread through `codex app-server` (thread/name/set);
   6. optionally retires the predecessor — `claude stop <id>` for a background
-     job, `tmux kill-session` for a tmux pane, a delayed SIGTERM for a plain
-     CLI process — from a detached Python child (no `setsid` binary needed).
+     job, `tmux kill-pane` for the pane the predecessor really runs in (the
+     whole session only when a relay created it), a delayed SIGTERM for a
+     plain CLI process — from a detached Python child (no `setsid` needed).
      A desktop-app session is never killed; the relay says so instead.
 
 Settings: the `relay` block of the layered Last Call config (lastcall_core.
@@ -60,6 +62,7 @@ Exit codes: 0 successor checked in; 1 precondition failure, nothing spawned;
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -83,10 +86,19 @@ GENERATION_ENV = "LASTCALL_RELAY_GENERATION"
 LEDGER_ENV = "LASTCALL_RELAY_LEDGER"
 HANDOFF_ENV = "LASTCALL_RELAY_HANDOFF"
 AGENT_ENV = "LASTCALL_RELAY_AGENT"
+# One per spawn attempt. A check-in only counts when it carries the nonce of
+# the attempt being waited for: chain + generation + agent alone also match a
+# stale successor from an earlier (timed-out, retried) attempt.
+NONCE_ENV = "LASTCALL_RELAY_NONCE"
 LEDGER_DIR_ENV = "LASTCALL_RELAY_DIR"
 
 AGENTS = ("claude", "codex")
 SEP = " · "
+
+# Every wait the relay does (the spawn, the check-in, remote control, naming
+# the thread) comes out of one budget. Claude Code's Bash tool gives a command
+# 2 minutes by default; the default budget fits inside that with room to spare.
+DEFAULT_MAX_WAIT = 105.0
 
 # Session-identity variables a predecessor leaks into anything it spawns. A
 # successor that inherits CLAUDE_CODE_SESSION_ID or the desktop host's
@@ -262,21 +274,28 @@ def new_chain_id(prefix="lastcall"):
 
 
 def next_generation(env, records):
-    """The predecessor's own generation + 1; else one past the ledger's newest."""
+    """One past both the predecessor's own generation and every generation
+    the ledger has already spawned: a retry from the same predecessor must
+    not reuse the generation of a successor that is still out there."""
+    candidates = [1]
     try:
-        return int(env.get(GENERATION_ENV, "")) + 1
+        candidates.append(int(env.get(GENERATION_ENV, "")) + 1)
     except ValueError:
         pass
-    spawned = [r.get("generation") for r in records
-               if r.get("event") == "spawn" and isinstance(r.get("generation"), int)]
-    return max(spawned) + 1 if spawned else 1
+    candidates += [r["generation"] + 1 for r in records
+                   if r.get("event") == "spawn" and isinstance(r.get("generation"), int)]
+    return max(candidates)
 
 
-def checkin_record(payload, chain, generation, agent, handoff, via="hook"):
+def new_nonce():
+    return uuid.uuid4().hex
+
+
+def checkin_record(payload, chain, generation, agent, handoff, via="hook", nonce=None):
     payload = payload if isinstance(payload, dict) else {}
     return {
         "event": "checkin", "via": via, "chain": chain, "generation": generation,
-        "agent": agent, "handoff": handoff,
+        "agent": agent, "handoff": handoff, "nonce": nonce,
         "session_id": payload.get("session_id"),
         "transcript_path": payload.get("transcript_path"),
         "cwd": payload.get("cwd"), "source": payload.get("source"),
@@ -293,9 +312,11 @@ def checkin_from_hook(payload, env=None, agent=None, via="hook"):
     plugin hook both run in a Claude successor, and a resumed successor fires
     SessionStart again, so an existing check-in by the same session is
     returned instead of duplicated. A check-in by a DIFFERENT session for the
-    same generation means this one merely inherited the variables (a verifier
-    `codex exec` run by the successor, say): it is not the successor, so
-    nothing is written and None is returned."""
+    same spawn (same nonce; same generation when there is no nonce) means
+    this one merely inherited the variables (a verifier `codex exec` run by
+    the successor, say): it is not the successor, so nothing is written and
+    None is returned. A stale check-in from another attempt at the same
+    generation carries another nonce and does not get in the way."""
     env = os.environ if env is None else env
     ledger, chain = env.get(LEDGER_ENV), env.get(CHAIN_ENV)
     if not ledger or not valid_chain(chain):
@@ -304,13 +325,15 @@ def checkin_from_hook(payload, env=None, agent=None, via="hook"):
         generation = int(env.get(GENERATION_ENV, ""))
     except ValueError:
         generation = None
+    nonce = env.get(NONCE_ENV) or None
     record = checkin_record(payload, chain, generation, agent or env.get(AGENT_ENV),
-                            env.get(HANDOFF_ENV), via=via)
+                            env.get(HANDOFF_ENV), via=via, nonce=nonce)
     session = record.get("session_id")
     try:
         for old in read_ledger(ledger):
             if (old.get("event") == "checkin" and old.get("chain") == chain
-                    and old.get("generation") == generation and old.get("session_id")):
+                    and old.get("generation") == generation and old.get("session_id")
+                    and (old.get("nonce") or None) == nonce):
                 if old.get("session_id") == session:
                     return old
                 if session:
@@ -368,12 +391,20 @@ def durability(repo, handoff, allow_dirty=False, allow_uncommitted=False, baseli
                         "committed, so that check is SKIPPED" % repo)
         return problems, warnings
     if not allow_uncommitted:
-        status = _git(repo, "status", "--porcelain", "--", handoff)
-        if status.returncode != 0:
-            problems.append("cannot read git status for the handoff — refusing to "
-                            "assume it is committed")
-        elif status.stdout.strip():
-            problems.append("handoff is not committed: %s — commit it first" % handoff)
+        # Tracked AND identical to HEAD. `git status` alone says nothing about
+        # a gitignored file, so a handoff that was never committed passed.
+        tracked = _git(repo, "ls-files", "--error-unmatch", "--", handoff)
+        if tracked.returncode != 0:
+            problems.append("handoff is not committed: %s — commit it first%s" % (
+                handoff, " (it is gitignored)" if _git(
+                    repo, "check-ignore", "-q", "--", handoff).returncode == 0 else ""))
+        else:
+            changed = _git(repo, "diff", "--quiet", "HEAD", "--", handoff)
+            if changed.returncode == 1:
+                problems.append("handoff is not committed: %s — commit it first" % handoff)
+            elif changed.returncode != 0:
+                problems.append("cannot compare the handoff with HEAD — refusing to "
+                                "assume it is committed")
     if not allow_dirty:
         status = _git(repo, "status", "--porcelain", "--ignore-submodules=dirty")
         dirty = [line for line in status.stdout.splitlines()
@@ -482,11 +513,13 @@ def successor_env(base, relay_env):
     return env
 
 
-def checkin_command(python_bin, ledger, chain, generation, agent, handoff):
-    return shlex.join([python_bin, os.path.abspath(__file__), "checkin",
-                       "--ledger", ledger, "--chain", chain,
-                       "--generation", str(generation), "--agent", agent,
-                       "--handoff", handoff])
+def checkin_command(python_bin, ledger, chain, generation, agent, handoff, nonce=None):
+    argv = [python_bin, os.path.abspath(__file__), "checkin",
+            "--ledger", ledger, "--chain", chain,
+            "--generation", str(generation), "--agent", agent, "--handoff", handoff]
+    if nonce:
+        argv += ["--nonce", nonce]
+    return shlex.join(argv)
 
 
 def claude_settings(relay_env, hook_command):
@@ -589,7 +622,8 @@ def codex_app_sandbox(opts):
     return "danger-full-access" if opts.skip_permissions else opts.codex_sandbox
 
 
-def codex_app_runner_argv(opts, repo, prompt, name, ledger, chain, generation, handoff):
+def codex_app_runner_argv(opts, repo, prompt, name, ledger, chain, generation, handoff,
+                          nonce=None):
     """The detached runner that keeps `codex app-server` alive for the turn."""
     argv = [opts.python_bin, os.path.abspath(__file__), "codex-app-runner",
             "--ledger", ledger, "--chain", chain, "--generation", str(generation),
@@ -602,6 +636,8 @@ def codex_app_runner_argv(opts, repo, prompt, name, ledger, chain, generation, h
         argv.append("--auto-approve")
     if not getattr(opts, "name_thread", True):
         argv.append("--no-name")
+    if nonce:
+        argv += ["--nonce", nonce]
     argv += ["--prompt", prompt]
     return argv
 
@@ -675,24 +711,64 @@ def _session_meta(path):
     except (OSError, ValueError):
         return None
     if first.get("type") == "session_meta":
-        return first.get("payload") or {}
+        meta = dict(first.get("payload") or {})
+        if not meta.get("timestamp") and first.get("timestamp"):
+            meta["timestamp"] = first["timestamp"]     # the line was written at creation
+        return meta
     return None
 
 
-def scan_new_rollouts(repo, since, env=None):
-    """Rollouts created after `since` whose session cwd is `repo` (tmux mode)."""
+def _epoch(value):
+    """ISO-8601 (Z or offset, any fraction length) -> epoch seconds, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    match = re.match(r"^(.*?T\d\d:\d\d:\d\d)(\.\d+)?(.*)$", text)
+    if match:
+        text = "%s.%s%s" % (match.group(1), (match.group(2) or ".0")[1:7].ljust(6, "0"),
+                            match.group(3))
+    try:
+        stamp = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.timestamp()
+
+
+def rollout_created(meta):
+    """When the session a rollout belongs to was CREATED (session_meta's
+    timestamp), as epoch seconds; None when the rollout does not say."""
+    return _epoch((meta or {}).get("timestamp"))
+
+
+def scan_new_rollouts(repo, since, env=None, exclude=()):
+    """Interactive rollouts whose session was CREATED at or after `since`
+    and whose cwd is `repo` (tmux mode), oldest first.
+
+    Creation, not mtime: the predecessor's own rollout — and any other thread
+    active in the same repo — is written to all the time, so a fresh mtime
+    proves nothing. A rollout that does not say when it was created cannot
+    be proven new and is skipped. Ids in `exclude` (the predecessor's) are
+    never a successor."""
     root = os.path.join(codex_home(env), "sessions")
+    excluded = set(i for i in exclude if i)
     found = []
     for path in glob.glob(os.path.join(root, "*", "*", "*", "rollout-*.jsonl")):
         try:
             if os.path.getmtime(path) < since - 1:
-                continue
+                continue    # cheap pre-filter: not even written since the spawn
         except OSError:
             continue
         meta = _session_meta(path)
-        if meta and os.path.realpath(meta.get("cwd") or "") == os.path.realpath(repo) \
+        if not meta or (meta.get("id") or meta.get("session_id")) in excluded:
+            continue
+        created = rollout_created(meta)
+        if created is None or created < since - 0.5:
+            continue
+        if os.path.realpath(meta.get("cwd") or "") == os.path.realpath(repo) \
                 and meta.get("source") != "exec" and not isinstance(meta.get("source"), dict):
-            found.append((os.path.getmtime(path), path, meta))
+            found.append((created, path, meta))
     return [(p, m) for _, p, m in sorted(found)]
 
 
@@ -920,7 +996,7 @@ class AppRunner:
 
     def record(self, event, **fields):
         record = {"event": event, "chain": self.a.chain, "generation": self.a.generation,
-                  "agent": "codex", "runner_pid": os.getpid()}
+                  "agent": "codex", "runner_pid": os.getpid(), "nonce": self.a.nonce}
         record.update(fields)
         try:
             return append_record(self.a.ledger, record)
@@ -1027,7 +1103,7 @@ class AppRunner:
              "transcript_path": path or find_codex_rollout(self.thread_id, self.env),
              "cwd": thread.get("cwd") or a.repo, "source": thread.get("source"),
              "model": started.get("model") or a.model},
-            a.chain, a.generation, "codex", a.handoff, via="app-server")
+            a.chain, a.generation, "codex", a.handoff, via="app-server", nonce=a.nonce)
         record.update(pid=os.getpid(), runner_pid=os.getpid(), app_server_pid=client.proc.pid,
                       turn_id=self.turn_id, named=named, name_error=name_error,
                       max_seconds=a.max_seconds)
@@ -1078,6 +1154,7 @@ def codex_app_runner_main(argv, out=None):
     p.add_argument("--ledger", required=True)
     p.add_argument("--chain", required=True)
     p.add_argument("--generation", type=int, required=True)
+    p.add_argument("--nonce")
     p.add_argument("--handoff")
     p.add_argument("--repo", required=True)
     p.add_argument("--name", required=True)
@@ -1121,10 +1198,42 @@ def find_codex_ancestor(start=None, hops=30):
     return None
 
 
-def detect_predecessor(env, agent=None, session_id=None, tmux_bin="tmux"):
-    """Who is handing over. Everything is optional: no TTY, no tmux is fine."""
+def pid_ancestors(pid, hops=40):
+    """`pid` and every ancestor of it, nearest first (stops at init)."""
+    chain = []
+    while pid and pid > 1 and len(chain) < hops and pid not in chain:
+        chain.append(pid)
+        try:
+            pid = int(_ps(pid, "ppid") or 0)
+        except ValueError:
+            break
+    return chain
+
+
+def _relay_made_tmux(env, session):
+    """Whether `session` is a tmux session an earlier relay created for this
+    very successor (its spawn record on the chain's ledger names it)."""
+    ledger = env.get(LEDGER_ENV)
+    if not ledger or not session:
+        return False
+    return any(r.get("event") == "spawn" and r.get("tmux_session") == session
+               and r.get("chain") == env.get(CHAIN_ENV)
+               and str(r.get("generation")) == str(env.get(GENERATION_ENV))
+               for r in read_ledger(ledger))
+
+
+def detect_predecessor(env, agent=None, session_id=None, tmux_bin="tmux",
+                       find_codex=find_codex_ancestor, ancestors=pid_ancestors):
+    """Who is handing over. Everything is optional: no TTY, no tmux is fine.
+
+    TMUX_PANE is only believed when that pane's process is an ancestor of the
+    predecessor's: the variable is inherited by anything started from a tmux
+    shell — a desktop app, an IDE — and retiring "the pane" of a session that
+    does not live in it would close some unrelated part of the user's
+    workspace."""
     pred = {"agent": agent, "session_id": session_id, "pid": None,
-            "entrypoint": None, "kind": None, "tmux_session": None, "bg_short": None}
+            "entrypoint": None, "kind": None, "tmux_session": None, "tmux_pane": None,
+            "tmux_owned": False, "bg_short": None}
     if not pred["agent"]:
         if env.get("CLAUDE_CODE_SESSION_ID") or env.get("CLAUDECODE"):
             pred["agent"] = "claude"
@@ -1160,16 +1269,31 @@ def detect_predecessor(env, agent=None, session_id=None, tmux_bin="tmux"):
                 pass
     elif pred["agent"] == "codex":
         pred["session_id"] = pred["session_id"] or env.get("CODEX_THREAD_ID")
-    if env.get("TMUX_PANE") and shutil.which(tmux_bin):
-        name = subprocess.run([tmux_bin, "display-message", "-p", "-t", env["TMUX_PANE"], "#S"],
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              universal_newlines=True).stdout.strip()
-        pred["tmux_session"] = name or None
+        pred["pid"] = find_codex()     # None under the desktop app / app-server
+    pane = env.get("TMUX_PANE")
+    if pane and pred["pid"] and shutil.which(tmux_bin):
+        shown = subprocess.run([tmux_bin, "display-message", "-p", "-t", pane,
+                                "#{pane_pid}\t#S"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               universal_newlines=True).stdout.strip()
+        pane_pid, _tab, name = shown.partition("\t")
+        try:
+            pane_pid = int(pane_pid)
+        except ValueError:
+            pane_pid = None
+        if pane_pid and name and pane_pid in ancestors(pred["pid"]):
+            pred["tmux_pane"], pred["tmux_session"] = pane, name
+            pred["tmux_owned"] = _relay_made_tmux(env, name)
     return pred
 
 
 def plan_retirement(pred, claude_bin="claude", tmux_bin="tmux", find_codex=find_codex_ancestor):
-    """How to retire the predecessor: {"method", "why", "argv"|"pid"}."""
+    """How to retire the predecessor: {"method", "why", "argv"|"pid"}.
+
+    What the app owns is ruled out first, for both agents: a Claude desktop /
+    IDE session, a Codex thread with no `codex` CLI process above it (the
+    desktop app or app-server). Only then tmux — the predecessor's own pane,
+    or the whole session when an earlier relay created it — and signals."""
     if pred.get("bg_short"):
         return {"method": "claude-stop", "argv": [claude_bin, "stop", pred["bg_short"]],
                 "why": "background Claude session %s" % pred["bg_short"]}
@@ -1178,19 +1302,25 @@ def plan_retirement(pred, claude_bin="claude", tmux_bin="tmux", find_codex=find_
         return {"method": "none",
                 "why": "predecessor is a %s session — the app owns that process, so the "
                        "relay will not kill it; close or archive it in the app" % entry}
-    if pred.get("tmux_session"):
+    codex_pid = None
+    if pred.get("agent") == "codex":
+        codex_pid = pred.get("pid") or find_codex()
+        if not codex_pid:
+            return {"method": "none", "why": "no codex CLI process found above this one "
+                    "(desktop app or app-server) — close the predecessor thread yourself"}
+    if pred.get("tmux_session") and pred.get("tmux_owned"):
         return {"method": "tmux", "argv": [tmux_bin, "kill-session", "-t",
                                            "=" + pred["tmux_session"]],
-                "why": "tmux session %s" % pred["tmux_session"]}
+                "why": "tmux session %s (created by the relay)" % pred["tmux_session"]}
+    if pred.get("tmux_pane"):
+        return {"method": "tmux", "argv": [tmux_bin, "kill-pane", "-t", pred["tmux_pane"]],
+                "why": "tmux pane %s in session %s" % (pred["tmux_pane"],
+                                                        pred.get("tmux_session") or "?")}
     if pred.get("agent") == "claude" and pred.get("pid") and pred.get("kind") == "interactive":
         return {"method": "signal", "pid": pred["pid"],
                 "why": "Claude CLI process %d" % pred["pid"]}
-    if pred.get("agent") == "codex":
-        pid = find_codex()
-        if pid:
-            return {"method": "signal", "pid": pid, "why": "codex CLI process %d" % pid}
-        return {"method": "none", "why": "no codex CLI process found above this one "
-                "(desktop app or app-server) — close the predecessor thread yourself"}
+    if codex_pid:
+        return {"method": "signal", "pid": codex_pid, "why": "codex CLI process %d" % codex_pid}
     return {"method": "none", "why": "no predecessor to retire could be identified"}
 
 
@@ -1346,8 +1476,10 @@ class Relay:
                              config.get("kill_predecessor", False)))
         o.kill_delay = float(pick(o.kill_delay, "kill_delay", 5.0))
         o.require_git = bool(o.require_git or config.get("require_git"))
-        for label, value in (("--timeout", o.timeout), ("--kill-delay", o.kill_delay)):
-            if not 0 <= value <= 86400 or (label == "--timeout" and value <= 0):
+        o.max_wait = float(pick(o.max_wait, "max_wait_seconds", DEFAULT_MAX_WAIT))
+        for label, value in (("--timeout", o.timeout), ("--kill-delay", o.kill_delay),
+                             ("--max-wait", o.max_wait)):
+            if not 0 <= value <= 86400 or (label in ("--timeout", "--max-wait") and value <= 0):
                 raise ValueError("%s must be between 0 and 86400 seconds, got %g"
                                  % (label, value))
         o.codex_sandbox = pick(o.codex_sandbox, "codex_sandbox", "workspace-write")
@@ -1406,15 +1538,18 @@ class Relay:
         retirement = plan_retirement(pred, o.claude_bin, o.tmux_bin) if o.retire \
             else {"method": "none", "why": "not requested (pass --retire-predecessor)"}
         prompt = build_prompt(handoff, o.retire and retirement["method"] != "none")
+        nonce = new_nonce()
         relay_env = {CHAIN_ENV: chain, GENERATION_ENV: str(generation), LEDGER_ENV: ledger,
-                     HANDOFF_ENV: handoff, AGENT_ENV: o.agent}
+                     HANDOFF_ENV: handoff, AGENT_ENV: o.agent, NONCE_ENV: nonce}
         have_git = is_git_repo(repo)
         plan = {"repo": repo, "config": config_path, "handoff": handoff, "chain": chain,
                 "ledger": ledger, "generation": generation, "name": name, "agent": o.agent,
                 "relay_env": relay_env, "predecessor": pred, "retirement": retirement,
-                "prompt": prompt, "session_id": None, "log": None, "tmux_session": None}
+                "prompt": prompt, "session_id": None, "log": None, "tmux_session": None,
+                "nonce": nonce}
         if o.agent == "claude":
-            hook = checkin_command(o.python_bin, ledger, chain, generation, "claude", handoff)
+            hook = checkin_command(o.python_bin, ledger, chain, generation, "claude", handoff,
+                                   nonce)
             plan.update(hook=hook, bg_short=None, transcript=None,
                         argv=claude_argv(o, name, prompt, claude_settings(relay_env, hook)))
         elif o.codex_mode == "tmux":
@@ -1423,15 +1558,19 @@ class Relay:
                         argv=tmux_argv(o.tmux_bin, session, repo,
                                        codex_argv(o, repo, prompt, have_git), relay_env))
         else:
+            # One log per spawn attempt (the nonce), written from scratch: an
+            # appended log from an earlier attempt would hand over ITS thread.
             logs = os.path.join(os.path.dirname(ledger), "%s-%d" % (chain, generation))
             exec_argv = codex_argv(o, repo, prompt, have_git, mode="exec")
             if o.codex_mode == "app":
+                fallback_nonce = new_nonce()
                 plan.update(argv=codex_app_runner_argv(o, repo, prompt, name, ledger, chain,
-                                                       generation, handoff),
-                            log=logs + "-app.log", fallback_argv=exec_argv,
-                            fallback_log=logs + ".log")
+                                                       generation, handoff, nonce),
+                            log="%s-%s-app.log" % (logs, nonce[:8]), fallback_argv=exec_argv,
+                            fallback_log="%s-%s.log" % (logs, fallback_nonce[:8]),
+                            fallback_nonce=fallback_nonce)
             else:
-                plan.update(argv=exec_argv, log=logs + ".log")
+                plan.update(argv=exec_argv, log="%s-%s.log" % (logs, nonce[:8]))
         self.plan = plan
         return None
 
@@ -1468,8 +1607,9 @@ class Relay:
                      "Codex app and the default `codex resume` list)")
         else:
             self.say("  tmux:        %s" % p["tmux_session"])
-            self.say("  check-in:    new rollout under %s whose cwd is the repo"
-                     % os.path.join(codex_home(self.env), "sessions"))
+            self.say("  check-in:    the plugin's SessionStart hook; without it, the one "
+                     "rollout under %s CREATED after the spawn whose cwd is the repo "
+                     "(never the predecessor's)" % os.path.join(codex_home(self.env), "sessions"))
         self.say("  permissions: %s" % ("SKIPPED (unattended)" if o.skip_permissions
                                         else (o.permission_mode or "normal")
                                         if p["agent"] == "claude" else
@@ -1495,10 +1635,31 @@ class Relay:
 
     # -- spawn & prove --------------------------------------------------------
 
+    def worst_case(self):
+        """The longest this run can take, in seconds: every wait it may do,
+        capped by the --max-wait budget."""
+        o = self.o
+        if o.agent == "claude":
+            total = o.spawn_timeout + o.timeout + (o.rc_timeout if o.remote_control else 0)
+        else:
+            total = o.timeout * (2 if o.codex_mode == "app" else 1) + 20
+        return min(total, o.max_wait)
+
+    def left(self, cap):
+        """What remains of the budget, at most ``cap`` seconds."""
+        deadline = getattr(self, "deadline", None)
+        if deadline is None:
+            return cap
+        return max(0.0, min(cap, deadline - time.time()))
+
     def run(self):
         code = self.build()
         if code is not None:
             return code
+        self.say("this can take up to %ds — run it with a tool timeout above that (Claude "
+                 "Code's Bash tool defaults to 120s) or in the background; --max-wait "
+                 "(relay.max_wait_seconds) sets the budget" % int(self.worst_case() + 0.999))
+        self.deadline = time.time() + self.o.max_wait
         self.describe()
         if self.o.dry_run:
             self.say("dry run — nothing spawned")
@@ -1514,6 +1675,7 @@ class Relay:
     def _spawn_record(self, **extra):
         p = self.plan
         record = {"event": "spawn", "chain": p["chain"], "generation": p["generation"],
+                  "nonce": p["nonce"],
                   "agent": p["agent"], "name": p["name"], "handoff": p["handoff"],
                   "repo": p["repo"], "session_id": p["session_id"],
                   "predecessor": p["predecessor"].get("session_id")}
@@ -1521,13 +1683,14 @@ class Relay:
         append_record(p["ledger"], record)
 
     def _wait(self, match, extra=None):
-        """First ledger check-in satisfying `match`, else what `extra` finds."""
+        """First ledger check-in of THIS spawn (its nonce) satisfying `match`,
+        else what `extra` finds."""
         p = self.plan
-        deadline = time.time() + self.o.timeout
+        deadline = time.time() + self.left(self.o.timeout)
         while True:
             for record in read_ledger(p["ledger"]):
                 if record.get("event") == "checkin" and record.get("chain") == p["chain"] \
-                        and match(record):
+                        and record.get("nonce") == p["nonce"] and match(record):
                     return record
             if extra:
                 found = extra()
@@ -1545,12 +1708,13 @@ class Relay:
         # `claude --bg` has even returned. --bg picks the session id itself, so
         # the check-in is matched by chain + generation, and the id comes from it.
         self._spawn_record()
+        spawn_timeout = max(1.0, self.left(o.spawn_timeout))
         try:
             spawned = subprocess.run(p["argv"], cwd=p["repo"], env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     universal_newlines=True, timeout=o.spawn_timeout)
+                                     universal_newlines=True, timeout=spawn_timeout)
         except subprocess.TimeoutExpired:
-            return self.fail(EXIT_UNPROVEN, "`claude --bg` did not return in %ds" % o.spawn_timeout)
+            return self.fail(EXIT_UNPROVEN, "`claude --bg` did not return in %ds" % spawn_timeout)
         output = spawned.stdout.strip()
         if spawned.returncode != 0:
             append_record(p["ledger"], {"event": "spawn-failed", "chain": p["chain"],
@@ -1600,7 +1764,8 @@ class Relay:
                 return None
             return append_record(p["ledger"], dict(checkin_record(
                 {"session_id": sid, "transcript_path": transcript, "cwd": p["repo"]},
-                p["chain"], generation, "claude", p["handoff"], via="transcript")))
+                p["chain"], generation, "claude", p["handoff"], via="transcript",
+                nonce=p["nonce"])))
 
         record = self._wait(lambda r: r.get("agent") == "claude"
                             and r.get("generation") == generation, transcript_fallback)
@@ -1608,7 +1773,8 @@ class Relay:
             if short:
                 self.say("attach:  %s attach %s" % (o.claude_bin, short))
                 self.say("logs:    %s logs %s" % (o.claude_bin, short))
-            return self.fail(EXIT_UNPROVEN, "successor never checked in within %ds" % o.timeout)
+            return self.fail(EXIT_UNPROVEN, "successor never checked in within %ds"
+                             % min(o.timeout, o.max_wait))
         sid = record.get("session_id")
         if record.get("via") == "transcript":
             self.say("WARNING: no hook check-in — proved by the transcript existing instead")
@@ -1621,7 +1787,8 @@ class Relay:
         rc_ok = True
         if o.remote_control:
             evidence = None
-            deadline = time.time() + o.rc_timeout
+            rc_wait = self.left(o.rc_timeout)
+            deadline = time.time() + rc_wait
             while True:
                 evidence = remote_control_evidence(sid, transcript, self.env, short=short)
                 if evidence or time.time() >= deadline:
@@ -1632,7 +1799,7 @@ class Relay:
             else:
                 rc_ok = False
                 self.say("remote control did NOT connect — no bridgeSessionId for %s after %ds"
-                         % (sid, o.rc_timeout))
+                         % (sid, rc_wait))
         append_record(p["ledger"], {"event": "verified", "chain": p["chain"],
                                     "generation": generation, "session_id": sid,
                                     "bg_id": short,
@@ -1647,7 +1814,8 @@ class Relay:
     def _mine(self, record, event):
         p = self.plan
         return (record.get("event") == event and record.get("chain") == p["chain"]
-                and record.get("generation") == p["generation"])
+                and record.get("generation") == p["generation"]
+                and record.get("nonce") == p["nonce"])
 
     def _codex_app(self, env):
         """The checked-in record; "fallback" when app mode failed before the
@@ -1656,7 +1824,7 @@ class Relay:
         os.makedirs(os.path.dirname(p["log"]), exist_ok=True)
         self._spawn_record(log=p["log"], mode="app")
         try:
-            with open(p["log"], "ab") as log:
+            with open(p["log"], "wb") as log:
                 proc = subprocess.Popen(p["argv"], cwd=p["repo"], env=env,
                                         stdin=subprocess.DEVNULL, stdout=log,
                                         stderr=subprocess.STDOUT, start_new_session=True)
@@ -1717,7 +1885,7 @@ class Relay:
         p = self.plan
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         self._spawn_record(log=log_path, mode="exec")
-        with open(log_path, "ab") as log:
+        with open(log_path, "wb") as log:
             proc = subprocess.Popen(argv, cwd=p["repo"], env=env,
                                     stdin=subprocess.DEVNULL, stdout=log,
                                     stderr=subprocess.STDOUT, start_new_session=True)
@@ -1729,7 +1897,8 @@ class Relay:
                 return append_record(p["ledger"], checkin_record(
                     {"session_id": thread, "cwd": p["repo"],
                      "transcript_path": find_codex_rollout(thread, self.env)},
-                    p["chain"], p["generation"], "codex", p["handoff"], via="exec-json"))
+                    p["chain"], p["generation"], "codex", p["handoff"], via="exec-json",
+                    nonce=p["nonce"]))
             if proc.poll() is not None:
                 return {"died": proc.returncode}
             return None
@@ -1754,13 +1923,34 @@ class Relay:
             return self.fail(EXIT_PRECONDITION, "tmux could not start %s: %s"
                              % (p["tmux_session"], spawned.stdout.strip()))
         self.say("spawned: tmux session %s" % p["tmux_session"])
+        predecessor = p["predecessor"].get("session_id")
+        seen = {}
 
         def check():
-            for path, meta in scan_new_rollouts(p["repo"], started, self.env):
-                return append_record(p["ledger"], checkin_record(
-                    {"session_id": meta.get("id") or meta.get("session_id"),
-                     "transcript_path": path, "cwd": meta.get("cwd")},
-                    p["chain"], p["generation"], "codex", p["handoff"], via="rollout-scan"))
+            # The plugin's SessionStart check-in (matched by _wait before this
+            # runs) is the proof we want. A scanned rollout is only a stand-in
+            # when that hook is not installed: it must be unambiguous, not the
+            # predecessor's, and survive a grace period in which the hook
+            # could still check in.
+            found = scan_new_rollouts(p["repo"], started, self.env, exclude=(predecessor,))
+            if len(found) > 1:
+                seen.pop("at", None)
+                seen.pop("path", None)
+                if not seen.get("warned"):
+                    seen["warned"] = True
+                    self.say("WARNING: %d new Codex threads in %s since the spawn — waiting for "
+                             "the successor's own check-in instead of guessing" % (
+                                 len(found), p["repo"]))
+            elif found:
+                path, meta = found[0]
+                if seen.get("path") != path:
+                    seen.update(path=path, at=time.time())
+                elif time.time() - seen["at"] >= o.hook_grace:
+                    return append_record(p["ledger"], checkin_record(
+                        {"session_id": meta.get("id") or meta.get("session_id"),
+                         "transcript_path": path, "cwd": meta.get("cwd")},
+                        p["chain"], p["generation"], "codex", p["handoff"], via="rollout-scan",
+                        nonce=p["nonce"]))
             dead = subprocess.run([o.tmux_bin, "display-message", "-p", "-t",
                                    "=%s:0.0" % p["tmux_session"], "#{pane_dead}"],
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -1784,7 +1974,12 @@ class Relay:
         if mode == "app":
             record = self._codex_app(env)
             if record == "fallback":
+                # A new spawn, so a new nonce: a late check-in from the failed
+                # app attempt must not pass for the exec successor.
                 mode = "exec"
+                p["nonce"] = p["fallback_nonce"]
+                p["relay_env"][NONCE_ENV] = p["nonce"]
+                env = successor_env(self.env, p["relay_env"])
                 record = self._codex_exec(env, p["fallback_argv"], p["fallback_log"])
         elif mode == "exec":
             record = self._codex_exec(env, p["argv"], p["log"])
@@ -1803,7 +1998,12 @@ class Relay:
                      "keeps `codex app-server` up until the turn completes (max %gs)"
                      % (record.get("source"), record.get("runner_pid"), o.codex_app_max))
         elif thread and o.name_thread:
-            ok, detail = codex_set_thread_name(o.codex_bin, thread, p["name"], env)
+            budget = self.left(20.0)
+            if budget >= 1:
+                ok, detail = codex_set_thread_name(o.codex_bin, thread, p["name"], env,
+                                                   timeout=budget)
+            else:
+                ok, detail = False, "the --max-wait budget is spent"
             self.say("thread name: %s — %s" % ("set" if ok else "NOT set", detail))
         append_record(p["ledger"], {"event": "verified", "chain": p["chain"],
                                     "generation": p["generation"], "session_id": thread,
@@ -1904,11 +2104,15 @@ def parser(prog="relay.py"):
     p.add_argument("--dirty-baseline", help="comma-separated paths that may be dirty")
     p.add_argument("--chain", help="relay chain id (default: inherited, else new)")
     p.add_argument("--ledger-dir", help="default ~/.lastcall/relay")
-    p.add_argument("--timeout", type=float, default=180.0, help="check-in timeout (s)")
-    p.add_argument("--rc-timeout", type=float, default=45.0, help="remote-control wait (s)")
+    p.add_argument("--timeout", type=float, default=60.0, help="check-in timeout (s)")
+    p.add_argument("--rc-timeout", type=float, default=20.0, help="remote-control wait (s)")
     p.add_argument("--hook-grace", type=float, default=20.0,
                    help="claude: how long a transcript may exist without a hook check-in")
-    p.add_argument("--spawn-timeout", type=float, default=60.0)
+    p.add_argument("--spawn-timeout", type=float, default=25.0)
+    p.add_argument("--max-wait", type=float,
+                   help="total seconds for every wait together — spawn, check-in, remote "
+                        "control (default %g, config relay.max_wait_seconds): under Claude "
+                        "Code's 2-minute Bash tool timeout" % DEFAULT_MAX_WAIT)
     p.add_argument("--poll", type=float, default=1.0, help=argparse.SUPPRESS)
     p.add_argument("--dry-run", action="store_true", help="print the plan, spawn nothing")
     p.add_argument("--claude-bin", default=os.environ.get("CLAUDE_BIN", "claude"))
@@ -1922,7 +2126,7 @@ def checkin_main(argv, stdin=None):
     """`relay.py checkin ...` — the successor's SessionStart hook. Always exit 0
     and print nothing: SessionStart stdout would land in the model's context."""
     p = argparse.ArgumentParser(prog="relay.py checkin")
-    for flag in ("--ledger", "--chain", "--agent", "--handoff", "--generation"):
+    for flag in ("--ledger", "--chain", "--agent", "--handoff", "--generation", "--nonce"):
         p.add_argument(flag)
     try:
         args, _ = p.parse_known_args(argv)
@@ -1933,7 +2137,7 @@ def checkin_main(argv, stdin=None):
         env = dict(os.environ)
         for key, value in ((LEDGER_ENV, args.ledger), (CHAIN_ENV, args.chain),
                            (AGENT_ENV, args.agent), (HANDOFF_ENV, args.handoff),
-                           (GENERATION_ENV, args.generation)):
+                           (GENERATION_ENV, args.generation), (NONCE_ENV, args.nonce)):
             if value is not None:
                 env[key] = value
         checkin_from_hook(payload, env)

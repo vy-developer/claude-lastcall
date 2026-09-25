@@ -24,11 +24,17 @@ ONBOARDED_FILE = "onboarded.json"
 LEARNED_FILE = "windows.json"
 DEBUG_FILE = "last-payload.json"
 
-# Keys that mark a JSON file as one this tool wrote. Pruning deletes only
-# those: state_dir is user-settable, and pointing it at ~/.claude used to mean
-# settings.json was removed after the TTL. Extension is not ownership.
-_STATE_KEYS = frozenset(("band", "peak", "max_observed", "epoch", "updated",
-                         "window_from_statusline", "sig", "record_id"))
+# What marks a JSON file as one this tool wrote. Pruning deletes only those:
+# state_dir is user-settable, and pointing it at ~/.claude used to mean
+# settings.json was removed after the TTL. Extension is not ownership, and
+# neither is a generic key such as "updated": every state file carries this
+# marker. A file from before the marker counts only with the "agent" key the
+# hooks have always written plus one of these.
+OWNER_KEY = "_lastcall"
+_LEGACY_KEYS = frozenset(("sig", "band", "epoch"))
+# The pre-2.0 directory (~/.claude/lastcall) is Last Call's own; its files
+# predate "agent" too.
+_PRE_2_KEYS = frozenset(("band", "peak", "epoch", "max_observed"))
 
 
 def _safe(session_id):
@@ -116,10 +122,123 @@ class SessionState(dict):
                 current.pop(key, None)
         current["updated"] = int(time.time())
         current["agent"] = self.agent
+        current[OWNER_KEY] = 1
         ok = _write(self.path, current)
         if ok:
             self._dirty = set()
         return ok
+
+
+# How long a hook waits for another hook of the same session to finish judging
+# a reading. Judging takes milliseconds; a holder this slow is stuck, and the
+# waiter stays silent rather than risk saying the same thing twice.
+LOCK_TIMEOUT = 2.0
+
+
+class SessionLock(object):
+    """An exclusive lock on one session's state, around decide -> emit -> save.
+
+    Parallel tool calls fire PostToolUse hooks at the same moment; each read
+    the same "not announced yet" state and each emitted the same warning.
+    Under this lock the second one re-reads the state the first one saved and
+    stays silent.
+
+    flock (POSIX) or msvcrt.locking (Windows) on a sidecar file — the state
+    file itself is swapped by os.replace, so it cannot carry a lock. Where
+    neither exists, an O_CREAT|O_EXCL marker. ``acquired`` is True when held,
+    False when another holder kept it past ``timeout`` (the caller should stay
+    silent), and None when no lock could be made at all (an unwritable state
+    dir: the caller carries on unlocked, as it would have before).
+    """
+
+    def __init__(self, path, timeout=LOCK_TIMEOUT):
+        self.path = path
+        self.timeout = timeout
+        self.handle = None
+        self.marker = False
+        self.acquired = None
+
+    def __enter__(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        except OSError:
+            return self
+        deadline = time.monotonic() + self.timeout
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
+        msvcrt = None
+        if fcntl is None:
+            try:
+                import msvcrt
+            except ImportError:
+                msvcrt = None
+        if fcntl is None and msvcrt is None:
+            return self._marker(deadline)
+        try:
+            self.handle = open(self.path, "a+")
+        except OSError:
+            return self
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                self.acquired = True
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    self.acquired = False
+                    return self
+                time.sleep(0.002)
+
+    def _marker(self, deadline):
+        marker = self.path + ".held"
+        while True:
+            try:
+                os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                self.marker, self.acquired = True, True
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(marker) > 10 * self.timeout:
+                        os.remove(marker)       # left behind by a killed hook
+                        continue
+                except OSError:
+                    pass
+                if time.monotonic() >= deadline:
+                    self.acquired = False
+                    return self
+                time.sleep(0.002)
+            except OSError:
+                return self
+
+    def __exit__(self, *exc):
+        if self.marker:
+            try:
+                os.remove(self.path + ".held")
+            except OSError:
+                pass
+        if self.handle is not None:
+            try:
+                if self.acquired and os.name == "nt":
+                    import msvcrt
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except (ImportError, OSError):
+                pass
+            try:
+                self.handle.close()  # closing releases a flock
+            except OSError:
+                pass
+        return False
+
+
+def session_lock(config, session_id, agent="claude"):
+    return SessionLock(state_path(config, session_id, agent) + ".lock")
 
 
 def read_state(config, session_id, agent="claude"):
@@ -149,29 +268,41 @@ def prune_state(config):
     if ttl_days <= 0:
         return
     cutoff = time.time() - (ttl_days * 86400)
-    directories = [state_dir(config)]
+    directories = [(state_dir(config), False)]
     if not config.get("state_dir"):
-        directories.append(legacy_state_dir())
-    for directory in directories:
+        directories.append((legacy_state_dir(), True))
+    for directory, pre_2 in directories:
         try:
             names = os.listdir(directory)
         except OSError:
             continue
         for name in names:
+            if name.endswith(".json.lock"):
+                _prune_lock(os.path.join(directory, name), cutoff)
+                continue
             if not name.endswith(".json") or name in (ONBOARDED_FILE, LEARNED_FILE):
                 continue
             target = os.path.join(directory, name)
             try:
                 if os.path.getmtime(target) >= cutoff:
                     continue
-                if not _is_our_state(target):
+                if not _is_our_state(target, pre_2):
                     continue
                 os.remove(target)
             except OSError:
                 pass
 
 
-def _is_our_state(path):
+def _prune_lock(path, cutoff):
+    """A session's lock sidecar: always empty, and as dead as its session."""
+    try:
+        if os.path.getmtime(path) < cutoff and os.path.getsize(path) == 0:
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _is_our_state(path, pre_2=False):
     """True only for a file this tool created."""
     if os.path.basename(path) == DEBUG_FILE:
         return True
@@ -180,7 +311,13 @@ def _is_our_state(path):
             data = json.load(handle)
     except (OSError, ValueError):
         return False
-    return isinstance(data, dict) and bool(_STATE_KEYS & set(data))
+    if not isinstance(data, dict):
+        return False
+    if data.get(OWNER_KEY) == 1:
+        return True
+    if data.get("agent") in ("claude", "codex") and _LEGACY_KEYS & set(data):
+        return True
+    return bool(pre_2 and "updated" in data and _PRE_2_KEYS & set(data))
 
 
 # --------------------------------------------------------------------------

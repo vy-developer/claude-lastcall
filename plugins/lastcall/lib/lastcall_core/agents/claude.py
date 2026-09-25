@@ -147,12 +147,15 @@ def _scan(transcript, session_id=None, limit=TAIL_LIMIT_BYTES):
       boundary   a compact boundary newer than latest, if any
       compacted  whether a compaction separates latest from the previous
                  API response
+      compaction the compact boundary behind ``compacted`` (``boundary``,
+                 or the one between latest and the previous response)
     """
     latest = None
     latest_id = None
     texts = []
     boundary = None
     compacted = False
+    between = None
     for raw in iter_lines_reverse(transcript, limit=limit):
         # Cheap pre-filter: almost every line is a tool result or a user turn,
         # and parsing them all is where the time would go.
@@ -178,6 +181,7 @@ def _scan(transcript, session_id=None, limit=TAIL_LIMIT_BYTES):
                     boundary = entry
                 continue
             compacted = True
+            between = entry
             break
         if entry.get("type") != "assistant":
             continue
@@ -199,7 +203,28 @@ def _scan(transcript, session_id=None, limit=TAIL_LIMIT_BYTES):
         break  # the previous response, with no compaction in between
     text = "\n".join(t for t in reversed(texts) if t)
     return {"latest": latest, "text": text, "boundary": boundary,
-            "compacted": compacted}
+            "compacted": compacted, "compaction": boundary or between}
+
+
+def compaction_identity(boundary):
+    """What names one compact boundary: its uuid, else its timestamp."""
+    if not isinstance(boundary, dict):
+        return None
+    for key in ("uuid", "timestamp"):
+        if isinstance(boundary.get(key), str) and boundary[key]:
+            return "%s:%s" % (key, boundary[key])
+    return None
+
+
+def compaction_pre_tokens(boundary):
+    """preTokens of an AUTOMATIC compaction, else None (see Usage)."""
+    if not isinstance(boundary, dict):
+        return None
+    meta = boundary.get("compactMetadata")
+    if not isinstance(meta, dict) or meta.get("trigger") != "auto":
+        return None
+    pre = as_int(meta.get("preTokens"))
+    return pre if pre and pre > 0 else None
 
 
 def _is_fresh(found, last_assistant_message, previous_record_id):
@@ -332,6 +357,8 @@ class ClaudeAgent(Agent):
             stale=stale,
             record_id=_message_id(entry) if entry else None,
             fresh=fresh,
+            compaction_id=compaction_identity(found.get("compaction")),
+            compaction_pre_tokens=compaction_pre_tokens(found.get("compaction")),
         )
 
     def format_output(self, event, message=None, block_reason=None,

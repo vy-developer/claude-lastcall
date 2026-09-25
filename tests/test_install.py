@@ -549,6 +549,22 @@ class TestHooksMethod(Sandbox):
                                  'python3 "%s" %s' % (HOOK_SCRIPT, event))
             self.assertEqual(hooks["PostToolUse"][0]["matcher"], "*")
 
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "POSIX symlinks")
+    def test_a_symlinked_settings_file_is_written_through_not_replaced(self):
+        """Review finding: os.replace swapped a symlinked settings.json (a
+        dotfiles repo) for a regular file."""
+        real = os.path.join(self.tmp, "dotfiles", "claude-settings.json")
+        dump(real, {"permissions": {"allow": ["Bash"]}})
+        os.makedirs(os.path.dirname(self.claude_settings), exist_ok=True)
+        os.symlink(real, self.claude_settings)
+        code, out = self.install()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(os.path.islink(self.claude_settings))
+        written = load(real)
+        self.assertEqual(written["permissions"], {"allow": ["Bash"]})
+        self.assertIn("Stop", written["hooks"])
+        self.assertTrue(os.path.isfile(real + cli.BACKUP_SUFFIX))
+
     def test_merges_into_existing_files_without_losing_anything(self):
         foreign = {"type": "command", "command": "/opt/tools/my-lastcall.py-wrapper --verbose"}
         dump(self.claude_settings, {"permissions": {"allow": ["Bash"]},
@@ -793,6 +809,31 @@ class TestSubcommands(Sandbox):
         self.assertEqual(code, 0, out)
         self.assertIn("CONTEXT", out)
         self.assertIn("51k", out, "the usage provider was not registered")
+
+    def test_status_notes_a_model_whose_learned_window_is_conflicted(self):
+        sid = "11111111-2222-3333-4444-666666666666"
+        dump(os.path.join(self.claude_home, "sessions", "%d.json" % os.getpid()),
+             {"pid": os.getpid(), "sessionId": sid, "cwd": self.tmp, "status": "idle",
+              "entrypoint": "cli"})
+        transcript = os.path.join(self.claude_home, "projects", "-synthetic", sid + ".jsonl")
+        os.makedirs(os.path.dirname(transcript))
+        with open(transcript, "w") as fh:
+            fh.write(json.dumps({
+                "type": "assistant", "isSidechain": False, "sessionId": sid,
+                "timestamp": "2026-09-25T10:00:00.000Z",
+                "message": {"id": "msg_1", "model": "claude-synthetic",
+                            "usage": {"input_tokens": 1000, "cache_read_input_tokens": 50000,
+                                      "cache_creation_input_tokens": 0, "output_tokens": 10}},
+            }) + "\n")
+        dump(os.path.join(self.lastcall_home, "state", "windows.json"), {"version": 1, "models": {
+            "claude:claude-synthetic": {"agent": "claude", "model": "claude-synthetic",
+                                        "window": 1000000, "source": "evidence", "at": 1,
+                                        "conflict": {"pre_tokens": 160000, "window": 1000000,
+                                                     "at": 2}}}})
+        code, out = self.run_cli("status", "--agent", "claude")
+        self.assertEqual(code, 0, out)
+        self.assertIn("claude-synthetic ran with more than one context window", out)
+        self.assertIn('Pin it in "windows"', out)
 
     def test_register_usage_providers_covers_both_agents(self):
         from lastcall_core import sessions

@@ -20,6 +20,14 @@ that gap without guessing:
                              Keyed "agent:model", latest proof wins, with the
                              source and time of that proof kept for doctor.
 
+A learned window is a fact about ANOTHER session. The same Claude model id
+runs with 200K or 1M, so a learned 1M does not silence the guard: it is
+treated as assumed (advisory, never blocks) until this session's own tokens
+prove it. And when a session on that model auto-compacts well below the
+learned window, that proves the model also runs smaller: the entry is marked
+conflicted and ignored, and the session falls back to the assumed 200K until
+the user pins the model in `windows` (doctor and status say so).
+
 Both are advisory data about a MODEL, not about a session, so both rank below
 anything that describes the session itself (explicit config, the status line
 cache) — see zones.resolve_window for the full order.
@@ -43,6 +51,16 @@ _ONE_M_MARKER = re.compile(r"\[1m\]", re.I)
 # the write goes ahead unlocked (still atomic) and at worst one concurrent
 # learning is lost and re-learned by that session's next hook.
 LOCK_TIMEOUT = 1.0
+
+# Claude auto-compacts close to the end of its window. An auto-compaction
+# below this share of a learned window proves a smaller window for the model.
+CONFLICT_RATIO = 0.6
+
+LEARNED_WINDOW_NOTE = """\
+(The {window:,}-token window here was LEARNED from another session on this
+model, not reported by this one, so this warning is advisory and never
+blocks. If this session runs the smaller window, compaction may come first:
+pinning the model in "windows" in ~/.lastcall/config.json makes it exact.)"""
 
 
 # --------------------------------------------------------------------------
@@ -181,16 +199,29 @@ def load_learned(config):
 
 
 def learned_window(learned, agent, model):
-    """(window, entry) learned for ``model`` under ``agent``, or (None, None)."""
+    """(window, entry) learned for ``model`` under ``agent``, or (None, None)
+    — also when the entry is conflicted: the model has been seen with more
+    than one window, so what one session learned says nothing about the
+    next."""
     if not learned or not isinstance(model, str) or not model.strip():
         return None, None
     entry = learned.get(learned_key(agent, model))
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or entry.get("conflict"):
         return None, None
     window = entry.get("window")
     if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
         return None, None
     return window, entry
+
+
+def learned_conflict(learned, agent, model):
+    """The conflict recorded for ``model`` ({"pre_tokens", "window", "at"}),
+    or None."""
+    if not learned or not isinstance(model, str) or not model.strip():
+        return None
+    entry = learned.get(learned_key(agent, model))
+    conflict = entry.get("conflict") if isinstance(entry, dict) else None
+    return conflict if isinstance(conflict, dict) else None
 
 
 class _Lock(object):
@@ -244,20 +275,35 @@ def record_learned(config, agent, model, window, source, now=None):
         return False
     if window <= 0:
         return False
-    path = learned_path(config)
     now = int(now if now is not None else time.time())
+
+    def change(entry):
+        seen = entry.get("seen") if isinstance(entry.get("seen"), dict) else {}
+        seen[str(window)] = now
+        new = {"agent": (agent or "claude").lower(), "model": model.strip(),
+               "window": window, "source": source, "at": now, "seen": seen}
+        if entry.get("conflict"):
+            new["conflict"] = entry["conflict"]   # only the user's map settles it
+        return new
+    return _update(config, learned_key(agent, model), change)
+
+
+def _update(config, key, change):
+    """Read-modify-write one entry of windows.json under the lock. ``change``
+    takes the current entry ({} when absent) and returns the new one, or None
+    to leave the file alone. True when written."""
+    path = learned_path(config)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
     except OSError:
         return False
-    key = learned_key(agent, model)
     with _Lock(path + ".lock"):
         models = _read(path)
         entry = models.get(key) if isinstance(models.get(key), dict) else {}
-        seen = entry.get("seen") if isinstance(entry.get("seen"), dict) else {}
-        seen[str(window)] = now
-        models[key] = {"agent": (agent or "claude").lower(), "model": model.strip(),
-                       "window": window, "source": source, "at": now, "seen": seen}
+        new = change(dict(entry))
+        if new is None:
+            return False
+        models[key] = new
         temporary = "%s.tmp%d.%s" % (path, os.getpid(), os.urandom(4).hex())
         try:
             with open(temporary, "w", encoding="utf-8") as handle:
@@ -271,6 +317,47 @@ def record_learned(config, agent, model, window, source, now=None):
                 pass
             return False
     return True
+
+
+def record_conflict(config, agent, model, pre_tokens, window, now=None):
+    """Mark the learned window of ``model`` as contradicted: a session on it
+    auto-compacted at ``pre_tokens``, far below the learned ``window``."""
+    if not isinstance(model, str) or not model.strip():
+        return False
+    now = int(now if now is not None else time.time())
+
+    def change(entry):
+        if not entry:
+            return None
+        entry["conflict"] = {"pre_tokens": int(pre_tokens), "window": int(window), "at": now}
+        return entry
+    return _update(config, learned_key(agent, model), change)
+
+
+def check_compaction(config, agent_name, state, usage):
+    """After a NEW compaction: does it contradict the window learned for this
+    model? Claude only (Codex states its window in every rollout); never
+    against the user's `windows` map, which is authoritative; never for a
+    session that itself proved more than the standard window. Records the
+    conflict and returns True when it does."""
+    from .agents.claude import STANDARD_WINDOW
+    if agent_name != "claude":
+        return False
+    pre = getattr(usage, "compaction_pre_tokens", None)
+    model = getattr(usage, "model", None)
+    if not pre or not isinstance(model, str) or not model.strip():
+        return False
+    if match_window(config.get("windows"), agent_name, model)[0]:
+        return False
+    try:
+        if int((state or {}).get("max_observed") or 0) > STANDARD_WINDOW:
+            return False
+    except (TypeError, ValueError):
+        return False
+    window, _entry = learned_window(load_learned(config), agent_name, model)
+    if not window or window <= STANDARD_WINDOW or pre >= CONFLICT_RATIO * window:
+        return False
+    return record_conflict(config, agent_name, model, pre, window)
 
 
 def proof_for(agent_name, state, usage):

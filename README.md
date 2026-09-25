@@ -163,13 +163,18 @@ everything, the status line included.
 its window, so once usage passes 200,000 the window is provably the 1M one and
 the guard starts working on its own. This is a proof, not an inference.
 
-**4. And it remembers.** Whatever a session proves about its model — more than
-200,000 tokens in use, the status line's figure, a Codex rollout's window — is
-recorded in `~/.lastcall/state/windows.json` with its source and time, so the
-next session on that model starts with the right window instead of an assumed
-200K. Your `windows` map overrides a learned entry; `lastcall.py doctor` lists
-both. The model id alone cannot tell 200K from 1M, so if you run the same model
-both ways, pin it in `windows` (doctor flags a model seen with both).
+**4. And it remembers — as a hint.** Whatever a session proves about its
+model — more than 200,000 tokens in use, the status line's figure, a Codex
+rollout's window — is recorded in `~/.lastcall/state/windows.json` with its
+source and time. But one Claude model id runs with 200K or 1M, so a learned 1M
+never silences the guard: the next session on that model is judged against it
+as an *assumed* window — its warnings say the window was learned and never
+block — until its own tokens pass 200,000. And when a session on that model
+auto-compacts well below the learned window (under 60% of it), the model
+evidently runs smaller too: the entry is marked conflicted and ignored, sessions
+fall back to the assumed 200K, and `lastcall.py doctor` and `lastcall status`
+say to pin the model. Your `windows` map is authoritative over anything learned;
+if you run the same model both ways, pin it there.
 
 The order, first that applies: `context_window_tokens`, the status line, the
 `windows` map, a learned window, a `[1m]` model name or configured model, the
@@ -772,7 +777,7 @@ ignore this whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-640 tests, standard library only, no network. They cover the failure modes that
+670 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

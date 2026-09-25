@@ -235,7 +235,13 @@ def save_json(path, data):
 
     settings.json routinely holds API keys, so the backup is owner-only: a
     copy at the original 644 would be a second world-readable live secret.
+
+    A symlinked file (a dotfiles repo, say) is written THROUGH: os.replace on
+    the link itself would swap it for a regular file and quietly detach the
+    user's settings from wherever they keep them.
     """
+    if os.path.islink(path):
+        path = os.path.realpath(path)
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -943,9 +949,10 @@ def cmd_uninstall(args):
 
 # ---------------------------------------------------------------- delegates
 
-def register_usage_providers():
+def register_usage_providers(notes=None):
     """Give `status` a CONTEXT column: each live session measured by its own
-    agent's adapter."""
+    agent's adapter. ``notes`` (a set) collects the Claude models whose
+    learned window is conflicted, for a note under the table."""
     from . import sessions
     from .agents import get_agent
 
@@ -964,6 +971,12 @@ def register_usage_providers():
             window, _source, _assumed = session_window(usage, cwd=rec.cwd)
             if window:
                 usage.window = window
+            if notes is not None and rec.agent == "claude" and usage.model:
+                from .config import load_config
+                from .windows import learned_conflict, load_learned
+                config = load_config({"cwd": rec.cwd} if rec.cwd else {})
+                if learned_conflict(load_learned(config), "claude", usage.model):
+                    notes.add(usage.model)
         except Exception:  # noqa: BLE001 - status must never fail on config
             pass
         return usage
@@ -974,9 +987,16 @@ def register_usage_providers():
 
 def cmd_sessions(name, rest):
     from . import cli_sessions
+    notes = set()
     if name == "status":
-        register_usage_providers()
-    return cli_sessions.main([name] + list(rest))
+        register_usage_providers(notes)
+    code = cli_sessions.main([name] + list(rest))
+    if notes and "--json" not in rest:
+        print("\nnote: %s ran with more than one context window (a session auto-compacted "
+              "far below the window learned for it), so its CONTEXT is judged against "
+              "the assumed fallback. Pin it in \"windows\" in ~/.lastcall/config.json "
+              "(`lastcall doctor` has the details)." % ", ".join(sorted(notes)))
+    return code
 
 
 def cmd_script(name, rest):

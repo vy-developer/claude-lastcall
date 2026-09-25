@@ -66,6 +66,19 @@ _WANTED_TOP = frozenset(("event_msg", "turn_context", "compacted", "token_usage_
 _WANTED_EVENTS = frozenset(("token_count", "task_started"))
 
 
+_TIMESTAMP = re.compile(rb'"timestamp"\s*:\s*"([^"]{1,64})"')
+
+
+def _compaction_identity(raw):
+    """Which compacted line this is, without parsing it (they run to MBs):
+    its timestamp from the first few hundred bytes, else a checksum."""
+    match = _TIMESTAMP.search(raw[:_SNIFF_BYTES])
+    if match:
+        return "timestamp:" + match.group(1).decode("ascii", "replace")
+    import zlib
+    return "crc32:%08x:%d" % (zlib.crc32(raw) & 0xFFFFFFFF, len(raw))
+
+
 def session_id_from_path(path):
     """The session UUID in a rollout file name, or None."""
     if not path:
@@ -94,10 +107,12 @@ def scan_rollout(path, limit=CODEX_TAIL_LIMIT_BYTES, want_model=True):
       model, turn_id       from the newest turn_context
       compacted            a compaction since the previous response's reading
       stale                a compaction newer than the newest reading
+      compaction_id        the compacted line behind those two (its timestamp)
     """
     found = {"tokens": None, "window": None, "measured_at": None,
              "record_id": None, "task_window": None, "model": None,
-             "turn_id": None, "compacted": False, "stale": False}
+             "turn_id": None, "compacted": False, "stale": False,
+             "compaction_id": None}
     previous_seen = False
     for raw in iter_lines_reverse(path, limit=limit, chunk=TAIL_CHUNK_BYTES):
         top, sub = _sniff(raw)
@@ -123,8 +138,11 @@ def scan_rollout(path, limit=CODEX_TAIL_LIMIT_BYTES, want_model=True):
             if found["tokens"] is None:
                 found["stale"] = True
                 found["compacted"] = True
+                if found["compaction_id"] is None:
+                    found["compaction_id"] = _compaction_identity(raw)
             elif not previous_seen:
                 found["compacted"] = True
+                found["compaction_id"] = _compaction_identity(raw)
                 previous_seen = True  # the compaction settles the question
         elif kind == "turn_context":
             if found["model"] is None and isinstance(payload.get("model"), str):
@@ -273,6 +291,7 @@ class CodexAgent(Agent):
                 measured_at=found["measured_at"],
                 stale=found["stale"],
                 record_id=found["record_id"],
+                compaction_id=found["compaction_id"],
             )
         return None
 

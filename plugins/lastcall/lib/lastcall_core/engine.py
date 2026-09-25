@@ -37,9 +37,9 @@ from .agents import detect_agent
 from .config import home_dir, load_config
 from .render import (block_reason, compaction_message, onboarding_message,
                      render)
-from .state import (SessionState, mark_onboarded, prune_state, was_onboarded,
-                    write_debug)
-from .windows import learn, load_learned
+from .state import (SessionState, mark_onboarded, prune_state, session_lock,
+                    was_onboarded, write_debug)
+from .windows import LEARNED_WINDOW_NOTE, check_compaction, learn, load_learned
 from .zones import effective_window as _effective_window
 from .zones import resolve_window, resolve_zones, zone_for, zone_threshold
 
@@ -198,6 +198,23 @@ def on_measure(agent, config, payload, event, env=None, out=None):
         usage = read_usage(agent, config, payload, state, fresh=stop and not looping)
     except OSError:
         usage = None
+    # Decide, emit and save under the session's lock: parallel tool calls fire
+    # PostToolUse hooks together, and without it every one of them read the
+    # same "not announced yet" state and emitted the same warning.
+    with session_lock(config, session_id, agent.name) as lock:
+        if lock.acquired is False:
+            return 0  # another hook is judging this session; it speaks, not us
+        state = SessionState(config, session_id, agent.name)
+        if not stop and state.get("sig") == signature:
+            return 0  # a concurrent hook already judged this very reading
+        return _judge(agent, config, payload, event, env, out, state, usage,
+                      signature, stop, looping, transcript)
+
+
+def _judge(agent, config, payload, event, env, out, state, usage, signature,
+           stop, looping, transcript):
+    """on_measure's decision, with the session's state freshly read under its
+    lock. Always returns 0."""
     state["sig"] = signature
     if usage is None:
         state.save()
@@ -206,9 +223,18 @@ def on_measure(agent, config, payload, event, env=None, out=None):
     tokens = usage.tokens
     peak = state.number("peak")
     if usage.compacted:
-        key = "%s|%s" % (usage.record_id, usage.measured_at)
+        # Keyed on the compaction itself: the same compaction is first seen
+        # newer than every reading, then between the newest two, and a key
+        # from the reading (record id, time) re-armed — and warned — twice.
+        key = usage.compaction_id or "%s|%s" % (usage.record_id, usage.measured_at)
         if state.get("compaction_key") != key:
             state["compaction_key"] = key
+            try:
+                # An auto-compaction far below a learned window proves the
+                # model also runs smaller: stop trusting what was learned.
+                check_compaction(config, agent.name, state, usage)
+            except Exception:  # noqa: BLE001 - learning is a bonus, never a failure
+                pass
             _rearm(state)
             peak = 0
     if usage.stale:
@@ -283,8 +309,13 @@ def on_measure(agent, config, payload, event, env=None, out=None):
         state.save()
         return 0
 
+    # A learned window is assumed for a different reason than the fallback
+    # one, and says so itself.
+    learned = assumed and source == "learned"
     message = render(config, zone, tokens, window, transcript=transcript,
-                     assumed=assumed, agent=agent.name)
+                     assumed=assumed and not learned, agent=agent.name)
+    if learned:
+        message += "\n\n" + LEARNED_WINDOW_NOTE.format(window=window)
     if stop and need_block:
         output = agent.format_output("Stop", message, block_reason(zone))
     elif stop and "Stop" not in agent.context_events:

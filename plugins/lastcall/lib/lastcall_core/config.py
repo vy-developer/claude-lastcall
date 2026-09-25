@@ -311,7 +311,10 @@ def load_config(payload=None, env=None):
       _config_path        the project config in effect, or None
       _global_config_path the global config, if it exists
       _config_files       every file that contributed, lowest precedence first
-      _configured         whether any config file exists at all
+      _configured         whether any config file sets anything: a file holding
+                          only "_"-prefixed keys (the commented example the
+                          installer writes) does not count; an unreadable one
+                          does — someone wrote it
       _problems           human-readable problems, for doctor
     """
     env = _env(env)
@@ -333,11 +336,15 @@ def load_config(payload=None, env=None):
     if project_path:
         files.append(project_path)
 
+    configured = False
     for path in files:
         loaded, problem = _read_json_object(path)
         if problem:
             problems.append(problem)
+            configured = True
             continue
+        if any(not str(key).startswith("_") for key in loaded):
+            configured = True
         for key, value in loaded.items():
             if key == "windows" and isinstance(value, dict) \
                     and isinstance(config.get(key), dict):
@@ -368,7 +375,7 @@ def load_config(payload=None, env=None):
     config["_config_path"] = project_path
     config["_global_config_path"] = global_path if global_path in files else None
     config["_config_files"] = files
-    config["_configured"] = bool(files)
+    config["_configured"] = configured
     config["_problems"] = problems + validate(config)
     return config
 

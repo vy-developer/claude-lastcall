@@ -135,6 +135,11 @@ def effective_window(config, state, usage, agent=None, env=None, learned=None):
     use fit in it; beyond it, evidence has already proved a bigger window or
     nothing can be said.
 
+    A Claude window LEARNED from another session and bigger than the standard
+    one is assumed too, until this session's own tokens prove it: the model id
+    is shared by the 200K and the 1M variant, so one 1M session must not
+    silence the guard for every 200K session after it.
+
     ``learned`` defaults to reading <state_dir>/windows.json (lazily).
     """
     from .agents import get_agent
@@ -152,7 +157,9 @@ def effective_window(config, state, usage, agent=None, env=None, learned=None):
     window, source = resolve_window(config, evidence, usage, agent,
                                     learned=learned, settings=settings)
     if window:
-        return window, source, False
+        unproven = (agent != "codex" and source == "learned" and window > STANDARD_WINDOW
+                    and evidence["max_observed"] <= STANDARD_WINDOW)
+        return window, source, unproven
     fallback = config.get("fallback_window_tokens")
     if fallback and usage.tokens <= int(fallback):
         return int(fallback), "assumed", True

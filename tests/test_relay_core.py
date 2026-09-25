@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -801,7 +802,8 @@ class TestCheckinAndRetirement(RelayCoreCase):
     def test_plan_prefers_claude_stop_then_tmux_then_signal(self):
         self.assertEqual(relay.plan_retirement({"bg_short": "abc"})["argv"],
                          ["claude", "stop", "abc"])
-        self.assertEqual(relay.plan_retirement({"tmux_session": "t", "agent": "claude",
+        self.assertEqual(relay.plan_retirement({"tmux_session": "t", "tmux_pane": "%1",
+                                                "agent": "claude",
                                                 "entrypoint": "cli"})["method"], "tmux")
         self.assertEqual(relay.plan_retirement({"agent": "claude", "entrypoint": "cli",
                                                 "pid": 42, "kind": "interactive"})["pid"], 42)
@@ -892,12 +894,14 @@ class TestLayeredConfig(RelayCoreCase):
             self.assertIn("not requested", off.stdout, key)
 
     def test_kill_delay_comes_from_the_config(self):
-        self.stub("tmux", "#!/bin/sh\necho old-session\n")
+        self.stub("tmux", "#!/bin/sh\nprintf '%d\\told-session\\n'\n" % os.getpid())
         repo = self.repo()
         self.committed(repo, ".lastcall.json", {"relay": {"kill_predecessor": True,
                                                           "kill_delay": 7}})
-        result = self.relay(repo, "--dry-run", extra={"TMUX_PANE": "%1"})
-        self.assertIn("in 7s: tmux kill-session -t =old-session", result.stdout)
+        result = self.relay(repo, "--dry-run", extra={
+            "TMUX_PANE": "%1", "CLAUDE_CODE_SESSION_ID": "p", "CLAUDE_PID": str(os.getpid()),
+            "CLAUDE_CODE_ENTRYPOINT": "cli"})
+        self.assertIn("in 7s: tmux kill-pane -t %1", result.stdout)
 
     def test_a_bad_flag_is_a_precondition_failure_not_exit_2(self):
         result = self.relay(self.repo(), "--dry-run", "--timeout", "abc")
@@ -1112,6 +1116,260 @@ class TestLastcallRelayCommand(RelayCoreCase):
         help_text = subprocess.run([sys.executable, launcher, "relay", "--help"],
                                    stdout=subprocess.PIPE, universal_newlines=True).stdout
         self.assertIn("usage: lastcall relay", help_text)
+
+
+
+# tmux that really runs the command it is given (in the background, as
+# `new-session -d` would) and reports every pane alive.
+RUNNING_TMUX = """#!/bin/sh
+case "$1" in
+new-session) eval "last=\\${$#}"; sh -c "$last" >/dev/null 2>&1 & exit 0 ;;
+display-message) echo 0; exit 0 ;;
+esac
+exit 0
+"""
+
+# The interactive Codex TUI, as far as the relay can see it: a rollout whose
+# session_meta says when the session was created, written a moment after start.
+TUI_CODEX = r'''#!%(python)s
+import datetime, json, os, sys, time, uuid
+args = sys.argv[1:]
+if "--no-alt-screen" not in args:
+    sys.exit(0)
+time.sleep(0.2)
+home = os.environ.get("CODEX_HOME") or os.path.join(os.environ["HOME"], ".codex")
+day = os.path.join(home, "sessions", "2026", "09", "25")
+os.makedirs(day, exist_ok=True)
+tid = os.environ.get("FAKE_TUI_ID") or str(uuid.uuid4())
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%%Y-%%m-%%dT%%H:%%M:%%S.%%fZ")
+with open(os.path.join(day, "rollout-2026-09-25T00-00-01-%%s.jsonl" %% tid), "w") as fh:
+    fh.write(json.dumps({"timestamp": now, "type": "session_meta", "payload": {
+        "id": tid, "timestamp": now, "cwd": os.getcwd(), "source": "cli"}}) + "\n")
+time.sleep(5)
+'''
+
+
+def write_rollout(home, tid, cwd, created, source="cli"):
+    day = os.path.join(home, ".codex", "sessions", "2026", "09", "25")
+    os.makedirs(day, exist_ok=True)
+    path = os.path.join(day, "rollout-2026-09-25T00-00-00-%s.jsonl" % tid)
+    meta = {"id": tid, "cwd": cwd, "source": source}
+    if created is not None:
+        meta["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(created))
+    with open(path, "w") as fh:
+        fh.write(json.dumps({"type": "session_meta", "payload": meta}) + "\n")
+    return path
+
+
+class TestTmuxSuccessorIdentity(RelayCoreCase):
+    """Review finding: the tmux-mode scan filtered by mtime, so the
+    predecessor's own (constantly written) rollout was taken as the successor."""
+
+    PRED = "01a0d9aa-0000-7000-8000-000000000001"
+    SUCC = "01a0d9bb-0000-7000-8000-000000000002"
+
+    def test_scan_needs_creation_after_the_spawn_and_skips_the_predecessor(self):
+        repo = self.repo()
+        start = time.time()
+        write_rollout(self.tmp, self.PRED, repo, start - 3600)       # old, but just written
+        write_rollout(self.tmp, "01a0d9cc-0000-7000-8000-000000000003", repo, None)
+        write_rollout(self.tmp, "01a0d9dd-0000-7000-8000-000000000004", repo, start + 1)
+        found = relay.scan_new_rollouts(repo, start, {"HOME": self.tmp})
+        self.assertEqual([m["id"] for _, m in found], ["01a0d9dd-0000-7000-8000-000000000004"])
+        write_rollout(self.tmp, self.PRED, repo, start + 1)
+        found = relay.scan_new_rollouts(repo, start, {"HOME": self.tmp}, exclude=(self.PRED,))
+        self.assertNotIn(self.PRED, [m["id"] for _, m in found])
+
+    def test_the_predecessors_busy_rollout_is_never_the_successor(self):
+        repo = self.repo()
+        pred = write_rollout(self.tmp, self.PRED, repo, time.time() - 3600)
+        os.utime(pred, None)
+        self.stub("tmux", RUNNING_TMUX)
+        self.stub("codex", TUI_CODEX % {"python": sys.executable})
+        result = self.relay(repo, "--agent", "codex", "--codex-mode", "tmux", "--no-name-thread",
+                            extra={"CODEX_THREAD_ID": self.PRED, "FAKE_TUI_ID": self.SUCC})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        checkin = [r for r in self.ledger() if r["event"] == "checkin"]
+        self.assertEqual([r["session_id"] for r in checkin], [self.SUCC], result.stdout)
+
+
+
+class TestRetirementScope(RelayCoreCase):
+    """Review finding: retirement trusted an inherited TMUX_PANE and ran
+    `tmux kill-session` — the user's whole workspace — and the Codex
+    desktop/app-server exclusion only ran after the tmux branch."""
+
+    def fake_tmux(self, pane_pid, session="work"):
+        self.stub("tmux", "#!/bin/sh\nprintf '%s\\t%s\\n'\n" % (pane_pid, session))
+        return os.path.join(self.bin, "tmux")
+
+    def test_a_codex_desktop_thread_in_a_tmux_shell_is_never_killed(self):
+        plan = relay.plan_retirement({"agent": "codex", "tmux_session": "work",
+                                      "tmux_pane": "%3"}, find_codex=lambda: None)
+        self.assertEqual(plan["method"], "none")
+
+    def test_the_predecessors_pane_is_killed_not_the_users_session(self):
+        plan = relay.plan_retirement({"agent": "claude", "entrypoint": "cli",
+                                      "tmux_session": "work", "tmux_pane": "%3"})
+        self.assertEqual(plan["argv"], ["tmux", "kill-pane", "-t", "%3"])
+        owned = relay.plan_retirement({"agent": "claude", "entrypoint": "cli",
+                                       "tmux_session": "work", "tmux_pane": "%3",
+                                       "tmux_owned": True})
+        self.assertEqual(owned["argv"], ["tmux", "kill-session", "-t", "=work"])
+
+    def test_an_inherited_tmux_pane_is_ignored_when_the_predecessor_is_not_in_it(self):
+        victim = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: victim.poll() is None and victim.kill())
+        env = {"CLAUDE_CODE_SESSION_ID": "s", "CLAUDE_PID": str(victim.pid),
+               "CLAUDE_CODE_ENTRYPOINT": "cli", "TMUX_PANE": "%3", "HOME": self.tmp}
+        # The pane's shell is not above the predecessor: an inherited variable.
+        pred = relay.detect_predecessor(env, tmux_bin=self.fake_tmux(999999))
+        self.assertIsNone(pred["tmux_session"])
+        self.assertIsNone(pred["tmux_pane"])
+        # The pane's shell IS above it (this test process is its parent).
+        pred = relay.detect_predecessor(env, tmux_bin=self.fake_tmux(os.getpid()))
+        self.assertEqual((pred["tmux_session"], pred["tmux_pane"], pred["tmux_owned"]),
+                         ("work", "%3", False))
+
+    def test_a_tmux_session_the_relay_created_is_recognised(self):
+        victim = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: victim.poll() is None and victim.kill())
+        ledger = os.path.join(self.tmp, "chainT.jsonl")
+        relay.append_record(ledger, {"event": "spawn", "chain": "chainT", "generation": 2,
+                                     "tmux_session": "work", "mode": "tmux"})
+        env = {"CODEX_THREAD_ID": "t", "TMUX_PANE": "%3", "HOME": self.tmp,
+               relay.LEDGER_ENV: ledger, relay.CHAIN_ENV: "chainT",
+               relay.GENERATION_ENV: "2"}
+        pred = relay.detect_predecessor(env, tmux_bin=self.fake_tmux(os.getpid()),
+                                        find_codex=lambda: victim.pid)
+        self.assertTrue(pred["tmux_owned"])
+        self.assertEqual(relay.plan_retirement(pred)["argv"][:2], ["tmux", "kill-session"])
+
+
+
+class TestRetriesNeverVerifyAStaleSuccessor(RelayCoreCase):
+    """Review finding: a retry from the same predecessor reused its
+    generation, _wait took ANY check-in with chain + generation + agent, and
+    the exec log was appended to — so a retry verified the stale successor
+    of the earlier attempt and the new one's check-in was suppressed."""
+
+    def seed(self, *records):
+        folder = os.path.join(self.tmp, ".lastcall", "relay")
+        for record in records:
+            relay.append_record(os.path.join(folder, "chainR.jsonl"),
+                                dict(record, chain="chainR"))
+        return folder
+
+    def verified(self):
+        return [r for r in self.ledger() if r["event"] == "verified"]
+
+    def test_a_retry_gets_a_new_generation_and_verifies_the_new_successor(self):
+        self.seed({"event": "spawn", "generation": 2, "agent": "claude"},
+                  {"event": "checkin", "generation": 2, "agent": "claude",
+                   "session_id": "stale-session", "via": "hook"})
+        result = self.relay(self.repo(), extra={relay.CHAIN_ENV: "chainR",
+                                                relay.GENERATION_ENV: "1"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("handoff 3", result.stdout)
+        self.assertNotEqual(self.verified()[0]["session_id"], "stale-session")
+
+    def test_a_stale_checkin_neither_passes_nor_blocks_the_new_one(self):
+        self.seed({"event": "checkin", "generation": 2, "agent": "claude",
+                   "session_id": "stale-session", "via": "hook"})
+        result = self.relay(self.repo(), extra={relay.CHAIN_ENV: "chainR",
+                                                relay.GENERATION_ENV: "1"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("no hook check-in", result.stdout)
+        verified = self.verified()[0]["session_id"]
+        self.assertNotEqual(verified, "stale-session")
+        spawn = [r for r in self.ledger() if r["event"] == "spawn"][0]
+        checkin = [r for r in self.ledger() if r["event"] == "checkin"
+                   and r["session_id"] == verified][0]
+        self.assertTrue(spawn["nonce"])
+        self.assertEqual((checkin["nonce"], checkin["via"]), (spawn["nonce"], "hook"))
+
+    def test_an_old_exec_log_is_never_read_for_the_new_thread(self):
+        folder = self.seed({"event": "note"})
+        with open(os.path.join(folder, "chainR-1.log"), "w") as fh:
+            fh.write(json.dumps({"type": "thread.started", "thread_id": "stale-thread"}) + "\n")
+        result = self.relay(self.repo(), "--agent", "codex", "--codex-mode", "exec",
+                            "--no-name-thread", extra={relay.CHAIN_ENV: "chainR",
+                                                       relay.GENERATION_ENV: "0"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotEqual(self.verified()[0]["session_id"], "stale-thread")
+
+    def test_the_exec_fallback_is_a_new_spawn_with_its_own_nonce(self):
+        result = self.relay(self.repo(), "--agent", "codex",
+                            extra={"FAKE_APP_FAIL": "thread/start"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        spawns = [r for r in self.ledger() if r["event"] == "spawn"]
+        self.assertEqual([r["mode"] for r in spawns], ["app", "exec"])
+        self.assertNotEqual(spawns[0]["nonce"], spawns[1]["nonce"])
+        checkin = [r for r in self.ledger() if r["event"] == "checkin"][-1]
+        self.assertEqual((checkin["via"], checkin["nonce"]), ("exec-json", spawns[1]["nonce"]))
+
+
+
+class TestCommittedMeansCommitted(RelayCoreCase):
+    """Review finding: `git status --porcelain` is silent about a gitignored
+    file, so a handoff that was never committed passed the check."""
+
+    def test_a_gitignored_handoff_is_not_committed(self):
+        repo = self.repo(handoff=None)
+        with open(os.path.join(repo, ".gitignore"), "w") as fh:
+            fh.write("docs/handoff/\n")
+        subprocess.run(["git", "-C", repo, "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "ignore"], check=True)
+        with open(os.path.join(repo, "docs", "handoff", "2026-09-25.md"), "w") as fh:
+            fh.write("# Secretly local\n")
+        result = self.relay(repo, "--dry-run")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("handoff is not committed", result.stdout)
+        self.assertIn("gitignored", result.stdout)
+
+    def test_staged_but_uncommitted_changes_do_not_count(self):
+        repo = self.repo()
+        with open(os.path.join(repo, "docs", "handoff", "2026-09-25.md"), "a") as fh:
+            fh.write("more\n")
+        subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+        result = self.relay(repo, "--dry-run", "--allow-dirty")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("handoff is not committed", result.stdout)
+
+
+
+class TestTheRelayFitsInABashCall(RelayCoreCase):
+    """Review finding: the relay's waits (spawn 60s + check-in 180s + remote
+    control 45s) could run ~285s, past Claude Code's 2-minute default Bash
+    tool timeout, which kills it mid-handover."""
+
+    def plain(self, repo, *args, extra=None):
+        return subprocess.run([sys.executable, RELAY, "--repo", repo] + list(args),
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              env=self.env(extra), cwd=self.tmp, universal_newlines=True)
+
+    def test_by_default_every_wait_together_fits_under_two_minutes(self):
+        for agent in ("claude", "codex"):
+            result = self.plain(self.repo(name=agent), "--dry-run", "--agent", agent)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            first = result.stdout.splitlines()[0]
+            self.assertIn("run it with a tool timeout above that", first)
+            self.assertIn("or in the background", first)
+            seconds = int(re.search(r"take up to (\d+)s", first).group(1))
+            self.assertLessEqual(seconds, 110, first)
+
+    def test_the_budget_caps_every_wait_and_is_configurable(self):
+        repo = self.repo()
+        started = time.time()
+        result = self.plain(repo, "--timeout", "30", "--max-wait", "1", "--poll", "0.05",
+                            extra={"FAKE_NO_HOOK": "1", "FAKE_NO_TRANSCRIPT": "1"})
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertLess(time.time() - started, 15)
+        self.assertIn("take up to 1s", result.stdout)
+        with open(os.path.join(repo, ".lastcall.json"), "w") as fh:
+            json.dump({"relay": {"max_wait_seconds": 50}}, fh)
+        result = self.plain(repo, "--dry-run", "--allow-dirty")
+        self.assertIn("take up to 50s", result.stdout)
 
 
 if __name__ == "__main__":

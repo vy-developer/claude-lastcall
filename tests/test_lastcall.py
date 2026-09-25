@@ -584,6 +584,111 @@ class TestStateAndRearm(TempCase):
         self.assertIsNotNone(self.run_stop(config, 145_000, session="s2"))
 
 
+class TestParallelHooks(TempCase):
+    """Review finding: parallel tool calls fire PostToolUse hooks at the same
+    moment, and every one of them emitted the same warning."""
+
+    def test_concurrent_post_tool_use_hooks_warn_once(self):
+        import io
+        import threading
+        from unittest import mock
+        engine = sys.modules["lastcall_core.engine"]
+        config = self.config()
+        path = self.transcript([assistant_line(145_000)])       # yellow
+        real_render = engine.render
+        # Hold whichever hook gets to the warning first until the second one
+        # has had every chance to reach it too.
+        together = threading.Barrier(2, timeout=1.0)
+
+        def slow_render(*args, **kwargs):
+            try:
+                together.wait()
+            except threading.BrokenBarrierError:
+                pass
+            return real_render(*args, **kwargs)
+
+        outputs = [io.StringIO(), io.StringIO()]
+
+        def hook(out):
+            cg.handle_stop(config, {"transcript_path": path, "session_id": "s1",
+                                    "hook_event_name": "PostToolUse"}, out=out)
+
+        with mock.patch.object(engine, "render", slow_render):
+            threads = [threading.Thread(target=hook, args=(out,)) for out in outputs]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        spoke = [out.getvalue() for out in outputs if out.getvalue().strip()]
+        self.assertEqual(len(spoke), 1, spoke)
+        self.assertIn("YELLOW", spoke[0])
+        self.assertEqual(cg.read_state(config, "s1")["band"], "yellow")
+
+    def test_the_lock_excludes_without_fcntl_or_msvcrt_too(self):
+        import builtins
+        from unittest import mock
+        real_import = builtins.__import__
+
+        def no_locking(name, *args, **kwargs):
+            if name in ("fcntl", "msvcrt"):
+                raise ImportError(name)
+            return real_import(name, *args, **kwargs)
+
+        path = os.path.join(self.state, "claude-s1.json.lock")
+        with mock.patch.object(builtins, "__import__", no_locking):
+            with lc_state.SessionLock(path) as first:
+                with lc_state.SessionLock(path, timeout=0.05) as second:
+                    self.assertEqual((first.acquired, second.acquired), (True, False))
+            with lc_state.SessionLock(path, timeout=0.05) as third:
+                self.assertTrue(third.acquired)
+
+    def test_the_lock_sidecar_is_pruned_with_its_session(self):
+        config = self.config(state_ttl_days=1)
+        lock = os.path.join(self.state, "claude-old.json.lock")
+        os.makedirs(self.state, exist_ok=True)
+        open(lock, "w").close()
+        os.utime(lock, (time.time() - 3 * 86400,) * 2)
+        cg.prune_state(config)
+        self.assertFalse(os.path.exists(lock))
+
+
+class TestOneCompactionRearmsOnce(TempCase):
+    """Review finding: the compaction key was record_id|measured_at, which
+    changes between the first reading after a compaction and the next one, so
+    a single compaction re-armed the zones twice and the zone warned twice."""
+
+    def reply(self, tokens, number):
+        return json.dumps({"type": "assistant", "sessionId": "s1", "isSidechain": False,
+                           "timestamp": "2026-09-25T10:%02d:00.000Z" % number,
+                           "message": {"id": "msg_%d" % number, "model": "claude-sonnet-5",
+                                       "usage": {"input_tokens": 10,
+                                                 "cache_read_input_tokens": tokens - 10,
+                                                 "cache_creation_input_tokens": 0,
+                                                 "output_tokens": 50}}})
+
+    def stop(self, config, lines):
+        import io
+        out = io.StringIO()
+        cg.handle_stop(config, {"transcript_path": self.transcript(lines), "session_id": "s1",
+                                "hook_event_name": "Stop"}, out=out)
+        return out.getvalue().strip() or None
+
+    def test_the_zone_warns_once_after_one_compaction(self):
+        config = self.config()
+        lines = [self.reply(150_000, 1)]
+        self.assertIsNotNone(self.stop(config, lines))                  # yellow
+        lines.append(json.dumps({
+            "type": "system", "subtype": "compact_boundary", "sessionId": "s1",
+            "isSidechain": False, "uuid": "b-1", "timestamp": "2026-09-25T10:30:00.000Z",
+            "compactMetadata": {"trigger": "auto", "preTokens": 150_000,
+                                "postTokens": 145_000}}))
+        self.assertIsNotNone(self.stop(config, lines))                  # re-armed: yellow
+        epoch = cg.read_state(config, "s1")["epoch"]
+        lines.append(self.reply(146_000, 31))
+        self.assertIsNone(self.stop(config, lines))                     # same compaction
+        self.assertEqual(cg.read_state(config, "s1")["epoch"], epoch)
+
+
 class TestOutputContract(TempCase):
     def test_emits_required_hook_event_name(self):
         """Without hookEventName the CLI rejects the payload, the hook still
@@ -1348,9 +1453,27 @@ class TestPruneOwnership(TempCase):
         return path
 
     def test_our_own_stale_state_is_pruned(self):
-        path = self.aged("session.json", {"band": "red", "peak": 1})
+        path = self.aged("session.json", {"_lastcall": 1, "band": "red", "peak": 1})
+        legacy = self.aged("claude-old.json", {"agent": "claude", "band": "red"})
         cg.prune_state(self.config())
         self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(legacy))
+
+    def test_state_files_carry_the_marker_that_makes_them_ours(self):
+        config = self.config()
+        cg.write_state(config, "s1", {"band": "red"})
+        with open(os.path.join(self.state, "claude-s1.json")) as fh:
+            self.assertEqual(json.load(fh)["_lastcall"], 1)
+
+    def test_generic_keys_are_not_ownership(self):
+        """Review finding: "updated" (or "band", "epoch") alone made any JSON
+        in a shared state_dir look like ours, and pruning deleted it."""
+        foreign = [self.aged("sync.json", {"updated": 1700000000, "items": []}),
+                   self.aged("game.json", {"band": "red", "epoch": 3}),
+                   self.aged("tool.json", {"agent": "renovate", "sig": "x"})]
+        cg.prune_state(self.config())
+        for path in foreign:
+            self.assertTrue(os.path.exists(path), path)
 
     def test_a_foreign_json_file_is_never_touched(self):
         path = self.aged("settings.json", {"env": {"OPENAI_API_KEY": "sk-live"}})

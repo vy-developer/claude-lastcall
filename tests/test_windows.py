@@ -42,7 +42,8 @@ from lastcall_core.agents.base import Usage  # noqa: E402
 from lastcall_core.config import DEFAULTS, load_config, validate  # noqa: E402
 from lastcall_core.doctor import doctor, windows_report  # noqa: E402
 from lastcall_core.engine import handle_event  # noqa: E402
-from lastcall_core.state import prune_state, read_state, update_state  # noqa: E402
+from lastcall_core.state import (SessionLock, prune_state, read_state,  # noqa: E402
+                                 update_state)
 from lastcall_core.zones import (effective_window, resolve_window,  # noqa: E402
                                  session_window)
 
@@ -400,14 +401,24 @@ class TestLearning(Case):
         self.assertEqual(self.learned()["claude:m"]["window"], ONE_M)
 
 
-def _learn_many(state_dir, worker, count):
+def _learn_many(state_dir, worker, count, lock_timeout=60):
+    # A loaded CI runner can keep a writer waiting past the hook's two
+    # seconds, and then it skips (by design). Here every writer must get its
+    # turn, so any entry missing was lost to a race, not to the timeout.
+    W.LOCK_TIMEOUT = lock_timeout
     config = dict(DEFAULTS, state_dir=state_dir)
     for index in range(count):
-        W.record_learned(config, "claude", "model-%d-%d" % (worker, index),
-                         ONE_M, "evidence")
+        if not W.record_learned(config, "claude", "model-%d-%d" % (worker, index),
+                                ONE_M, "evidence"):
+            raise AssertionError("worker %d could not record entry %d" % (worker, index))
 
 
 class TestConcurrentLearning(Case):
+    def setUp(self):
+        super().setUp()
+        original = W.LOCK_TIMEOUT
+        self.addCleanup(setattr, W, "LOCK_TIMEOUT", original)
+
     def test_processes_learning_at_once_lose_nothing(self):
         context = multiprocessing.get_context("spawn")
         workers = [context.Process(target=_learn_many, args=(self.state_dir, n, 10))
@@ -415,7 +426,7 @@ class TestConcurrentLearning(Case):
         for worker in workers:
             worker.start()
         for worker in workers:
-            worker.join(60)
+            worker.join(120)
             self.assertEqual(worker.exitcode, 0)
         learned = self.learned()
         self.assertEqual(len(learned), 60)
@@ -423,13 +434,34 @@ class TestConcurrentLearning(Case):
         self.assertEqual(leftovers, [])
 
     def test_threads_learning_at_once_lose_nothing(self):
-        threads = [threading.Thread(target=_learn_many, args=(self.state_dir, n, 10))
-                   for n in range(4)]
+        errors = []
+
+        def work(n):
+            try:
+                _learn_many(self.state_dir, n, 10)
+            except AssertionError as error:
+                errors.append(error)
+        threads = [threading.Thread(target=work, args=(n,)) for n in range(4)]
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(60)
+            thread.join(120)
+        self.assertEqual(errors, [])
         self.assertEqual(len(self.learned()), 40)
+
+    def test_a_held_lock_skips_the_write_instead_of_racing_it(self):
+        """The old lock gave up after a second and wrote anyway, so a slow
+        holder's entry could be overwritten (CI lost 1 of 60). Past the
+        timeout the proof is skipped; the file is left as the holder wrote it."""
+        config = self.config()
+        self.assertTrue(W.record_learned(config, "claude", "held", ONE_M, "evidence"))
+        W.LOCK_TIMEOUT = 0.05
+        with SessionLock(W.learned_path(config) + ".lock", timeout=1) as holder:
+            self.assertTrue(holder.acquired)
+            self.assertFalse(W.record_learned(config, "claude", "late", ONE_M, "evidence"))
+        self.assertEqual(set(self.learned()), {"claude:held"})
+        self.assertTrue(W.record_learned(config, "claude", "late", ONE_M, "evidence"))
+        self.assertEqual(set(self.learned()), {"claude:held", "claude:late"})
 
 
 # --------------------------------------------------------------------------

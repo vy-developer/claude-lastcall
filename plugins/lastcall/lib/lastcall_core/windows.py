@@ -39,6 +39,7 @@ import re
 import time
 
 from .config import state_dir
+from .state import SessionLock
 
 LEARNED_FILE = "windows.json"
 AGENTS = ("claude", "codex")
@@ -47,10 +48,14 @@ AGENTS = ("claude", "codex")
 # not, so such a model is only matched by keys that carry the marker too.
 _ONE_M_MARKER = re.compile(r"\[1m\]", re.I)
 
-# Waiting longer than this for another writer is not worth holding a hook up:
-# the write goes ahead unlocked (still atomic) and at worst one concurrent
-# learning is lost and re-learned by that session's next hook.
-LOCK_TIMEOUT = 1.0
+# How long a writer waits for another one. Learning is best-effort: past
+# this, the proof is skipped (that session's next hook learns it again),
+# never written without the lock, which could drop another writer's entry.
+LOCK_TIMEOUT = 2.0
+
+# Windows refuses os.replace onto a file another process has open (a reader
+# outside the lock). Such a read lasts microseconds, so retry briefly.
+REPLACE_ATTEMPTS = 20
 
 # Claude auto-compacts close to the end of its window. An auto-compaction
 # below this share of a learned window proves a smaller window for the model.
@@ -224,42 +229,6 @@ def learned_conflict(learned, agent, model):
     return conflict if isinstance(conflict, dict) else None
 
 
-class _Lock(object):
-    """An exclusive advisory lock on ``path`` where the platform has one.
-    Never raises and never waits longer than LOCK_TIMEOUT."""
-
-    def __init__(self, path):
-        self.path = path
-        self.handle = None
-
-    def __enter__(self):
-        try:
-            import fcntl
-        except ImportError:  # Windows: atomic replace alone
-            return self
-        try:
-            self.handle = open(self.path, "a+", encoding="utf-8")
-        except OSError:
-            return self
-        deadline = time.time() + LOCK_TIMEOUT
-        while True:
-            try:
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return self
-            except OSError:
-                if time.time() >= deadline:
-                    return self
-                time.sleep(0.005)
-
-    def __exit__(self, *exc):
-        if self.handle is not None:
-            try:
-                self.handle.close()  # closing releases the flock
-            except OSError:
-                pass
-        return False
-
-
 def record_learned(config, agent, model, window, source, now=None):
     """Merge one proof into the learned map. True when it was written.
 
@@ -291,13 +260,18 @@ def record_learned(config, agent, model, window, source, now=None):
 def _update(config, key, change):
     """Read-modify-write one entry of windows.json under the lock. ``change``
     takes the current entry ({} when absent) and returns the new one, or None
-    to leave the file alone. True when written."""
+    to leave the file alone. True when written; False when there was nothing
+    to write, or the lock or the write failed."""
     path = learned_path(config)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
     except OSError:
         return False
-    with _Lock(path + ".lock"):
+    # flock on POSIX, msvcrt.locking on Windows: both exclude other processes
+    # and other threads alike. The whole read-merge-write happens under it.
+    with SessionLock(path + ".lock", timeout=LOCK_TIMEOUT) as lock:
+        if not lock.acquired:
+            return False
         models = _read(path)
         entry = models.get(key) if isinstance(models.get(key), dict) else {}
         new = change(dict(entry))
@@ -309,7 +283,7 @@ def _update(config, key, change):
             with open(temporary, "w", encoding="utf-8") as handle:
                 json.dump({"version": 1, "models": models}, handle, indent=1,
                           sort_keys=True)
-            os.replace(temporary, path)
+            _replace(temporary, path)
         except OSError:
             try:
                 os.remove(temporary)
@@ -317,6 +291,17 @@ def _update(config, key, change):
                 pass
             return False
     return True
+
+
+def _replace(source, target):
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.01)
 
 
 def record_conflict(config, agent, model, pre_tokens, window, now=None):

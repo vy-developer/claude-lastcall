@@ -30,6 +30,22 @@ decision — you judge what still fits.
 
 ## Install
 
+**Install (both agents)**: once per machine, for Claude Code and Codex, CLI
+and desktop app alike:
+
+```
+git clone https://github.com/vy-developer/claude-lastcall
+claude-lastcall/plugins/lastcall/bin/lastcall install      # --dry-run to preview
+```
+
+This registers the checkout as a local marketplace and enables the plugin
+through each agent's own `plugin` command (`--claude` / `--codex` to pick one;
+default: every agent on `PATH`), links `lastcall` into `~/.local/bin`, and
+creates `~/.lastcall/`. `--method hooks` writes user-level hooks into
+`~/.claude/settings.json` and `~/.codex/hooks.json` instead. Codex runs new
+hooks only after you trust them once with `/hooks`. `lastcall uninstall`
+reverses it; `lastcall status` lists live sessions of both agents.
+
 **As a plugin** (recommended — no absolute paths anywhere):
 
 ```
@@ -48,8 +64,9 @@ python3 install.py --global   # every project
 python3 install.py --uninstall
 ```
 
-The installer detects a working interpreter (`py -3` on Windows), writes the
-hooks into `.claude/settings.json`, and backs up whatever was there first.
+The installer (a wrapper around `lastcall install --method hooks`) names
+`python3`, or a detected interpreter on Windows (`py -3`), writes the hooks
+into `.claude/settings.json`, and backs up whatever was there first.
 
 Requires Python 3.9+. No third-party packages, ever. CI runs the suite on
 Linux, macOS and Windows against 3.9, 3.11 and 3.13.
@@ -623,7 +640,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-351 tests, standard library only, no network. They cover the failure modes that
+389 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

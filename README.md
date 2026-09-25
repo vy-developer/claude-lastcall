@@ -46,6 +46,16 @@ creates `~/.lastcall/`. `--method hooks` writes user-level hooks into
 hooks only after you trust them once with `/hooks`. `lastcall uninstall`
 reverses it; `lastcall status` lists live sessions of both agents.
 
+The plugin's hooks start through `scripts/lastcall-hook`, a small `sh`
+launcher: desktop apps run hooks with a minimal `PATH`, so it picks a working
+Python itself — `$LASTCALL_PYTHON`, then `python3` on `PATH`, then Homebrew,
+`/usr/local`, `/usr/bin/python3` (on macOS only when the Command Line Tools are
+installed, so no install dialog pops up), pyenv and conda — and if it finds
+none it exits quietly rather than break the session. On Windows, Codex runs
+`py -3` instead (`commandWindows`); Claude Code has no per-OS hook command, so
+without Git Bash use `lastcall install --method hooks`, which writes the
+absolute path of a detected interpreter.
+
 **As a plugin** (recommended — no absolute paths anywhere):
 
 ```
@@ -115,7 +125,7 @@ to stay silent until the window is known instead. Check what it resolved:
 python3 .../lastcall.py doctor ~/.claude/projects/<project>/<session>.jsonl
 ```
 
-Three ways to fix that, best first:
+Four ways to fix that, best first:
 
 **1. The status line — exact, automatic.** Claude Code hands the status line the
 real window size. Point yours at the bundled script and the guard never needs
@@ -134,17 +144,36 @@ It prints a normal status line too: `Opus 5 | myrepo | ctx [####------] 43% YELL
 If your Claude Code version names those fields differently, `statusline.py --dump`
 prints the raw payload so you can check.
 
-**2. Just tell it.** `~/.lastcall/config.json` (every project) or
-`.lastcall.json` (one project):
+**2. Map your models.** `windows` in `~/.lastcall/config.json` (every
+project) or `.lastcall.json` (one project; entries merge with the global map)
+says which window each model runs with:
 
 ```json
-{ "context_window_tokens": 200000 }
+{ "windows": { "claude-opus-5-5": 1000000, "claude-sonnet-*": 200000, "claude:opus": 1000000 } }
 ```
+
+A key is an exact model id, a prefix, or a glob (`*`, `?`); exact beats the
+longest prefix or glob, and `claude:` / `codex:` limits a key to one agent.
+Codex ignores the map whenever its rollout states the window. Or, for one
+window everywhere, `{ "context_window_tokens": 200000 }` — which beats
+everything, the status line included.
 
 **3. Let it prove the window itself.** A session cannot hold more tokens than
 its window, so once usage passes 200,000 the window is provably the 1M one and
-the guard starts working on its own. This is a proof, not an inference — but it
-only helps 1M users, and only after they are already deep into a session.
+the guard starts working on its own. This is a proof, not an inference.
+
+**4. And it remembers.** Whatever a session proves about its model — more than
+200,000 tokens in use, the status line's figure, a Codex rollout's window — is
+recorded in `~/.lastcall/state/windows.json` with its source and time, so the
+next session on that model starts with the right window instead of an assumed
+200K. Your `windows` map overrides a learned entry; `lastcall.py doctor` lists
+both. The model id alone cannot tell 200K from 1M, so if you run the same model
+both ways, pin it in `windows` (doctor flags a model seen with both).
+
+The order, first that applies: `context_window_tokens`, the status line, the
+`windows` map, a learned window, a `[1m]` model name or configured model, the
+tokens in use, then the assumed fallback. Any of them that the tokens already
+in use disprove is corrected, and the source says so.
 
 ## Configuration
 
@@ -170,6 +199,7 @@ to start from a commented version.
 | `verifier` | `null` | a second model asked to check the work; shown as `{verifier}` |
 | `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions`, `model`, `fallback_model`, `kill_predecessor` |
 | `context_window_tokens` | `null` | window size; `null` means "work it out" (Codex reports it; on Claude Code see above) |
+| `windows` | `null` | model → window map, e.g. `{"claude-opus-5-5": 1000000, "claude-sonnet-*": 200000}` — see [Tell it how big your window is](#tell-it-how-big-your-window-is) |
 | `fallback_window_tokens` | `200000` | Claude Code with no exact window: assume this one, warn but never block; `null` stays silent instead |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
 | `template` | `null` | path to your own wrap-up instructions |
@@ -735,7 +765,7 @@ python3 plugins/lastcall/lib/lastcall_core/relay.py --agent codex --dry-run
 python3 -m unittest discover -s tests -v
 ```
 
-527 tests, standard library only, no network. They cover the failure modes that
+588 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

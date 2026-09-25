@@ -65,6 +65,13 @@ DEFAULTS = {
     # into its rollout, so it is always known there; Claude Code does not, see
     # zones.resolve_window.
     "context_window_tokens": None,
+    # Model -> window, for Claude Code sessions whose window nothing reports:
+    #   {"claude-opus-5-5": 1000000, "claude-sonnet-*": 200000,
+    #    "claude:opus": 1000000}
+    # Exact model beats the longest prefix or glob; "claude:" / "codex:" limit
+    # an entry to one agent. Merged across the global and project configs.
+    # Codex always uses the window its rollout states. See windows.py.
+    "windows": None,
     # The window assumed when nothing exact is available and the tokens in use
     # do not prove a bigger one (Claude Code without the status line). Zones
     # computed against an assumed window warn but never block, and the message
@@ -119,7 +126,7 @@ _FLOAT_KEYS = frozenset(("yellow_percent", "red_percent"))
 _INT_KEYS = frozenset(("context_window_tokens", "state_ttl_days",
                        "min_window_tokens", "fallback_window_tokens"))
 _BOOL_KEYS = frozenset(("include_output_tokens", "debug", "disabled"))
-_JSON_KEYS = frozenset(("zones", "gates", "relay"))
+_JSON_KEYS = frozenset(("zones", "gates", "relay", "windows"))
 # Either a string or false.
 _TEXT_OR_FALSE_KEYS = frozenset(("compaction_note",))
 
@@ -137,6 +144,7 @@ _EXPECTED_TYPES = {
     "gates": (list, tuple, str),
     "verifier": (str,),
     "relay": (dict,),
+    "windows": (dict,),
     "include_output_tokens": (bool,),
     "debug": (bool,),
     "disabled": (bool,),
@@ -331,7 +339,14 @@ def load_config(payload=None, env=None):
             problems.append(problem)
             continue
         for key, value in loaded.items():
-            if key in config:
+            if key == "windows" and isinstance(value, dict) \
+                    and isinstance(config.get(key), dict):
+                # A project adds to (and overrides entries of) the global
+                # map rather than hiding it: the models are the same machine's.
+                merged = dict(config[key])
+                merged.update(value)
+                config[key] = merged
+            elif key in config:
                 config[key] = value
             elif not str(key).startswith("_"):
                 problems.append(_unknown_key_problem(key, path))
@@ -395,6 +410,10 @@ def validate(config):
             problems.append("%s should be a positive number of tokens, got %s"
                             % (key, value))
             config[key] = DEFAULTS[key]
+
+    from .windows import validate_windows
+    config["windows"], window_problems = validate_windows(config.get("windows"))
+    problems.extend(window_problems)
 
     if config.get("mode") not in ("advisory", "block_once"):
         problems.append('mode should be "advisory" or "block_once", got %r'

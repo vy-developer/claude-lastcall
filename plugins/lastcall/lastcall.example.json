@@ -34,6 +34,10 @@
   "_comment_window": "null means 'use an exact source'. Codex writes its window into every session, so this only matters for Claude Code, whose transcript does not say whether a session has 200K or 1M. Set it to 200000 or 1000000 if you are not using the bundled status line.",
   "context_window_tokens": null,
 
+  "_comment_windows": "Model -> context window, for Claude Code sessions nothing reports the window for. Keys are a model id (exact), a prefix, or a glob with * and ?; prefix a key with 'claude:' or 'codex:' to limit it to one agent. Exact beats the longest prefix or glob. Merged across the global and project configs. Windows proven by a session (more than 200K tokens in use, the status line, a Codex rollout) are learned automatically into <state_dir>/windows.json; entries here override them. Codex always uses the window its rollout states.",
+  "_comment_windows_example": {"claude-opus-5-5": 1000000, "claude-sonnet-*": 200000, "claude:opus": 1000000},
+  "windows": null,
+
   "_comment_fallback_window": "Claude Code with no exact source: judge the zones against this window, but never block, and say in the message that it was assumed. Once more tokens than this are in use the real window is proven anyway. null keeps Last Call silent until the window is known.",
   "fallback_window_tokens": 200000,
 

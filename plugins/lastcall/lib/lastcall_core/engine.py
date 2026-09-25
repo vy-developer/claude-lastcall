@@ -39,6 +39,8 @@ from .render import (block_reason, compaction_message, onboarding_message,
                      render)
 from .state import (SessionState, mark_onboarded, prune_state, was_onboarded,
                     write_debug)
+from .windows import learn, load_learned
+from .zones import effective_window as _effective_window
 from .zones import resolve_window, resolve_zones, zone_for, zone_threshold
 
 # A drop this steep can only be compaction — normal turns add tokens, they do
@@ -96,30 +98,15 @@ def read_usage(agent, config, payload, state=None, fresh=False):
                             model=model if isinstance(model, str) else None)
 
 
-def effective_window(agent, config, state, usage, env=None):
+def effective_window(agent, config, state, usage, env=None, learned=None):
     """(window, source, assumed) for judging ``usage``.
 
-    Exact sources and proof first (zones.resolve_window). Then, on Claude
-    Code, the model the user configured: a "[1m]" model in settings.json or
-    $ANTHROPIC_MODEL that names this session's model. Then the fallback
-    window, flagged as assumed — but only while the tokens in use fit in it;
-    beyond it, evidence has already proved a bigger window or nothing can be
-    said.
+    Exact sources and proof first, then the `windows` map and the windows
+    learned from earlier sessions, then a "[1m]" model the user configured,
+    then the fallback window, flagged as assumed (zones.effective_window has
+    the whole order).
     """
-    evidence = dict(state or {})
-    evidence["max_observed"] = max(int(evidence.get("max_observed") or 0), usage.tokens)
-    window, source = resolve_window(config, evidence, usage, agent.name)
-    if window:
-        return window, source, False
-    hinted = getattr(agent, "settings_window", None)
-    if hinted is not None:
-        window, source = hinted(usage.model, env)
-        if window:
-            return window, source, False
-    fallback = config.get("fallback_window_tokens")
-    if fallback and usage.tokens <= int(fallback):
-        return int(fallback), "assumed", True
-    return None, "unknown", False
+    return _effective_window(config, state, usage, agent.name, env, learned)
 
 
 def measure(config, payload, state=None, agent=None, env=None):
@@ -143,7 +130,8 @@ def measure(config, payload, state=None, agent=None, env=None):
         return None, None, "no-usage-record", None
     evidence = dict(state or {})
     evidence["max_observed"] = max(int(evidence.get("max_observed") or 0), usage.tokens)
-    window, source = resolve_window(config, evidence, usage, agent.name)
+    window, source = resolve_window(config, evidence, usage, agent.name,
+                                    learned=lambda: load_learned(config))
     return usage.tokens, window, source, usage.model
 
 
@@ -242,6 +230,13 @@ def on_measure(agent, config, payload, event, env=None, out=None):
     window, source, assumed = effective_window(agent, config, state, usage, env)
     state["window"] = window
     state["window_source"] = source
+    # What this session has proved about its model (tokens beyond 200K, the
+    # status line's figure, Codex's rollout) is remembered for the next
+    # session on the same model. Once per session per proof.
+    try:
+        learn(config, agent.name, state, usage)
+    except Exception:  # noqa: BLE001 - learning is a bonus, never a failure
+        pass
     zones = resolve_zones(config)
     if window is None and not any(z["at_tokens"] is not None for z in zones):
         # Size unknown and every zone is a percentage of it. The reading is

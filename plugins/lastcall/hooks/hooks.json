@@ -7,7 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" PostToolUse",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" PostToolUse",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" PostToolUse",
             "timeout": 5
           }
         ]
@@ -18,7 +19,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" UserPromptSubmit",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" UserPromptSubmit",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" UserPromptSubmit",
             "timeout": 5
           }
         ]
@@ -29,7 +31,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" Stop",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" Stop",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" Stop",
             "timeout": 15
           }
         ]
@@ -40,7 +43,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" SessionStart",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" SessionStart",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" SessionStart",
             "timeout": 10
           }
         ]
@@ -51,7 +55,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" PostCompact",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" PostCompact",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" PostCompact",
             "timeout": 10
           }
         ]

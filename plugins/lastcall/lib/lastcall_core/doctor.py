@@ -13,6 +13,7 @@ from .config import load_config, state_dir
 from .engine import effective_window, read_usage
 from .render import RELAY_SCRIPT, read_template
 from .state import read_state
+from .windows import learned_path, learned_window, load_learned, match_window
 from .zones import describe_threshold, resolve_zones, zone_for
 
 
@@ -58,6 +59,44 @@ def _fmt(number):
     return "{:,}".format(number)
 
 
+def _when(epoch):
+    import time
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(int(epoch)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "?"
+
+
+def windows_report(config):
+    """Lines describing the `windows` map and the learned windows."""
+    lines = ["\n  windows (model -> context window)"]
+    mapped = config.get("windows") or {}
+    if mapped:
+        for key in sorted(mapped, key=lambda k: k.lower()):
+            lines.append("    map      %-34s %s" % (key, _fmt(mapped[key])))
+    else:
+        lines.append('    map      (none — set "windows" in your config, e.g. '
+                     '{"claude-opus-5-5": 1000000})')
+    learned = load_learned(config)
+    entries = [(key, entry) for key, entry in learned.items()
+               if isinstance(entry, dict) and isinstance(entry.get("window"), int)]
+    if entries:
+        for key, entry in sorted(entries):
+            seen = entry.get("seen") if isinstance(entry.get("seen"), dict) else {}
+            others = sorted(int(w) for w in seen if str(w).isdigit()
+                            and int(w) != entry["window"])
+            note = ""
+            if others:
+                note = "  (also seen: %s — pin it in \"windows\")" % ", ".join(
+                    _fmt(w) for w in others)
+            lines.append("    learned  %-34s %s  from %s, %s%s" % (
+                key, _fmt(entry["window"]), entry.get("source") or "?",
+                _when(entry.get("at")), note))
+    else:
+        lines.append("    learned  (none yet: %s)" % learned_path(config))
+    return lines
+
+
 def doctor(argv, version="?", env=None):
     env = os.environ if env is None else env
     payload = {"cwd": os.getcwd()}
@@ -94,6 +133,8 @@ def doctor(argv, version="?", env=None):
         "%s tokens (Claude Code, when nothing reports the window)" % _fmt(fallback)
         if fallback else "off — stay silent while the window is unknown"))
     print("  disabled      : %s" % bool(config["disabled"]))
+    for line in windows_report(config):
+        print(line)
 
     ready, checks = handover_status(config)
     print("\n  automatic handover: %s" % ("READY" if ready else "NOT SET UP"))
@@ -168,6 +209,15 @@ def doctor(argv, version="?", env=None):
               "status line to make it exact.")
     else:
         print("  window        : %s tokens (%s)" % (_fmt(window), source))
+    print("  window source : %s" % source)
+    if source == "map":
+        _w, key = match_window(config.get("windows"), agent.name, usage.model)
+        print("                  matched windows[\"%s\"]" % key)
+    elif source == "learned":
+        _w, entry = learned_window(load_learned(config), agent.name, usage.model)
+        if entry:
+            print("                  learned from %s on %s"
+                  % (entry.get("source") or "?", _when(entry.get("at"))))
     if source.startswith("config says"):
         print("  PROBLEM       : context_window_tokens in your config is wrong.")
         print("                  Set it to %s, or delete it and let the status"

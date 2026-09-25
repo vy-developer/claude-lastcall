@@ -1,0 +1,124 @@
+#!/bin/sh
+# lastcall-hook -- start the Last Call hook with a Python 3 that works.
+#
+#     sh "${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook" <Event>   (payload on stdin)
+#
+# Desktop apps (Claude desktop, Codex Desktop) start hooks with a minimal
+# PATH, where `python3` may be missing, or may be /usr/bin/python3 -- on macOS
+# a stub that needs the Command Line Tools and otherwise pops an install
+# dialog instead of running. So pick an interpreter, first that works:
+#
+#   1. $LASTCALL_PYTHON
+#   2. python3 on PATH (the macOS stub only when the developer tools exist)
+#   3. /opt/homebrew/bin/python3, /usr/local/bin/python3, /usr/bin/python3
+#      (same rule), ~/.pyenv/shims/python3, conda and friends
+#   4. python, then `py -3` (Git Bash on Windows) on PATH
+#
+# and exec lastcall.py with the same arguments and stdin. With none of them,
+# exit 0 without a word: the guard is fail-passive and must never block or
+# break the agent it watches. POSIX sh, no forks on the common path, so the
+# overhead is the shell's own start-up (a few ms).
+#
+# The _LASTCALL_HOOK_* variables exist only so the tests can stand in for
+# fixed system paths; nothing sets them in normal use.
+
+set -f  # PATH is split on ':' below; never glob its pieces
+
+case $0 in
+  */*) here=${0%/*} ;;
+  *) here=. ;;
+esac
+script=$here/lastcall.py
+
+stub=${_LASTCALL_HOOK_STUB:-/usr/bin/python3}
+xcrun=${_LASTCALL_HOOK_XCRUN:-/usr/bin/xcrun}
+devdirs=${_LASTCALL_HOOK_DEVDIRS:-/Library/Developer/CommandLineTools:/Applications/Xcode.app/Contents/Developer}
+if [ -n "${_LASTCALL_HOOK_FIXED+set}" ]; then
+  fixed=$_LASTCALL_HOOK_FIXED
+else
+  fixed=/opt/homebrew/bin/python3:/usr/local/bin/python3:$stub
+  if [ -n "$HOME" ]; then
+    fixed=$fixed:$HOME/.pyenv/shims/python3
+  fi
+  if [ -n "$CONDA_PREFIX" ]; then
+    fixed=$fixed:$CONDA_PREFIX/bin/python3
+  fi
+  if [ -n "$HOME" ]; then
+    fixed=$fixed:$HOME/miniconda3/bin/python3:$HOME/anaconda3/bin/python3:$HOME/miniforge3/bin/python3:$HOME/mambaforge/bin/python3
+  fi
+  fixed=$fixed:/opt/homebrew/Caskroom/miniconda/base/bin/python3:/opt/miniconda3/bin/python3:/opt/anaconda3/bin/python3:/opt/local/bin/python3
+fi
+
+found=
+# on_path NAME -- set $found to NAME's first executable on $PATH.
+on_path() {
+  _ifs_p=$IFS
+  IFS=:
+  for _dir in $PATH; do
+    [ -n "$_dir" ] || _dir=.
+    if [ -f "$_dir/$1" ] && [ -x "$_dir/$1" ]; then
+      IFS=$_ifs_p
+      found=$_dir/$1
+      return 0
+    fi
+  done
+  IFS=$_ifs_p
+  return 1
+}
+
+# runs PATH -- true when PATH can be executed without a prompt. Only the macOS
+# stub needs checking: it runs only with the Command Line Tools or Xcode.
+runs() {
+  [ -f "$1" ] && [ -x "$1" ] || return 1
+  [ "$1" = "$stub" ] || return 0
+  [ -x "$xcrun" ] || return 0  # no xcrun: not macOS, a real interpreter
+  _ifs_r=$IFS
+  IFS=:
+  for _dev in $devdirs; do
+    if [ -x "$_dev/usr/bin/python3" ]; then
+      IFS=$_ifs_r
+      return 0
+    fi
+  done
+  IFS=$_ifs_r
+  # A developer directory elsewhere (a renamed Xcode): ask, the one fork.
+  _select=xcode-select
+  on_path xcode-select && _select=$found
+  _dev=$("$_select" -p 2>/dev/null) && [ -n "$_dev" ] && [ -x "$_dev/usr/bin/python3" ]
+}
+
+if [ -n "$LASTCALL_PYTHON" ]; then
+  case $LASTCALL_PYTHON in
+    */*) [ -x "$LASTCALL_PYTHON" ] && exec "$LASTCALL_PYTHON" "$script" "$@" ;;
+    *) on_path "$LASTCALL_PYTHON" && exec "$found" "$script" "$@" ;;
+  esac
+fi
+
+if on_path python3 && runs "$found"; then
+  exec "$found" "$script" "$@"
+fi
+
+_saved=$IFS
+IFS=:
+for candidate in $fixed; do
+  IFS=$_saved
+  if [ -n "$candidate" ] && runs "$candidate"; then
+    exec "$candidate" "$script" "$@"
+  fi
+done
+IFS=$_saved
+
+if on_path python && runs "$found"; then
+  exec "$found" "$script" "$@"
+fi
+if on_path py; then
+  exec "$found" -3 "$script" "$@"
+fi
+if on_path py.exe; then
+  exec "$found" -3 "$script" "$@"
+fi
+
+# Nothing to run it with. Drain stdin so the agent's write never fails, and
+# stay out of the way.
+cat >/dev/null 2>&1 || :
+exit 0

@@ -553,6 +553,88 @@ class TestPredecessorRetirement(RelayCase):
                          "--dry-run").stdout.decode()
         self.assertNotIn("tmux kill-session", out)
 
+    def handover(self, old, kill_exit=0):
+        """A full, non-dry handover against a tmux stub that plays both
+        sessions: it names the predecessor, lets the successor "make a tool
+        call" by writing its transcript, and records every kill-session."""
+        self.stub("tmux", r'''#!/bin/sh
+case "$1" in
+    has-session) exit 1 ;;
+    display-message)
+        case "$5" in
+            '#{pane_dead}') echo 0 ;;
+            *) printf '%s\n' "$OLD_SESSION" ;;
+        esac ;;
+    respawn-pane)
+        sid=$(printf '%s' "$5" | sed -n 's/.*--session-id \([0-9a-f-]*\).*/\1/p')
+        mkdir -p "$PROJECTS_DIR"
+        echo '{"message":{"content":[{"type":"tool_use"}]}}' > "$PROJECTS_DIR/$sid.jsonl" ;;
+    kill-session)
+        printf '%s\n' "$3" >> "$KILLS"
+        echo "no such session" >&2
+        exit "$KILL_EXIT" ;;
+esac
+exit 0
+''')
+        self.kills = os.path.join(self.tmp, "kills")
+        self.logs = os.path.join(self.tmp, "logs")
+        repo = self.configured(kill_predecessor=True)
+        with open(os.path.join(self.tmp, ".claude.json"), "w") as handle:
+            json.dump({"projects": {}}, handle)
+        result = self.relay(repo, "--trust", env_extra={
+            "TMUX_PANE": "%1", "OLD_SESSION": old, "KILLS": self.kills,
+            "KILL_EXIT": str(kill_exit), "LASTCALL_KILL_DELAY": "0",
+            "SETTLE": "0", "LOG_DIR": self.logs,
+            "PROJECTS_DIR": os.path.join(self.tmp, "projects")})
+        return result
+
+    def wait_for(self, path):
+        import time
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if os.path.exists(path) and os.path.getsize(path):
+                return
+            time.sleep(0.1)
+        self.fail("nothing appeared at %s" % path)
+
+    def retire_log(self):
+        names = [n for n in os.listdir(self.logs) if n.startswith("retire-")]
+        self.assertEqual(len(names), 1, names)
+        path = os.path.join(self.logs, names[0])
+        self.wait_for(path)
+        with open(path) as handle:
+            return handle.read()
+
+    def test_the_predecessor_is_actually_retired(self):
+        """setsid does not exist on macOS, and `setsid ... &` failed there in
+        silence while the log said "retiring" — every handover left its
+        predecessor running. The kill must really be delivered."""
+        result = self.handover("old-session")
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.wait_for(self.kills)
+        with open(self.kills) as handle:
+            self.assertEqual(handle.read(), "=old-session\n")
+        self.assertIn("retired old-session", self.retire_log())
+
+    def test_a_session_name_is_never_run_as_shell(self):
+        """The name used to be spliced into `sh -c` text unquoted."""
+        marker = os.path.join(self.tmp, "pwned")
+        old = "x'; touch %s; '" % marker
+        result = self.handover(old)
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.wait_for(self.kills)
+        with open(self.kills) as handle:
+            self.assertEqual(handle.read(), "=%s\n" % old)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_a_failed_kill_is_logged_as_a_failure(self):
+        result = self.handover("old-session", kill_exit=1)
+        self.assertEqual(result.returncode, 0, result.stdout.decode())
+        self.assertIn(b"retirement outcome will be logged", result.stdout)
+        log = self.retire_log()
+        self.assertIn("FAILED to retire old-session", log)
+        self.assertIn("no such session", log)
+
     def test_nothing_is_retired_on_a_dry_run(self):
         out = self.relay(self.configured(kill_predecessor=True),
                          "--dry-run").stdout.decode()

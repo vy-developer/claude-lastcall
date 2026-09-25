@@ -555,8 +555,10 @@ What the relay does, in order, refusing to continue at the first failure:
   after the successor has made a real tool call and survived the settle. The
   kill is detached and delayed a few seconds, because the launcher is running
   *inside* the session it is retiring: killing it inline would take the
-  launcher with it mid-write, leaving no log and no exit status. Off by
-  default; without it the successor is merely *asked* to retire the
+  launcher with it mid-write, leaving no log and no exit status. Whether the
+  kill succeeded is written to `retire-<successor>.log` beside the spawn log,
+  and if it cannot even be scheduled the launcher says so and prints the
+  command to do it by hand. Off by default; without it the successor is merely *asked* to retire the
   predecessor, which is an instruction to a model, not a guarantee. Either way
   a failed spawn leaves the old session alive to report the failure
 
@@ -620,7 +622,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-224 tests, standard library only, no network. They cover the failure modes that
+227 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

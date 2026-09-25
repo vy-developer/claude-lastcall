@@ -4,9 +4,10 @@
 # OPT-IN AND UNIX-ONLY. The guard itself is portable Python and does not need
 # this. This script spawns a successor Claude Code session in tmux, seeded with
 # your newest handoff document, and waits until that successor has PROVEN it is
-# working before saying so. It never kills anything: retiring the predecessor is
-# the successor's job, after it has proved itself, so a failed spawn leaves the
-# old session alive to report the failure.
+# working before saying so. It kills nothing until then: the predecessor is
+# retired only after the successor has proved itself — by this script when
+# --kill-predecessor is set, otherwise by the successor when asked — so a failed
+# spawn always leaves the old session alive to report the failure.
 #
 # Nothing invokes this automatically. You reference it from your wrap-up
 # template, so the assistant runs it as the last step of winding down. See
@@ -128,7 +129,9 @@ done
 # Validate the numbers HERE, while a bad value is still a precondition failure.
 # The deadline arithmetic runs AFTER the spawn, so a non-numeric --timeout would
 # otherwise abort the shell with a session already created and no exit-2 report.
-for var in TIMEOUT SETTLE; do
+# KILL_DELAY too: it is only used after the successor has proved itself, which
+# is far too late to discover it is not a number.
+for var in TIMEOUT SETTLE KILL_DELAY; do
     case "${!var}" in
         ''|*[!0-9]*) echo "$var must be a whole number of seconds, got: ${!var}" >&2; exit 1 ;;
     esac
@@ -621,11 +624,54 @@ if [ -n "$OLD" ] && [ "$KILL_PREDECESSOR" -eq 1 ]; then
     # it is about to kill. Killing it inline would take the launcher with it
     # mid-write: no final log, no exit status, no report. The delay lets this
     # process finish reporting and exit first.
-    say "retiring $OLD in ${KILL_DELAY}s (successor proved itself)"
-    setsid nohup sh -c \
-        "sleep $KILL_DELAY; $TMUX_BIN kill-session -t '=$OLD' >/dev/null 2>&1" \
-        >/dev/null 2>&1 </dev/null &
-    disown 2>/dev/null || true
+    #
+    # Detached with python3 rather than setsid(1). setsid is util-linux and does
+    # not exist on macOS, and `setsid ... &` failed there in silence while the
+    # log said "retiring" — every handover left its predecessor running. python3
+    # is already a hard requirement, so this is one path on every platform.
+    # The session name travels as an argument, never spliced into shell text:
+    # a name with a quote in it is a name, not a command.
+    RETIRE_LOG="$(dirname "$LOG")/retire-$NEW.log"
+    if retire_pid=$("$PYTHON_BIN" - "$KILL_DELAY" "$TMUX_BIN" "$OLD" "$RETIRE_LOG" <<'PY'
+import os, signal, subprocess, sys, time
+
+delay, tmux, old, log = sys.argv[1:5]
+if os.fork():
+    raise SystemExit(0)
+# The child. A new session, so the kill it is about to deliver to the tmux
+# session that launched it cannot reach it; stdout closed, so the launcher's
+# $( ) returns now rather than when the sleep ends.
+os.setsid()
+print(os.getpid(), flush=True)
+null = os.open(os.devnull, os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+time.sleep(int(delay))
+try:
+    result = subprocess.run([tmux, "kill-session", "-t", "=" + old],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    code, detail = result.returncode, result.stderr.decode("utf-8", "replace")
+except OSError as error:
+    code, detail = -1, str(error)
+try:
+    with open(log, "a", encoding="utf-8") as fh:
+        stamp = time.strftime("%H:%M:%S")
+        if code == 0:
+            fh.write("%s retired %s\n" % (stamp, old))
+        else:
+            fh.write("%s FAILED to retire %s (exit %s): %s\n"
+                     % (stamp, old, code, detail.strip()))
+except OSError:
+    pass
+PY
+    ) && [ -n "$retire_pid" ]; then
+        say "retiring $OLD in ${KILL_DELAY}s (successor proved itself; pid $retire_pid)"
+        say "retirement outcome will be logged to $RETIRE_LOG"
+    else
+        say "WARNING: could NOT schedule the retirement of $OLD — it is still running."
+        say "         Retire it yourself: $TMUX_BIN kill-session -t $(printf '%q' "=$OLD")"
+    fi
 elif [ -n "$OLD" ]; then
     say "it will retire $OLD once it has proved its first step and committed a checkpoint"
 fi

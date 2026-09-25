@@ -152,6 +152,9 @@ class TestReleaseHygiene(unittest.TestCase):
         with open(os.path.join(ROOT, "plugins", "lastcall", ".claude-plugin",
                                "plugin.json")) as fh:
             plugin = json.load(fh)
+        with open(os.path.join(ROOT, "plugins", "lastcall", ".codex-plugin",
+                               "plugin.json")) as fh:
+            codex_plugin = json.load(fh)
         with open(os.path.join(ROOT, "plugins", "lastcall", "scripts",
                                "lastcall.py")) as fh:
             code = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M).group(1)
@@ -159,6 +162,7 @@ class TestReleaseHygiene(unittest.TestCase):
             "marketplace.metadata": market["metadata"]["version"],
             "marketplace.plugins[0]": market["plugins"][0]["version"],
             "plugin.json": plugin["version"],
+            ".codex-plugin/plugin.json": codex_plugin["version"],
             "lastcall.py": code,
         }
 

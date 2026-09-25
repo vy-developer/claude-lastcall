@@ -95,6 +95,18 @@ LEDGER_DIR_ENV = "LASTCALL_RELAY_DIR"
 AGENTS = ("claude", "codex")
 SEP = " · "
 
+# The successor's permission mode. Claude Code takes any of these as
+# --permission-mode (it lists "default" as "manual" since 2.1.x and still
+# accepts "default"); bypassPermissions is passed as
+# --dangerously-skip-permissions. A Codex successor maps bypassPermissions to
+# full access (no sandbox, approvals bypassed) and keeps codex_sandbox /
+# codex_approval for every other mode. "inherit" is the default behaviour:
+# auto, or bypass when the predecessor itself runs in bypass mode.
+BYPASS = "bypassPermissions"
+DEFAULT_PERMISSION_MODE = "auto"
+PERMISSION_MODES = ("auto", "default", "acceptEdits", "plan", "dontAsk", BYPASS)
+PERMISSION_CHOICES = PERMISSION_MODES + ("inherit",)
+
 # Every wait the relay does (the spawn, the check-in, remote control, naming
 # the thread) comes out of one budget. Claude Code's Bash tool gives a command
 # 2 minutes by default; the default budget fits inside that with room to spare.
@@ -1192,6 +1204,84 @@ def codex_app_runner_main(argv, out=None):
     return AppRunner(p.parse_args(argv), out).run()
 
 
+# ------------------------------------------------------------ permissions
+
+
+def resolve_permission_mode(cli_skip=None, cli_mode=None, config_skip=None,
+                            config_mode=None, predecessor_mode=None):
+    """(mode, why) for the successor, first match wins:
+
+      1. flags:  --skip-permissions, else --permission-mode
+      2. config: relay.skip_permissions true, else relay.permission_mode
+      3. the predecessor runs in bypass mode -> bypass
+      4. auto
+
+    Within a level skipping permissions beats a mode, as it always has. An
+    explicit "no" (--no-skip-permissions, or skip_permissions false in the
+    config) rules out bypass from every level below it, the predecessor's
+    included. "inherit" at a level skips the levels below it straight to 3."""
+    refused = None      # the explicit "no" that rules bypass out below it
+    ruled_out = False   # a lower level asked for bypass and was overruled
+    for skip_on, skip_off, mode_label, skip, mode in (
+            ("--skip-permissions", "--no-skip-permissions", "--permission-mode",
+             cli_skip, cli_mode),
+            ("from config: skip_permissions", "skip_permissions false in the config",
+             "from config: permission_mode", config_skip, config_mode)):
+        if mode is not None and mode not in PERMISSION_CHOICES:
+            raise ValueError("unknown permission mode %r (%s)"
+                             % (mode, "|".join(PERMISSION_CHOICES)))
+        if skip is False and mode == BYPASS:
+            raise ValueError("%s contradicts permission mode %s" % (skip_off, BYPASS))
+        if not refused and skip is True:
+            return BYPASS, skip_on
+        if not refused and mode == BYPASS:
+            return BYPASS, mode_label
+        if skip is True or mode == BYPASS:
+            ruled_out = True
+        if skip is False:
+            refused = refused or skip_off
+        if mode == "inherit":
+            break
+        if mode is not None and mode != BYPASS:
+            return mode, mode_label
+    if predecessor_mode == BYPASS:
+        if refused:
+            return DEFAULT_PERMISSION_MODE, ("default; the predecessor's bypass is not "
+                                             "inherited: %s" % refused)
+        return BYPASS, "predecessor is in bypass mode"
+    if ruled_out:
+        return DEFAULT_PERMISSION_MODE, "default; bypass ruled out: %s" % refused
+    return DEFAULT_PERMISSION_MODE, "default"
+
+
+def predecessor_permission_mode(pred, env, cwd=None):
+    """The permission mode the predecessor's own hooks last recorded in its
+    Last Call state (every hook payload carries it), or None when unknown."""
+    if not pred.get("session_id") or pred.get("agent") not in AGENTS:
+        return None
+    try:
+        config = _config_module().load_config({"cwd": cwd or os.getcwd()}, env)
+        return _core_module("state").recorded_permission_mode(
+            config, pred["session_id"], pred["agent"], env)
+    except Exception:  # noqa: BLE001 - unknown means the default, never a failure
+        return None
+
+
+def permission_summary(opts, agent, why):
+    """The dry-run / plan line: the mode that was chosen, and why."""
+    if agent == "claude":
+        if opts.skip_permissions:
+            return "bypass (%s) — no permission prompts" % why
+        return "%s (%s)" % (opts.permission_mode, why)
+    sandbox = codex_app_sandbox(opts) if opts.codex_mode == "app" else opts.codex_sandbox
+    if opts.skip_permissions:
+        return "bypass (%s) — sandbox %s, approvals bypassed" % (why, sandbox)
+    line = "sandbox %s, approval %s" % (sandbox, opts.codex_approval)
+    if why.startswith("default"):
+        return "%s (%s)" % (line, why)
+    return "%s (default; %s is a Claude mode — %s)" % (line, opts.permission_mode, why)
+
+
 # ------------------------------------------------------------ predecessor
 
 
@@ -1490,7 +1580,16 @@ class Relay:
             "model" if o.agent == "claude" else "codex_model")
         o.fallback_model = pick(o.fallback_model, "fallback_model") if o.agent == "claude" else None
         o.remote_control = bool(pick(o.remote_control, "remote_control", True))
-        o.skip_permissions = bool(pick(o.skip_permissions, "skip_permissions", False))
+        # Permissions are settled in build(), once the predecessor is known.
+        # "when set": a skip_permissions of false in the config is a choice too.
+        skip = config.get("skip_permissions")
+        mode = config.get("permission_mode")
+        if mode is not None and mode not in PERMISSION_CHOICES:
+            raise ValueError("unknown relay.permission_mode %r (%s)"
+                             % (mode, "|".join(PERMISSION_CHOICES)))
+        self.permission_inputs = dict(cli_skip=o.skip_permissions, cli_mode=o.permission_mode,
+                                      config_skip=None if skip is None else bool(skip),
+                                      config_mode=mode)
         # "kill_predecessor" is the name handoff.sh used; either one works.
         o.retire = bool(pick(o.retire, "retire_predecessor",
                              config.get("kill_predecessor", False)))
@@ -1555,6 +1654,10 @@ class Relay:
         topic = o.topic if o.topic is not None else handoff_topic(handoff)
         name = successor_name(o.name_prefix, generation, topic)
         pred = detect_predecessor(env, o.predecessor_agent, o.predecessor, o.tmux_bin)
+        pred["permission_mode"] = predecessor_permission_mode(pred, env)
+        o.permission_mode, self.permission_why = resolve_permission_mode(
+            predecessor_mode=pred["permission_mode"], **self.permission_inputs)
+        o.skip_permissions = o.permission_mode == BYPASS
         retirement = plan_retirement(pred, o.claude_bin, o.tmux_bin) if o.retire \
             else {"method": "none", "why": "not requested (pass --retire-predecessor)"}
         prompt = build_prompt(handoff, o.retire and retirement["method"] != "none")
@@ -1636,11 +1739,7 @@ class Relay:
             self.say("  check-in:    the plugin's SessionStart hook; without it, the one "
                      "rollout under %s CREATED after the spawn whose cwd is the repo "
                      "(never the predecessor's)" % os.path.join(codex_home(self.env), "sessions"))
-        self.say("  permissions: %s" % ("SKIPPED (unattended)" if o.skip_permissions
-                                        else (o.permission_mode or "normal")
-                                        if p["agent"] == "claude" else
-                                        codex_app_sandbox(o) if o.codex_mode == "app"
-                                        else o.codex_sandbox))
+        self.say("  permissions: %s" % permission_summary(o, p["agent"], self.permission_why))
         self.say("  model:       %s%s" % (o.model or "<default>",
                                          "  fallback: %s" % o.fallback_model
                                          if o.fallback_model else ""))
@@ -2094,9 +2193,13 @@ def parser(prog="relay.py"):
     p.add_argument("--require-remote-control", action="store_true",
                    help="exit 2 (and retire nothing) if remote control does not connect")
     _bool_flag(p, "skip-permissions", "skip_permissions",
-               "run the successor without permission prompts (dangerous)",
-               "keep permission prompts on")
-    p.add_argument("--permission-mode", help="claude: --permission-mode for the successor")
+               "run the successor in bypass mode, without permission prompts (dangerous; "
+               "codex: full access, approvals bypassed)",
+               "never bypass permissions, even when this session runs in bypass mode")
+    p.add_argument("--permission-mode", choices=PERMISSION_CHOICES,
+                   help="the successor's permission mode. Default (inherit): auto, or bypass "
+                        "when this session runs in bypass mode. bypassPermissions is the same "
+                        "as --skip-permissions; codex successors use only that one")
     p.add_argument("--codex-mode", choices=CODEX_MODES,
                    help="codex: `app` (default) runs it through `codex app-server` so it shows "
                         "in the Codex app and `codex resume`; `exec` a hidden `codex exec "

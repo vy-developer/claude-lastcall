@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1041,6 +1042,280 @@ class TestAgentDefault(RelayCoreCase):
         self.assertIn("via hook", result.stdout)
         spawn = [c for c in self.calls() if "--bg" in c["argv"]][0]
         self.assertIsNotNone(spawn["chain"])
+
+
+class TestPermissionPrecedence(unittest.TestCase):
+    """flags > config > the predecessor's bypass > auto."""
+
+    def resolve(self, **kw):
+        return relay.resolve_permission_mode(**kw)
+
+    def test_the_matrix(self):
+        B, A = relay.BYPASS, "auto"
+        cases = [
+            # (cli_skip, cli_mode, config_skip, config_mode, predecessor) -> (mode, why)
+            ((None, None, None, None, None), (A, "default")),
+            ((None, None, None, None, "acceptEdits"), (A, "default")),
+            ((None, None, None, None, "default"), (A, "default")),
+            ((None, None, None, None, B), (B, "predecessor is in bypass mode")),
+            ((None, None, None, "inherit", B), (B, "predecessor is in bypass mode")),
+            ((None, None, None, "plan", B), ("plan", "from config: permission_mode")),
+            ((None, None, None, B, None), (B, "from config: permission_mode")),
+            ((None, None, True, None, None), (B, "from config: skip_permissions")),
+            ((None, None, True, "plan", None), (B, "from config: skip_permissions")),
+            ((None, None, False, None, B),
+             (A, "default; the predecessor's bypass is not inherited: "
+                 "skip_permissions false in the config")),
+            ((None, None, False, "acceptEdits", B), ("acceptEdits", "from config: permission_mode")),
+            ((True, None, None, None, None), (B, "--skip-permissions")),
+            ((True, None, False, "plan", None), (B, "--skip-permissions")),
+            ((None, "acceptEdits", True, None, B), ("acceptEdits", "--permission-mode")),
+            ((None, "default", None, None, B), ("default", "--permission-mode")),
+            ((None, B, None, None, None), (B, "--permission-mode")),
+            ((None, "inherit", None, "plan", B), (B, "predecessor is in bypass mode")),
+            ((None, "inherit", True, None, None), (A, "default")),
+            ((False, None, None, None, B),
+             (A, "default; the predecessor's bypass is not inherited: --no-skip-permissions")),
+            ((False, None, True, None, None), (A, "default; bypass ruled out: --no-skip-permissions")),
+            ((False, None, None, B, None), (A, "default; bypass ruled out: --no-skip-permissions")),
+            ((False, None, True, "plan", None), ("plan", "from config: permission_mode")),
+            ((False, None, True, "inherit", B),
+             (A, "default; the predecessor's bypass is not inherited: --no-skip-permissions")),
+            ((False, None, None, "plan", B), ("plan", "from config: permission_mode")),
+            ((False, "dontAsk", None, None, B), ("dontAsk", "--permission-mode")),
+        ]
+        for (cli_skip, cli_mode, config_skip, config_mode, pred), expected in cases:
+            got = self.resolve(cli_skip=cli_skip, cli_mode=cli_mode, config_skip=config_skip,
+                               config_mode=config_mode, predecessor_mode=pred)
+            self.assertEqual(got, expected, (cli_skip, cli_mode, config_skip, config_mode, pred))
+
+    def test_nonsense_and_contradictions_are_refused(self):
+        with self.assertRaises(ValueError):
+            self.resolve(config_mode="yolo")
+        with self.assertRaises(ValueError):
+            self.resolve(cli_mode="manual-ish")
+        with self.assertRaises(ValueError):
+            self.resolve(cli_skip=False, cli_mode=relay.BYPASS)
+        with self.assertRaises(ValueError):
+            self.resolve(config_skip=False, config_mode=relay.BYPASS)
+
+    def test_every_choice_but_inherit_is_a_claude_permission_mode(self):
+        self.assertEqual(set(relay.PERMISSION_CHOICES) - set(relay.PERMISSION_MODES),
+                         {"inherit"})
+        self.assertIn("auto", relay.PERMISSION_MODES)
+        self.assertEqual(relay.DEFAULT_PERMISSION_MODE, "auto")
+
+
+class TestSuccessorPermissions(RelayCoreCase):
+    """Auto by default; bypass when the predecessor runs in bypass mode, as
+    its own hooks recorded it in its Last Call state."""
+
+    CLAUDE_SID = "5e551011-aaaa-4bbb-8ccc-000000000001"
+    CODEX_TID = "01a0d9b2-aaaa-7000-8000-000000000002"
+
+    def record(self, agent, session, mode):
+        """What the predecessor's hooks leave behind (engine.note_permission_mode)."""
+        folder = os.path.join(self.tmp, ".lastcall", "state")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "%s-%s.json" % (agent, session)), "w") as fh:
+            json.dump({"permission_mode": mode, "agent": agent, "_lastcall": 1}, fh)
+
+    def claude_pred(self, mode=None):
+        if mode:
+            self.record("claude", self.CLAUDE_SID, mode)
+        return {"CLAUDE_CODE_SESSION_ID": self.CLAUDE_SID, "CLAUDECODE": "1"}
+
+    def codex_pred(self, mode=None):
+        if mode:
+            self.record("codex", self.CODEX_TID, mode)
+        return {"CODEX_THREAD_ID": self.CODEX_TID}
+
+    def configure(self, repo, relay_block):
+        with open(os.path.join(repo, ".lastcall.json"), "w") as fh:
+            json.dump({"relay": relay_block}, fh)
+        subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "cfg"], check=True)
+        return repo
+
+    def dry(self, *args, extra=None, repo=None):
+        result = self.relay(repo or self.repo(), "--dry-run", *args, extra=extra)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        return result.stdout
+
+    @staticmethod
+    def spawn(out):
+        line = [l for l in out.splitlines() if l.startswith("  spawn:")][0]
+        return shlex.split(line.split(":", 1)[1])
+
+    @staticmethod
+    def permissions(out):
+        return [l for l in out.splitlines() if l.startswith("  permissions:")][0] \
+            .split(":", 1)[1].strip()
+
+    # -- Claude successors -------------------------------------------------
+
+    def test_default_is_auto_mode(self):
+        out = self.dry()
+        argv = self.spawn(out)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+        self.assertEqual(self.permissions(out), "auto (default)")
+
+    def test_unknown_predecessor_mode_means_auto(self):
+        out = self.dry(extra=self.claude_pred())    # a session with no state yet
+        self.assertEqual(self.permissions(out), "auto (default)")
+
+    def test_a_non_bypass_predecessor_still_gets_auto(self):
+        out = self.dry(extra=self.claude_pred("acceptEdits"))
+        argv = self.spawn(out)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
+        self.assertIn("permission_mode=acceptEdits", out)
+
+    def test_a_bypass_predecessor_hands_bypass_on(self):
+        out = self.dry(extra=self.claude_pred("bypassPermissions"))
+        argv = self.spawn(out)
+        self.assertIn("--dangerously-skip-permissions", argv)
+        self.assertNotIn("--permission-mode", argv)
+        self.assertEqual(self.permissions(out),
+                         "bypass (predecessor is in bypass mode) — no permission prompts")
+        self.assertIn("permission_mode=bypassPermissions", out)
+
+    def test_the_spawned_claude_really_gets_the_inherited_flag(self):
+        result = self.relay(self.repo(), extra=self.claude_pred("bypassPermissions"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        spawn = [c for c in self.calls() if "--bg" in c["argv"]][0]
+        self.assertIn("--dangerously-skip-permissions", spawn["argv"])
+        self.assertIsNone(spawn["leak"], "the successor must not inherit the session id")
+
+    def test_the_spawned_claude_really_gets_auto(self):
+        result = self.relay(self.repo(), extra=self.claude_pred("default"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        spawn = [c for c in self.calls() if "--bg" in c["argv"]][0]
+        argv = spawn["argv"]
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
+
+    def test_config_permission_mode_beats_inheritance(self):
+        repo = self.configure(self.repo(), {"permission_mode": "plan"})
+        out = self.dry(repo=repo, extra=self.claude_pred("bypassPermissions"))
+        argv = self.spawn(out)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertEqual(self.permissions(out), "plan (from config: permission_mode)")
+
+    def test_config_skip_permissions_false_refuses_to_inherit_bypass(self):
+        repo = self.configure(self.repo(), {"skip_permissions": False})
+        out = self.dry(repo=repo, extra=self.claude_pred("bypassPermissions"))
+        self.assertNotIn("--dangerously-skip-permissions", self.spawn(out))
+        self.assertIn("auto (default; the predecessor's bypass is not inherited: "
+                      "skip_permissions false in the config)", out)
+
+    def test_config_bypass_mode_is_bypass(self):
+        repo = self.configure(self.repo(), {"permission_mode": "bypassPermissions"})
+        out = self.dry(repo=repo)
+        self.assertIn("--dangerously-skip-permissions", self.spawn(out))
+        self.assertIn("bypass (from config: permission_mode)", out)
+
+    def test_config_inherit_is_the_default_behaviour(self):
+        repo = self.configure(self.repo(), {"permission_mode": "inherit"})
+        self.assertEqual(self.permissions(self.dry(repo=repo)), "auto (default)")
+        out = self.dry(repo=repo, extra=self.claude_pred("bypassPermissions"))
+        self.assertIn("bypass (predecessor is in bypass mode)", out)
+
+    def test_flags_beat_the_config(self):
+        repo = self.configure(self.repo(), {"skip_permissions": True})
+        out = self.dry("--permission-mode", "acceptEdits", repo=repo)
+        argv = self.spawn(out)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "acceptEdits")
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+        self.assertEqual(self.permissions(out), "acceptEdits (--permission-mode)")
+
+    def test_no_skip_permissions_refuses_to_inherit_bypass(self):
+        out = self.dry("--no-skip-permissions", extra=self.claude_pred("bypassPermissions"))
+        self.assertNotIn("--dangerously-skip-permissions", self.spawn(out))
+        self.assertIn("auto (default; the predecessor's bypass is not inherited: "
+                      "--no-skip-permissions)", out)
+
+    def test_a_bad_config_mode_is_a_precondition_failure(self):
+        repo = self.configure(self.repo(), {"permission_mode": "yolo"})
+        result = self.relay(repo, "--dry-run")
+        self.assertEqual(result.returncode, relay.EXIT_PRECONDITION, result.stdout)
+        self.assertIn("unknown relay.permission_mode 'yolo'", result.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_bad_flag_mode_is_refused_by_the_parser(self):
+        result = self.relay(self.repo(), "--dry-run", "--permission-mode", "yolo")
+        self.assertEqual(result.returncode, relay.EXIT_PRECONDITION, result.stdout)
+
+    def test_a_codex_bypass_predecessor_hands_bypass_to_claude(self):
+        out = self.dry("--agent", "claude", extra=self.codex_pred("bypassPermissions"))
+        self.assertIn("--dangerously-skip-permissions", self.spawn(out))
+        self.assertIn("bypass (predecessor is in bypass mode)", out)
+
+    # -- Codex successors --------------------------------------------------
+
+    def runner_flag(self, argv, flag):
+        return argv[argv.index(flag) + 1]
+
+    def test_codex_default_is_workspace_write_and_never(self):
+        out = self.dry(extra=self.codex_pred("default"))
+        argv = self.spawn(out)
+        self.assertEqual(self.runner_flag(argv, "--sandbox"), "workspace-write")
+        self.assertEqual(self.runner_flag(argv, "--approval"), "never")
+        self.assertNotIn("--auto-approve", argv)
+        self.assertEqual(self.permissions(out),
+                         "sandbox workspace-write, approval never (default)")
+
+    def test_a_codex_bypass_predecessor_gets_full_access(self):
+        out = self.dry(extra=self.codex_pred("bypassPermissions"))
+        argv = self.spawn(out)
+        self.assertEqual(self.runner_flag(argv, "--sandbox"), "danger-full-access")
+        self.assertIn("--auto-approve", argv)
+        self.assertEqual(self.permissions(out),
+                         "bypass (predecessor is in bypass mode) — sandbox danger-full-access, "
+                         "approvals bypassed")
+
+    def test_codex_exec_and_tmux_bypass_via_the_codex_flag(self):
+        repo = self.repo()
+        for mode in ("exec", "tmux"):
+            out = self.dry("--codex-mode", mode, repo=repo,
+                           extra=self.codex_pred("bypassPermissions"))
+            spawn = [l for l in out.splitlines() if l.startswith("  spawn:")][0]
+            self.assertIn("--dangerously-bypass-approvals-and-sandbox", spawn, mode)
+            self.assertNotIn(" -s workspace-write", spawn, mode)
+
+    def test_a_claude_bypass_predecessor_hands_full_access_to_codex(self):
+        out = self.dry("--agent", "codex", "--codex-mode", "exec",
+                       extra=self.claude_pred("bypassPermissions"))
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", self.spawn(out))
+
+    def test_a_claude_only_mode_leaves_codex_on_its_sandbox(self):
+        repo = self.configure(self.repo(), {"permission_mode": "plan"})
+        out = self.dry("--agent", "codex", repo=repo)
+        argv = self.spawn(out)
+        self.assertEqual(self.runner_flag(argv, "--sandbox"), "workspace-write")
+        self.assertIn("(default; plan is a Claude mode — from config: permission_mode)",
+                      self.permissions(out))
+
+    def test_the_real_codex_app_thread_starts_with_full_access(self):
+        result = self.relay(self.repo(), extra=self.codex_pred("bypassPermissions"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.wait_for_runner_exit()
+        start = self.rpc_messages("thread/start")[0]["params"]
+        self.assertEqual(start["sandbox"], "danger-full-access")
+
+    def test_the_hook_record_reaches_the_relay(self):
+        """End to end: the real hook script records the mode, the relay reads it."""
+        transcript = os.path.join(self.tmp, "t.jsonl")
+        open(transcript, "w").close()
+        payload = {"session_id": self.CLAUDE_SID, "hook_event_name": "PostToolUse",
+                   "transcript_path": transcript, "cwd": self.tmp, "tool_name": "Bash",
+                   "permission_mode": "bypassPermissions"}
+        hook = subprocess.run([sys.executable, HOOK_SCRIPT, "PostToolUse"],
+                              input=json.dumps(payload), stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, universal_newlines=True,
+                              env=self.env(), cwd=self.tmp)
+        self.assertEqual(hook.returncode, 0, hook.stderr)
+        out = self.dry(extra=self.claude_pred())
+        self.assertIn("--dangerously-skip-permissions", self.spawn(out))
 
 
 class TestPluginCheckin(RelayCoreCase):

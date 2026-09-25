@@ -41,8 +41,9 @@ def _safe(session_id):
     return re.sub(r"[^A-Za-z0-9._-]", "-", session_id or "unknown")
 
 
-def state_path(config, session_id, agent="claude"):
-    return os.path.join(state_dir(config), "%s-%s.json" % (agent or "agent", _safe(session_id)))
+def state_path(config, session_id, agent="claude", env=None):
+    return os.path.join(state_dir(config, env),
+                        "%s-%s.json" % (agent or "agent", _safe(session_id)))
 
 
 def legacy_state_path(config, session_id, agent="claude"):
@@ -260,6 +261,34 @@ def update_state(config, session_id, changes, agent="claude"):
     current = SessionState(config, session_id, agent)
     current.update(changes)
     return current.save()
+
+
+# The session's permission mode as its hooks last saw it: every payload but
+# Claude's SessionStart carries "permission_mode" (Claude: default, acceptEdits,
+# plan, auto, dontAsk, bypassPermissions; Codex: default or bypassPermissions,
+# the latter only with approvals and the sandbox both off). The relay reads it
+# to let a successor inherit bypass mode.
+PERMISSION_MODE_KEY = "permission_mode"
+
+
+def note_permission_mode(state, payload):
+    """Record ``payload``'s permission_mode in ``state``; True when it changed.
+    Costs nothing when the mode is unchanged: no read, and nothing to save."""
+    mode = payload.get(PERMISSION_MODE_KEY) if isinstance(payload, dict) else None
+    if not isinstance(mode, str) or not mode or len(mode) > 64:
+        return False
+    if state.get(PERMISSION_MODE_KEY) == mode:
+        return False
+    state[PERMISSION_MODE_KEY] = mode
+    return True
+
+
+def recorded_permission_mode(config, session_id, agent, env=None):
+    """The permission mode a session's hooks last recorded, or None."""
+    if not session_id:
+        return None
+    mode = _load(state_path(config, session_id, agent, env)).get(PERMISSION_MODE_KEY)
+    return mode if isinstance(mode, str) and mode else None
 
 
 def prune_state(config):

@@ -37,8 +37,8 @@ from .agents import detect_agent
 from .config import home_dir, load_config
 from .render import (block_reason, compaction_message, onboarding_message,
                      render)
-from .state import (SessionState, mark_onboarded, prune_state, session_lock,
-                    was_onboarded, write_debug)
+from .state import (SessionState, mark_onboarded, note_permission_mode,
+                    prune_state, session_lock, was_onboarded, write_debug)
 from .windows import LEARNED_WINDOW_NOTE, check_compaction, learn, load_learned
 from .zones import effective_window as _effective_window
 from .zones import resolve_window, resolve_zones, zone_for, zone_threshold
@@ -190,8 +190,11 @@ def on_measure(agent, config, payload, event, env=None, out=None):
         return 0  # cannot measure -> stay silent rather than guess
     state = SessionState(config, session_id, agent.name)
     # Fast path. PostToolUse fires on every tool call; an unchanged transcript
-    # holds the same reading as last time, so there is nothing to decide.
+    # holds the same reading as last time, so there is nothing to decide —
+    # except a changed permission mode, which the relay reads.
     if not stop and state.get("sig") == signature:
+        if note_permission_mode(state, payload):
+            state.save()
         return 0
 
     try:
@@ -205,7 +208,11 @@ def on_measure(agent, config, payload, event, env=None, out=None):
         if lock.acquired is False:
             return 0  # another hook is judging this session; it speaks, not us
         state = SessionState(config, session_id, agent.name)
+        # Every path below saves the state, so this costs no extra write.
+        noted = note_permission_mode(state, payload)
         if not stop and state.get("sig") == signature:
+            if noted:
+                state.save()
             return 0  # a concurrent hook already judged this very reading
         return _judge(agent, config, payload, event, env, out, state, usage,
                       signature, stop, looping, transcript)
@@ -363,6 +370,7 @@ def on_session_start(agent, config, payload, env=None, out=None):
     out = out or sys.stdout
     source = payload.get("source")
     state = SessionState(config, payload.get("session_id"), agent.name)
+    note_permission_mode(state, payload)  # Codex sends it here; Claude does not
     now = time.time()
     messages = []
     onboard_project = None
@@ -413,8 +421,11 @@ def on_compacted(agent, config, payload, env=None, out=None):
     this event, and SessionStart(source=compact) carries the note on both."""
     state = SessionState(config, payload.get("session_id"), agent.name)
     now = time.time()
+    changed = note_permission_mode(state, payload)
     if now - state.number("rearmed_at") > REARM_DEDUP_SECONDS:
         _rearm(state, now)
+        changed = True
+    if changed:
         state.save()
     return 0
 

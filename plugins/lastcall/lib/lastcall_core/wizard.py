@@ -383,14 +383,18 @@ def setup(argv):
             if codex_model:
                 relay_cfg["codex_model"] = codex_model
 
-        # 7. Unattended — only ever on an explicit yes.
-        unattended = yes_no(
-            title("unattended"),
-            "the successor runs tools WITHOUT asking",
-            "it asks for permission like a normal session",
-            "y" if rec["skip_permissions"] else "n",
-            "Only a typed yes enables this. It is what lets a chain of sessions "
-            "continue while you are away.")
+        # 7. Permissions — bypass only ever on an explicit, typed choice.
+        permission = ask(
+            title("permissions"),
+            [("inherit", "auto mode; bypass only when this session is in bypass mode"),
+             ("auto", "auto mode, always"),
+             ("default", "it asks for permission like a normal session"),
+             ("bypass", "bypass: the successor runs tools WITHOUT asking, always")],
+            rec["permission_mode"],
+            why="Only typing 'bypass' makes every successor unattended. Codex successors "
+                "keep their sandbox unless the mode is bypass.")
+        permission_mode = {"bypass": "bypassPermissions"}.get(permission, permission)
+        unattended = permission_mode == "bypassPermissions"
 
         # 8. Remote control
         remote = yes_no(
@@ -410,7 +414,9 @@ def setup(argv):
             "another session running.")
 
         relay_cfg["handoff_dir"] = rec["handoff_dir"]
-        relay_cfg["skip_permissions"] = unattended
+        # permission_mode supersedes skip_permissions; a stale one would win.
+        relay_cfg.pop("skip_permissions", None)
+        relay_cfg["permission_mode"] = permission_mode
         relay_cfg["remote_control"] = remote
         # relay.py reads retire_predecessor first; keep whichever name is there.
         retire_key = ("retire_predecessor" if "retire_predecessor" in relay_cfg

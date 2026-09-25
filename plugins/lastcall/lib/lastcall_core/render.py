@@ -159,9 +159,11 @@ ONBOARDING_RECOMMENDED = {
     "tokens": (400_000, 550_000),   # the example for at_tokens
     "windows": {"claude-*": 200_000},
     "handoff_dir": "docs/handoff",
-    "skip_permissions": False,      # only ever on an explicit yes
+    # auto mode, or bypass when the handing-over session is in bypass mode.
+    # "bypassPermissions" is only ever set on an explicit yes.
+    "permission_mode": "inherit",
     "remote_control": True,
-    # kill_predecessor: recommended exactly when skip_permissions is on
+    # kill_predecessor: recommended exactly when permission_mode is bypass
 }
 
 
@@ -242,11 +244,17 @@ is up: it becomes Step 0 of the handoff TEMPLATE.md."""),
 "codex_model" for a Codex successor. Unset means the CLI's default.""",
         handover_only=True),
     OnboardingQuestion(
-        "unattended", "UNATTENDED",
-        "Should the successor run UNATTENDED (skip permission prompts)?",
+        "permissions", "PERMISSIONS",
+        "Which permission mode should the successor start in?",
         """\
-"skip_permissions". Recommend no. Be explicit that the successor then runs
-tools without asking, and never enable it without a clear yes.""",
+"permission_mode". Recommend "inherit", the default: the successor starts in
+Claude's auto mode, or in bypass mode when THIS session already runs with
+bypass permissions (a Codex successor: its workspace-write sandbox, or full
+access when this session has it). Others: "auto" (never inherit bypass),
+"default" (asks like a normal session), "acceptEdits", "plan", and
+"bypassPermissions": the successor runs tools without asking, every time;
+never enable it without a clear yes. "skip_permissions": true is the older
+spelling of the same thing.""",
         handover_only=True),
     OnboardingQuestion(
         "remote_control", "REMOTE CONTROL",

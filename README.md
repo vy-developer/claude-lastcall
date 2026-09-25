@@ -247,12 +247,13 @@ questions, in the same order, with the same recommendations:
 4/9  Have a SECOND model check the work before handing over?
 5/9  Hand over to a fresh session automatically when context runs low?
 6/9  Which model should drive the successor?
-7/9  Should the successor run UNATTENDED (skip permission prompts)?
+7/9  Which permission mode should the successor start in?
 8/9  Start a Claude successor with Remote Control?
 9/9  Retire the OLD session once the successor has checked in?
 ```
 
-Unattended mode needs an explicit yes. Each flow writes to **this project
+The permission question recommends `inherit` (see **Permissions** under the
+relay), and bypass for every successor needs an explicit, typed choice. Each flow writes to **this project
 only**, never your home directory: `.lastcall.json` (an existing project
 config is updated in place, after a `.bak` copy), `.lastcall/wrapup.md`, and,
 with handover, `docs/handoff/TEMPLATE.md`. It then runs the `doctor` readiness
@@ -298,7 +299,7 @@ predecessor, else Claude. Set `agent` (or pass `--agent`) to hand over across
 agents; the handoff is plain Markdown either way.
 
 **Claude successors** start with `claude --bg -n NAME --remote-control NAME
---settings JSON PROMPT`. The inline settings add a `SessionStart` hook that
+--permission-mode auto --settings JSON PROMPT`. The inline settings add a `SessionStart` hook that
 checks in. **Remote Control is verified**: the relay looks for
 `bridgeSessionId` in `~/.claude/jobs/<short>/state.json`, then in a
 `bridge-session` transcript entry, then in `~/.claude/sessions`. If it finds
@@ -349,11 +350,37 @@ Control and naming the thread. The budget is `max_wait_seconds`, 105 s by
 default, which fits inside Claude Code's 2-minute Bash tool timeout. The relay
 prints its worst case up front.
 
-**Permissions.** `skip_permissions` must be set explicitly. It passes
-`--dangerously-skip-permissions` to Claude. For Codex, it bypasses approvals
-and the sandbox. Without it, Codex runs in `codex_sandbox` and app-mode
-approval requests are declined. If the relay itself runs inside a Codex
-sandbox, the successor inherits that sandbox, and the relay warns about it.
+**Permissions.** A Claude successor starts in Claude Code's **auto mode**
+(`--permission-mode auto`), unless the predecessor runs with **bypass
+permissions**; then the successor does too (`--dangerously-skip-permissions`).
+Every hook payload carries the session's `permission_mode`, the hooks record
+the latest one in the session's state, and the relay reads it for the session
+it runs in. A mode it cannot find counts as not bypass. Codex reports only
+`default` or `bypassPermissions`, the latter when approvals and the sandbox are
+both off (`--dangerously-bypass-approvals-and-sandbox`).
+
+A Codex successor keeps `codex_sandbox` (`workspace-write`) and
+`codex_approval` (`never`, so app-mode approval requests are declined) for
+every mode but bypass. Bypass gives it full access: sandbox
+`danger-full-access` with requests accepted in app mode, and
+`--dangerously-bypass-approvals-and-sandbox` in `exec` and `tmux` mode. The
+other modes are Claude's and do not change a Codex successor.
+
+The first match wins:
+
+1. `--skip-permissions`, else `--permission-mode MODE`
+2. `relay.skip_permissions: true`, else `relay.permission_mode`
+3. the predecessor is in bypass mode: bypass
+4. `auto`
+
+`--no-skip-permissions`, or `skip_permissions: false` in the config, rules out
+bypass from every level below it, the predecessor's included. `inherit` at a
+level goes straight to step 3. `--dry-run` prints the choice and its reason:
+`auto (default)`, `bypass (predecessor is in bypass mode)`,
+`plan (from config: permission_mode)`. If auto mode is not available to the
+account or the model, Claude Code decides what the successor gets. If the
+relay itself runs inside a Codex sandbox, the successor inherits that sandbox,
+and the relay warns about it.
 
 | relay key | default | meaning |
 |---|---|---|
@@ -364,7 +391,8 @@ sandbox, the successor inherits that sandbox, and the relay warns about it.
 | `model`, `fallback_model` | CLI default | Claude model, and comma-separated fallbacks |
 | `codex_model` | CLI default | Codex model |
 | `remote_control` | `true` | start a Claude successor with Remote Control |
-| `skip_permissions` | `false` | run the successor without permission prompts |
+| `permission_mode` | `inherit` | `auto`, `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`, or `inherit` (auto; bypass when the predecessor is) |
+| `skip_permissions` | unset | `true`: bypass mode; `false`: never inherit bypass |
 | `kill_predecessor` | `false` | retire the old session after the check-in |
 | `kill_delay` | `5` | seconds from the check-in to the retirement |
 | `max_wait_seconds` | `105` | total budget for every wait |
@@ -508,7 +536,7 @@ on successors; do not set those yourself.
 | path | contents |
 |---|---|
 | `~/.lastcall/config.json` | global config (a commented example at first) |
-| `~/.lastcall/state/<agent>-<session>.json` | session state, pruned after `state_ttl_days`; only files with Last Call's marker are deleted |
+| `~/.lastcall/state/<agent>-<session>.json` | session state, including the latest `permission_mode` the relay reads; pruned after `state_ttl_days`, and only files with Last Call's marker are deleted |
 | `~/.lastcall/state/windows.json`, `onboarded.json` | learned windows, and projects already offered onboarding |
 | `~/.lastcall/state/last-payload.json` | only with `debug` |
 | `~/.lastcall/relay/<chain>.jsonl` | relay ledger, plus Codex successor logs |
@@ -520,7 +548,7 @@ on successors; do not set those yourself.
 python3 -m unittest discover -s tests -v
 ```
 
-688 tests, standard library only, no network. They cover the failure modes
+720 tests, standard library only, no network. They cover the failure modes
 that shaped the design: thresholds that can never fire, zones that never
 re-arm, sidechain usage counted as the main session's, Stop payloads Codex
 would reject, and a README that drifts from the code.

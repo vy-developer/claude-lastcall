@@ -106,9 +106,15 @@ automatic handover.
    "fable,sonnet" (Claude Code switches by itself when one is overloaded);
    "codex_model" for a Codex successor. Unset means the CLI's default.
 
-7. UNATTENDED
-   "skip_permissions". Recommend no. Be explicit that the successor then runs
-   tools without asking, and never enable it without a clear yes.
+7. PERMISSIONS
+   "permission_mode". Recommend "inherit", the default: the successor starts in
+   Claude's auto mode, or in bypass mode when THIS session already runs with
+   bypass permissions (a Codex successor: its workspace-write sandbox, or full
+   access when this session has it). Others: "auto" (never inherit bypass),
+   "default" (asks like a normal session), "acceptEdits", "plan", and
+   "bypassPermissions": the successor runs tools without asking, every time;
+   never enable it without a clear yes. "skip_permissions": true is the older
+   spelling of the same thing.
 
 8. REMOTE CONTROL
    "remote_control": on by default, so you can reach a Claude successor from

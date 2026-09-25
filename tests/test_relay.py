@@ -191,11 +191,11 @@ class TestShim(RelayCase):
         produce that pair from an environment variable plus a flag."""
         repo = self.repo()
         env = {"LASTCALL_SKIP_PERMISSIONS": "1"}
-        self.assertIn("permissions: SKIPPED",
+        self.assertIn("permissions: bypass (--skip-permissions)",
                       self.relay(repo, "--dry-run", env_extra=env).stdout)
         result = self.relay(repo, "--dry-run", "--no-skip-permissions", env_extra=env)
         self.assertEqual(result.returncode, 0, result.out)
-        self.assertIn("permissions: normal", result.stdout)
+        self.assertIn("permissions: auto (default)", result.stdout)
         off = self.relay(repo, "--dry-run", env_extra={"LASTCALL_REMOTE_CONTROL": "0"})
         self.assertIn("remote ctl:  off", off.stdout)
 
@@ -262,14 +262,16 @@ class TestResolution(RelayCase):
         result = self.relay(self.repo("widgets"), "--dry-run")
         self.assertIn("name:        widgets · handoff 1", result.stdout)
 
-    def test_permissions_are_normal_unless_explicitly_skipped(self):
+    def test_permissions_are_auto_unless_explicitly_skipped(self):
         result = self.relay(self.repo(), "--dry-run")
-        self.assertIn("permissions: normal", result.stdout)
+        self.assertIn("permissions: auto (default)", result.stdout)
+        self.assertIn("--permission-mode auto", result.stdout)
         self.assertNotIn("--dangerously-skip-permissions", result.stdout)
 
     def test_skip_permissions_is_opt_in_and_visible(self):
         result = self.relay(self.repo(), "--dry-run", "--skip-permissions")
-        self.assertIn("permissions: SKIPPED", result.stdout)
+        self.assertIn("permissions: bypass (--skip-permissions) — no permission prompts",
+                      result.stdout)
         self.assertIn("--dangerously-skip-permissions", result.stdout)
 
     def test_custom_handoff_dir(self):
@@ -350,7 +352,7 @@ class TestConfigResolution(RelayCase):
         result = self.run_from(parent)
         self.assertEqual(result.returncode, 0, result.out)
         self.assertIn("workspace/.claude/lastcall.json", result.stdout)
-        self.assertIn("permissions: SKIPPED", result.stdout)
+        self.assertIn("permissions: bypass (from config: skip_permissions)", result.stdout)
         self.assertIn("name:        amos · handoff 1", result.stdout)
 
     def test_repo_can_come_from_the_config(self):

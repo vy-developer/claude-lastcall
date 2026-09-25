@@ -273,7 +273,8 @@ class TestOnboardingCoversTheFeatures(unittest.TestCase):
     MUST_MENTION = ("at_tokens", "windows", "context_window_tokens",
                     "min_window_tokens", "template", "gates", "verifier",
                     "relay", "handoff_dir", "agent", "model", "fallback_model",
-                    "codex_model", "skip_permissions", "remote_control",
+                    "codex_model", "permission_mode", "bypassPermissions",
+                    "skip_permissions", "remote_control",
                     "kill_predecessor", "disabled", ".lastcall.json",
                     "AGENTS.md", "CLAUDE.md")
 
@@ -317,7 +318,7 @@ class TestOnboardingCoversTheFeatures(unittest.TestCase):
 
     def test_they_require_explicit_consent_for_unattended(self):
         from lastcall_core import render
-        self.assertFalse(render.ONBOARDING_RECOMMENDED["skip_permissions"])
+        self.assertEqual(render.ONBOARDING_RECOMMENDED["permission_mode"], "inherit")
         for where, text in self.texts().items():
             self.assertIn("without asking", text, where)
             self.assertIn("never enable it without a clear yes", text, where)

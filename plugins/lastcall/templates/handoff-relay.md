@@ -60,6 +60,7 @@ your handoff with NO user prompt, so anything you leave out is lost.
 
      Exit 1 means nothing was spawned; exit 2 means a successor was started
      but never checked in. Either way THIS session is still alive and must
-     report the failure. Add --dry-run to see every command first, and
-     --skip-permissions if the successor should run unattended without
-     permission prompts.
+     report the failure. Add --dry-run to see every command first. The
+     successor starts in auto mode, or in bypass mode if THIS session runs
+     with bypass permissions; --skip-permissions forces bypass and
+     --permission-mode MODE picks another mode.

@@ -631,6 +631,71 @@ class TestCodexDelivery(HookCase):
 # Configuration and doctor
 # --------------------------------------------------------------------------
 
+class TestPermissionModeIsRecorded(HookCase):
+    """Every hook the engine already handles records the payload's
+    permission_mode in the session state; the relay reads it to let a
+    successor inherit bypass mode."""
+
+    def setUp(self):
+        super(TestPermissionModeIsRecorded, self).setUp()
+        self.configure({"context_window_tokens": 200000})
+
+    def test_claude_records_the_latest_mode_on_every_measuring_event(self):
+        self.claude_reply(20000)
+        self.run_hook("PostToolUse", self.claude_payload("PostToolUse",
+                                                         permission_mode="acceptEdits"))
+        self.assertEqual(self.state("claude")["permission_mode"], "acceptEdits")
+        self.claude_user()
+        self.run_hook("UserPromptSubmit", self.claude_payload("UserPromptSubmit",
+                                                              permission_mode="plan"))
+        self.assertEqual(self.state("claude")["permission_mode"], "plan")
+        text = self.claude_reply(21000)
+        self.run_hook("Stop", self.claude_payload("Stop", last_assistant_message=text,
+                                                  permission_mode="bypassPermissions"))
+        self.assertEqual(self.state("claude")["permission_mode"], "bypassPermissions")
+
+    def test_the_unchanged_transcript_fast_path_still_records_a_new_mode(self):
+        """Shift+Tab between two tool calls changes the mode without a new
+        usage record: the fast path must not drop it."""
+        self.claude_reply(20000)
+        self.run_hook("PostToolUse", self.claude_payload("PostToolUse"))
+        sig = self.state("claude")["sig"]
+        self.run_hook("PostToolUse", self.claude_payload("PostToolUse",
+                                                         permission_mode="bypassPermissions"))
+        state = self.state("claude")
+        self.assertEqual(state["sig"], sig)
+        self.assertEqual(state["permission_mode"], "bypassPermissions")
+
+    def test_claude_session_start_carries_no_mode_and_keeps_the_last_one(self):
+        self.claude_reply(20000)
+        self.run_hook("PostToolUse", self.claude_payload("PostToolUse",
+                                                         permission_mode="auto"))
+        self.run_hook("SessionStart", self.claude_payload("SessionStart", source="resume"))
+        self.assertEqual(self.state("claude")["permission_mode"], "auto")
+
+    def test_codex_records_the_mode_from_session_start_on(self):
+        self.run_hook("SessionStart", self.codex_payload(
+            "SessionStart", permission_mode="bypassPermissions"))
+        self.assertEqual(self.state("codex")["permission_mode"], "bypassPermissions")
+        self.codex_tokens(20000)
+        self.run_hook("PostToolUse", self.codex_payload("PostToolUse"))
+        self.assertEqual(self.state("codex")["permission_mode"], "default")
+        self.run_hook("Stop", self.codex_payload("Stop", permission_mode="bypassPermissions"))
+        self.assertEqual(self.state("codex")["permission_mode"], "bypassPermissions")
+
+    def test_post_compact_records_it_too(self):
+        self.run_hook("PostCompact", self.codex_payload("PostCompact",
+                                                        permission_mode="bypassPermissions"))
+        self.assertEqual(self.state("codex")["permission_mode"], "bypassPermissions")
+
+    def test_a_malformed_mode_is_ignored(self):
+        self.claude_reply(20000)
+        self.run_hook("PostToolUse", self.claude_payload("PostToolUse", permission_mode="plan"))
+        self.claude_reply(21000)
+        self.run_hook("PostToolUse", self.claude_payload("PostToolUse", permission_mode=["x"]))
+        self.assertEqual(self.state("claude")["permission_mode"], "plan")
+
+
 class TestConfigLayers(HookCase):
     def test_global_config_applies_to_every_project(self):
         self.configure_globally({"zones": [{"name": "yellow", "at_tokens": 50000}]})

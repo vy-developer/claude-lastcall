@@ -1122,11 +1122,12 @@ class TestSetupWizardInterview(TempCase):
         self.assertEqual([line.split("  ", 1)[1] for line in self.numbered(out)], asked)
 
     def test_enter_everywhere_never_runs_unattended(self):
-        """skip_permissions needs explicit consent, and the predecessor is
-        retired only when the handover is unattended — the rule the prompt
-        states."""
+        """Bypass needs explicit consent: Enter means inherit (auto, or bypass
+        only when the predecessor already is), and the predecessor is retired
+        only when the handover is unattended — the rule the prompt states."""
         written, _out = self.run_wizard([])
-        self.assertFalse(written["relay"]["skip_permissions"])
+        self.assertEqual(written["relay"]["permission_mode"], "inherit")
+        self.assertNotIn("skip_permissions", written["relay"])
         self.assertFalse(written["relay"]["kill_predecessor"])
         self.assertTrue(written["relay"]["remote_control"])
         self.assertNotIn("agent", written["relay"])
@@ -1143,7 +1144,7 @@ class TestSetupWizardInterview(TempCase):
             ["t", "300k 450k", "1m",
              "update docs/STATUS.md {always}; never push",
              "pytest -q, ruff check", "n",
-             "y", "codex", "make check", "gpt-5-codex", "yes", "n", ""])
+             "y", "codex", "make check", "gpt-5-codex", "bypass", "n", ""])
         self.assertEqual(written["zones"], [
             {"name": "yellow", "at_tokens": 300_000},
             {"name": "red", "at_tokens": 450_000, "block": True}])
@@ -1154,7 +1155,7 @@ class TestSetupWizardInterview(TempCase):
         self.assertEqual(relay["agent"], "codex")
         self.assertEqual(relay["codex_model"], "gpt-5-codex")
         self.assertNotIn("model", relay)
-        self.assertTrue(relay["skip_permissions"])
+        self.assertEqual(relay["permission_mode"], "bypassPermissions")
         self.assertFalse(relay["remote_control"])
         # Unattended, so retiring the predecessor is the recommendation.
         self.assertTrue(relay["kill_predecessor"])
@@ -1176,7 +1177,7 @@ class TestSetupWizardInterview(TempCase):
         written, _out = self.run_wizard(
             ["p", "35 50", "3", "claude-opus-5-5=1000000, claude-sonnet-*=200k",
              "", "", "1",
-             "y", "claude", "", "opus, fable, sonnet", "n", "y", "n"],
+             "y", "claude", "", "opus, fable, sonnet", "default", "y", "n"],
             existing={"context_window_tokens": 500_000, "mode": "advisory"})
         self.assertEqual(written["windows"], {"claude-opus-5-5": 1_000_000,
                                               "claude-sonnet-*": 200_000})
@@ -1189,8 +1190,20 @@ class TestSetupWizardInterview(TempCase):
         self.assertEqual(relay["model"], "opus")
         self.assertEqual(relay["fallback_model"], "fable,sonnet")
         self.assertNotIn("codex_model", relay)
-        self.assertFalse(relay["skip_permissions"])
+        self.assertEqual(relay["permission_mode"], "default")
         self.assertFalse(relay["kill_predecessor"])
+
+    def test_bypass_takes_the_typed_word_and_a_stale_skip_permissions_goes(self):
+        """"yes" is not a permission mode: it is asked again, and only
+        "bypass" makes the successor unattended. The old key would outrank
+        the new one, so the wizard removes it."""
+        written, out = self.run_wizard(
+            ["", "", "", "", "", "", "y", "", "", "", "", "yes", "auto", "", ""],
+            existing={"relay": {"skip_permissions": True}})
+        self.assertIn("'yes' is not one of the options", out)
+        self.assertEqual(written["relay"]["permission_mode"], "auto")
+        self.assertNotIn("skip_permissions", written["relay"])
+        self.assertFalse(written["relay"]["kill_predecessor"])
 
     def test_nonsense_is_asked_again_not_swallowed(self):
         written, out = self.run_wizard(["t", "banana", "550k 400k", "400k 550k"])

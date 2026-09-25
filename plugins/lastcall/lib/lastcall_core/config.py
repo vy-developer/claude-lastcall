@@ -59,7 +59,7 @@ DEFAULTS = {
     "verifier": None,
     # Settings for the optional relay, read by the relay so one file drives
     # everything: handoff_dir, name_prefix, dirty_baseline, remote_control,
-    # skip_permissions, model, fallback_model, kill_predecessor.
+    # permission_mode, skip_permissions, model, fallback_model, kill_predecessor.
     "relay": None,
     # None means "work it out from an exact source". Codex writes the window
     # into its rollout, so it is always known there; Claude Code does not, see

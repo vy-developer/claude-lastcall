@@ -699,7 +699,7 @@ def live_sessions(claude_home_dir: Optional[str] = None, codex_home_dir: Optiona
 # ---------------------------------------------------------------- status
 
 # Hook for the adapter layer: agent -> fn(record) -> Usage-like object with
-# .tokens and .window (or None). Registered by lastcall.agents when present.
+# .tokens and .window (or None). Registered by lastcall_core.agents when present.
 USAGE_PROVIDERS: Dict[str, Callable[[SessionRecord], object]] = {}
 
 

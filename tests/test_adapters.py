@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the agent adapter layer (plugins/lastcall/lib/lastcall/agents).
+"""Tests for the agent adapter layer (plugins/lastcall/lib/lastcall_core/agents).
 
 Every fixture here is synthetic: the structure mirrors what Claude Code and
 Codex write, the content is invented.
@@ -31,22 +31,22 @@ SCRIPT = os.path.join(PLUGIN, "scripts", "lastcall.py")
 
 def _load_library():
     saved = {name: module for name, module in sys.modules.items()
-             if name == "lastcall" or name.startswith("lastcall.")}
+             if name == "lastcall_core" or name.startswith("lastcall_core.")}
     for name in saved:
         del sys.modules[name]
     sys.path.insert(0, LIB)
     try:
         return {
-            "agents": importlib.import_module("lastcall.agents"),
-            "base": importlib.import_module("lastcall.agents.base"),
-            "claude": importlib.import_module("lastcall.agents.claude"),
-            "codex": importlib.import_module("lastcall.agents.codex"),
-            "tail": importlib.import_module("lastcall.tail"),
+            "agents": importlib.import_module("lastcall_core.agents"),
+            "base": importlib.import_module("lastcall_core.agents.base"),
+            "claude": importlib.import_module("lastcall_core.agents.claude"),
+            "codex": importlib.import_module("lastcall_core.agents.codex"),
+            "tail": importlib.import_module("lastcall_core.tail"),
         }
     finally:
         sys.path.remove(LIB)
         for name in [n for n in sys.modules
-                     if n == "lastcall" or n.startswith("lastcall.")]:
+                     if n == "lastcall_core" or n.startswith("lastcall_core.")]:
             del sys.modules[name]
         sys.modules.update(saved)
 
@@ -759,7 +759,7 @@ class TestLibraryHygiene(unittest.TestCase):
         json.dumps(data)
 
     def test_library_parses_as_python_3_9_and_uses_only_the_standard_library(self):
-        package = os.path.join(LIB, "lastcall")
+        package = os.path.join(LIB, "lastcall_core")
         def is_stdlib(root):
             names = getattr(sys, "stdlib_module_names", None)  # 3.10+
             if names is not None:

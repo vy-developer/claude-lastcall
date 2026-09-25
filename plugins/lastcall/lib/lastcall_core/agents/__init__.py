@@ -1,6 +1,6 @@
 """Agent adapter registry.
 
-    from lastcall.agents import detect_agent
+    from lastcall_core.agents import detect_agent
     agent = detect_agent(payload)            # hook stdin, os.environ
     usage = agent.read_usage(payload.get("transcript_path"),
                              payload.get("session_id"),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for lastcall.sessions and its CLI. Synthetic homes only.
+"""Tests for lastcall_core.sessions and its CLI. Synthetic homes only.
 
 Nothing here reads the real ~/.claude or ~/.codex: every call passes a temp
 home explicitly, and liveness probes (lsof / ps) are stubbed.
@@ -29,11 +29,11 @@ def _import_lib():
     shadow = sys.modules.pop("lastcall", None)
     sys.path.insert(0, LIB)
     try:
-        import lastcall.cli_sessions as cli
-        import lastcall.sessions as sessions
+        import lastcall_core.cli_sessions as cli
+        import lastcall_core.sessions as sessions
     finally:
         sys.path.remove(LIB)
-        for name in [n for n in sys.modules if n == "lastcall" or n.startswith("lastcall.")]:
+        for name in [n for n in sys.modules if n == "lastcall_core" or n.startswith("lastcall_core.")]:
             del sys.modules[name]
         if shadow is not None:
             sys.modules["lastcall"] = shadow
@@ -786,7 +786,7 @@ class TestCli(Homes):
     def test_runs_as_module(self):
         env = dict(os.environ, PYTHONPATH=LIB, LASTCALL_CLAUDE_HOME=self.claude,
                    LASTCALL_CODEX_HOME=self.codex)
-        proc = subprocess.run([sys.executable, "-m", "lastcall.cli_sessions", "tidy", "--json",
+        proc = subprocess.run([sys.executable, "-m", "lastcall_core.cli_sessions", "tidy", "--json",
                                "--agent", "claude"], env=env, capture_output=True, text=True,
                               timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)

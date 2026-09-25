@@ -1,8 +1,8 @@
-"""`status` and `tidy` subcommands over lastcall.sessions.
+"""`status` and `tidy` subcommands over lastcall_core.sessions.
 
-    PYTHONPATH=plugins/lastcall/lib python3 -m lastcall.cli_sessions status [--json]
-    PYTHONPATH=plugins/lastcall/lib python3 -m lastcall.cli_sessions tidy [--plan FILE]
-    PYTHONPATH=plugins/lastcall/lib python3 -m lastcall.cli_sessions tidy --apply FILE
+    PYTHONPATH=plugins/lastcall/lib python3 -m lastcall_core.cli_sessions status [--json]
+    PYTHONPATH=plugins/lastcall/lib python3 -m lastcall_core.cli_sessions tidy [--plan FILE]
+    PYTHONPATH=plugins/lastcall/lib python3 -m lastcall_core.cli_sessions tidy --apply FILE
 
 tidy is read-only unless --apply is given, and --apply only takes a plan file
 written earlier by `tidy --plan` (and reviewed by you).

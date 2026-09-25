@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,7 @@ LIB_DIR = os.path.dirname(PKG_DIR)                            # .../lib
 PLUGIN_ROOT = os.path.dirname(LIB_DIR)                        # plugins/lastcall
 REPO_ROOT = os.path.dirname(os.path.dirname(PLUGIN_ROOT))     # the checkout
 HOOK_SCRIPT = os.path.join(PLUGIN_ROOT, "scripts", "lastcall.py")
+HOOK_LAUNCHER = os.path.join(PLUGIN_ROOT, "scripts", "lastcall-hook")
 LAUNCHER = os.path.join(PLUGIN_ROOT, "bin", "lastcall")
 LAUNCHER_CMD = os.path.join(PLUGIN_ROOT, "bin", "lastcall.cmd")
 PLUGIN_MANIFEST = os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json")
@@ -64,10 +66,15 @@ EVENTS = (("Stop", 15), ("SessionStart", 10), ("PostCompact", 10),
 MATCHERS = {"PostToolUse": "*"}
 
 # Matching the bare string "lastcall.py" would strip any unrelated hook whose
-# command happened to contain it. Ours always ends with the script followed by
-# one of our event names, so require that shape. The event list is the union
-# of every version's: installers before 1.8 wrote only Stop/SessionStart/PostCompact.
-MARKER = re.compile(r"lastcall\.py[\"']?\s+(?:%s)\s*$"
+# command happened to contain it. Ours always ends with the script (or, since
+# 1.8.1, the scripts/lastcall-hook launcher) followed by one of our event
+# names, so require that shape. Every shape an installer ever wrote matches:
+#   python3 ".../scripts/lastcall.py" Stop                     1.x, and Windows
+#   sh ".../scripts/lastcall-hook" Stop                         POSIX now
+#   LASTCALL_PYTHON=/x/python3 sh ".../scripts/lastcall-hook" Stop   --python
+# The event list is the union of every version's: installers before 1.8 wrote
+# only Stop/SessionStart/PostCompact.
+MARKER = re.compile(r"(?:lastcall\.py|lastcall-hook)[\"']?\s+(?:%s)\s*$"
                     % "|".join(name for name, _ in EVENTS))
 
 BACKUP_SUFFIX = ".lastcall.bak"
@@ -197,19 +204,35 @@ def find_interpreter():
     return None
 
 
-def hook_interpreter(explicit=None):
-    """The interpreter the hook command names. `python3` by name on POSIX, so
-    the entry keeps working when Python is upgraded; detected on Windows."""
-    if explicit:
-        return [explicit]
-    if os.name != "nt" and shutil.which("python3"):
-        return ["python3"]
-    return find_interpreter()
+def hook_runner(explicit=None, posix=None):
+    """The words of a hooks-method command before its event name, or None
+    when no interpreter can be found (Windows only).
+
+    POSIX: ``sh ".../scripts/lastcall-hook"``, the same launcher the plugin's
+    hooks.json runs. Desktop apps start hooks with a minimal PATH, where a bare
+    `python3` may be missing or be the macOS stub that pops an install dialog;
+    the launcher finds a working interpreter at each run and stays silent when
+    there is none. ``--python PATH`` pins one through LASTCALL_PYTHON, which
+    the launcher tries first (and falls past if it ever disappears).
+
+    Windows has no `sh` for the agents to count on: name an interpreter
+    directly, detected here unless pinned.
+    """
+    if posix is None:
+        posix = os.name != "nt"
+    if posix:
+        words = ["sh", quote(HOOK_LAUNCHER)]
+        if explicit:
+            words.insert(0, "LASTCALL_PYTHON=" + shlex.quote(explicit))
+        return words
+    interpreter = [explicit] if explicit else find_interpreter()
+    if not interpreter:
+        return None
+    return [quote(p) if " " in p else p for p in interpreter] + [quote(HOOK_SCRIPT)]
 
 
-def hook_command(interpreter, event):
-    parts = [quote(p) if " " in p else p for p in interpreter]
-    return " ".join(parts + [quote(HOOK_SCRIPT), event])
+def hook_command(runner, event):
+    return " ".join(list(runner) + [event])
 
 
 # ---------------------------------------------------------------- JSON files
@@ -317,12 +340,12 @@ def strip_existing(settings):
     return settings
 
 
-def add_ours(settings, interpreter):
+def add_ours(settings, runner):
     hooks = settings.setdefault("hooks", {})
     for event, timeout in EVENTS:
         group = {"hooks": [{
             "type": "command",
-            "command": hook_command(interpreter, event),
+            "command": hook_command(runner, event),
             "timeout": timeout,
         }]}
         if event in MATCHERS:
@@ -348,10 +371,10 @@ class Out:
 
 # ---------------------------------------------------------------- hooks method
 
-def hooks_install(agent, out, interpreter, project=None):
+def hooks_install(agent, out, runner, project=None):
     path = hooks_file(agent, project)
     before = load_json(path)
-    after = add_ours(strip_existing(json.loads(json.dumps(before))), interpreter)
+    after = add_ours(strip_existing(json.loads(json.dumps(before))), runner)
     if after == before:
         out.say("  %s: hooks already in place in %s" % (agent, path))
         return True
@@ -359,7 +382,7 @@ def hooks_install(agent, out, interpreter, project=None):
         out.step("write %d hook entries to %s (backup %s)"
                  % (len(EVENTS), path, path + BACKUP_SUFFIX if os.path.isfile(path) else "none"))
         for event, _t in EVENTS:
-            out.say("      %s: %s" % (event, hook_command(interpreter, event)))
+            out.say("      %s: %s" % (event, hook_command(runner, event)))
         return True
     backup = save_json(path, after)
     out.say("  %s: installed %d hooks into %s" % (agent, len(EVENTS), path))
@@ -839,13 +862,14 @@ def cmd_install(args):
     if project:
         out.say("  project: %s" % project)
 
-    interpreter = None
+    runner = None
     if args.method == "hooks":
-        if not os.path.isfile(HOOK_SCRIPT):
-            out.say("cannot find the hook script at %s" % HOOK_SCRIPT)
-            return 1
-        interpreter = hook_interpreter(args.python)
-        if not interpreter:
+        for needed in (HOOK_SCRIPT, HOOK_LAUNCHER):
+            if not os.path.isfile(needed):
+                out.say("cannot find the hook script at %s" % needed)
+                return 1
+        runner = hook_runner(args.python)
+        if not runner:
             out.say("no working Python 3 interpreter found on PATH.\n"
                     "Install Python 3.9+ and re-run, or pass --python PATH.")
             return 1
@@ -854,7 +878,7 @@ def cmd_install(args):
     for agent in agents:
         try:
             if args.method == "hooks":
-                ok = hooks_install(agent, out, interpreter, project)
+                ok = hooks_install(agent, out, runner, project)
             else:
                 binary = agent_binary(agent)
                 if not binary:
@@ -1069,7 +1093,9 @@ def build_parser():
                      help="plugin method, after `git pull`: bring each agent's installed "
                           "copy up to this checkout (installs it where missing)")
     ins.add_argument("--python", metavar="PATH",
-                     help="hooks method: interpreter the hook commands name (default: python3)")
+                     help="hooks method: pin the interpreter the hooks run with "
+                          "(default: scripts/lastcall-hook finds one at each run; "
+                          "on Windows, the one detected now)")
     ins.set_defaults(func=cmd_install)
 
     un = sub.add_parser("uninstall", help="reverse install (backups are kept)")

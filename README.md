@@ -50,6 +50,8 @@ plugin through each agent's own `plugin` command, for every agent on `PATH`
   `/reload-plugins`). Codex runs a cached copy, and `--refresh` re-copies it.
 - **`--method hooks`** writes hook entries straight into
   `~/.claude/settings.json` and `~/.codex/hooks.json`, with absolute paths.
+  On macOS and Linux each entry runs the same `scripts/lastcall-hook` launcher
+  as the plugin; `--python PATH` pins the interpreter it uses.
   Before writing, it backs each file up to `<file>.lastcall.bak`, and it only
   ever touches Last Call's own entries. `--project DIR` targets one project
   instead. A plugin install removes any leftover hooks-method entries, so
@@ -503,7 +505,7 @@ on successors; do not set those yourself.
 python3 -m unittest discover -s tests -v
 ```
 
-670 tests, standard library only, no network. They cover the failure modes
+673 tests, standard library only, no network. They cover the failure modes
 that shaped the design: thresholds that can never fire, zones that never
 re-arm, sidechain usage counted as the main session's, Stop payloads Codex
 would reject, and a README that drifts from the code.

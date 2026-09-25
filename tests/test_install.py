@@ -24,6 +24,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, "plugins", "lastcall", "lib")
 LAUNCHER = os.path.join(ROOT, "plugins", "lastcall", "bin", "lastcall")
 HOOK_SCRIPT = os.path.join(ROOT, "plugins", "lastcall", "scripts", "lastcall.py")
+HOOK_LAUNCHER = os.path.join(ROOT, "plugins", "lastcall", "scripts", "lastcall-hook")
 PLUGIN_ID = "lastcall@claude-lastcall"
 MARKET = "claude-lastcall"
 
@@ -545,9 +546,68 @@ class TestHooksMethod(Sandbox):
                 (entry,) = group["hooks"]
                 self.assertEqual(entry["type"], "command")
                 self.assertEqual(entry["timeout"], timeout)
-                self.assertEqual(entry["command"],
-                                 'python3 "%s" %s' % (HOOK_SCRIPT, event))
+                if os.name == "nt":
+                    expected = 'python3 "%s" %s' % (HOOK_SCRIPT, event)
+                else:
+                    expected = 'LASTCALL_PYTHON=python3 sh "%s" %s' % (HOOK_LAUNCHER, event)
+                self.assertEqual(entry["command"], expected)
             self.assertEqual(hooks["PostToolUse"][0]["matcher"], "*")
+
+    @posix_only
+    def test_posix_commands_go_through_the_desktop_safe_launcher(self):
+        """Live-QA finding: the hooks method wrote `python3 ".../lastcall.py"
+        Stop`, which a desktop app's minimal PATH may not resolve (or resolves
+        to the macOS stub). It must run scripts/lastcall-hook, like the plugin,
+        and need no interpreter on PATH at install time."""
+        with mock.patch.object(cli.shutil, "which", return_value=None), \
+                mock.patch.object(cli, "find_interpreter",
+                                  side_effect=AssertionError("probed an interpreter")):
+            code, out = self.call("install", "--claude", "--codex", "--method", "hooks",
+                                  "--no-link-bin")
+        self.assertEqual(code, 0, out)
+        for path in (self.claude_settings, self.codex_hooks):
+            commands = sorted(our_commands(load(path)))
+            self.assertEqual(commands, sorted('sh "%s" %s' % (HOOK_LAUNCHER, event)
+                                              for event in EXPECTED_EVENTS))
+
+    @posix_only
+    def test_a_pinned_python_reaches_the_launcher_even_with_spaces(self):
+        folder = os.path.join(self.tmp, "my pythons")
+        os.makedirs(folder)
+        fake = os.path.join(folder, "python3")
+        record = os.path.join(self.tmp, "ran.txt")
+        with open(fake, "w") as fh:
+            fh.write('#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\n' % record)
+        os.chmod(fake, 0o755)
+        code, out = self.call("install", "--claude", "--method", "hooks", "--no-link-bin",
+                              "--python", fake)
+        self.assertEqual(code, 0, out)
+        (stop,) = [c for c in our_commands(load(self.claude_settings)) if c.endswith(" Stop")]
+        self.assertTrue(stop.startswith("LASTCALL_PYTHON="), stop)
+        env = {"PATH": "/usr/bin:/bin", "HOME": self.home}
+        proc = subprocess.run(["/bin/sh", "-c", stop], env=env, input=b"{}",
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        with open(record) as fh:
+            self.assertEqual(fh.read().splitlines(), [HOOK_SCRIPT, "Stop"])
+
+    def test_reinstall_replaces_every_older_command_shape(self):
+        old_shapes = [
+            '/usr/local/bin/python3 "/old/place/plugins/lastcall/scripts/lastcall.py" Stop',
+            'python3 "%s" SessionStart' % HOOK_SCRIPT,
+            '"C:\\Program Files\\Python\\python.exe" "C:\\lc\\scripts\\lastcall.py" PostToolUse',
+            'sh "/old/place/plugins/lastcall/scripts/lastcall-hook" PostCompact',
+            "LASTCALL_PYTHON='/x y/python3' sh \"%s\" UserPromptSubmit" % HOOK_LAUNCHER,
+        ]
+        dump(self.claude_settings, {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": c} for c in old_shapes]}]}})
+        self.install()
+        commands = our_commands(load(self.claude_settings))
+        self.assertEqual(len(commands), len(EXPECTED_EVENTS))
+        for shape in old_shapes:
+            self.assertNotIn(shape, commands)
+        for foreign in ("sh /opt/other-hook Stop", "python3 lastcall.py.bak Stop --x"):
+            self.assertIsNone(cli.MARKER.search(foreign), foreign)
 
     @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "POSIX symlinks")
     def test_a_symlinked_settings_file_is_written_through_not_replaced(self):

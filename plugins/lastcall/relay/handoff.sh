@@ -323,8 +323,19 @@ fi
 say "config: ${CONFIG:-<none found>}"
 say "repo: $REPO"
 
+# TEMPLATE.md lives in the same directory and is the shape of a handoff, not a
+# handoff. Picked by mtime it wins whenever it was edited last — and a
+# successor seeded with it follows a skeleton full of placeholders. Ties go to
+# the later name: a fresh clone gives every file the same mtime, and handoffs
+# are named by date.
 if [ -z "$HANDOFF" ]; then
-    HANDOFF=$(ls -t "$REPO/$HANDOFF_DIR"/*.md 2>/dev/null | head -1 || true)
+    for candidate in "$REPO/$HANDOFF_DIR"/*.md; do
+        [ -f "$candidate" ] || continue
+        [ "$(basename "$candidate")" = "TEMPLATE.md" ] && continue
+        if [ -z "$HANDOFF" ] || ! [ "$HANDOFF" -nt "$candidate" ]; then
+            HANDOFF=$candidate
+        fi
+    done
     [ -n "$HANDOFF" ] || die 1 "no handoff files in $REPO/$HANDOFF_DIR/ — write one first"
 fi
 [ -f "$HANDOFF" ] || die 1 "no such handoff: $HANDOFF"
@@ -337,7 +348,8 @@ if [ "$HAVE_GIT" -eq 1 ]; then
 handoff_status=$(git -C "$REPO" status --porcelain -- "$HANDOFF") \
     || die 1 "cannot read git status for the handoff — refusing to assume it is committed"
 if [ -n "$handoff_status" ]; then
-    committed=$(git -C "$REPO" ls-files "$HANDOFF_DIR/*.md" | sort -r | head -1 || true)
+    committed=$(git -C "$REPO" ls-files "$HANDOFF_DIR/*.md" \
+        | grep -v '/TEMPLATE\.md$' | sort -r | head -1 || true)
     if [ -n "$committed" ]; then
         say "the newest committed handoff is $committed"
         say "to hand over with that one instead:"

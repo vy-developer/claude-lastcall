@@ -539,7 +539,8 @@ path, so nothing needs hand-editing when the plugin updates.
 
 What the relay does, in order, refusing to continue at the first failure:
 
-- finds your newest handoff in `docs/handoff/` (configurable)
+- finds your newest handoff in `docs/handoff/` (configurable), skipping
+  `TEMPLATE.md`, which is the shape of a handoff rather than one
 - **refuses to spawn while that handoff is uncommitted.** This is the
   load-bearing rule: a rule you must remember at the moment your context is
   exhausted is a rule that gets skipped, so it is a precondition, not a habit
@@ -622,7 +623,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-232 tests, standard library only, no network. They cover the failure modes that
+235 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

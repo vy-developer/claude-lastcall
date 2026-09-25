@@ -179,6 +179,50 @@ class TestResolution(RelayCase):
         self.assertEqual(result.returncode, 0, result.stdout.decode())
         self.assertIn(b"notes/next.md", result.stdout)
 
+    def add_template(self, repo, commit=True):
+        """A TEMPLATE.md edited after the real handoff, so it is the newest."""
+        path = os.path.join(repo, "docs", "handoff", "TEMPLATE.md")
+        with open(path, "w") as fh:
+            fh.write("# Session handoff — YYYY-MM-DD\n")
+        later = os.path.getmtime(os.path.join(repo, "README.md")) + 60
+        os.utime(path, (later, later))
+        if commit:
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True,
+                           stdout=subprocess.DEVNULL)
+            subprocess.run(["git", "commit", "-qm", "template"], cwd=repo,
+                           check=True, stdout=subprocess.DEVNULL)
+
+    def test_the_template_is_never_picked_as_the_newest_handoff(self):
+        """TEMPLATE.md shares the directory. Picked by mtime, a successor was
+        seeded with a skeleton of placeholders instead of a handoff."""
+        repo = self.repo()
+        self.add_template(repo)
+        result = self.relay(repo, "--dry-run")
+        out = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("handoff: %s" % os.path.join(
+            repo, "docs", "handoff", "2026-08-18.md"), out)
+        self.assertNotIn("TEMPLATE.md", out)
+
+    def test_a_template_alone_is_not_a_handoff(self):
+        repo = self.repo(handoff=False)
+        self.add_template(repo)
+        result = self.relay(repo, "--dry-run")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"no handoff files", result.stdout)
+
+    def test_the_committed_fallback_never_suggests_the_template(self):
+        repo = self.repo()
+        self.add_template(repo)
+        with open(os.path.join(repo, "docs", "handoff", "2026-08-19.md"),
+                  "w") as fh:
+            fh.write("not yet committed\n")
+        result = self.relay(repo, "--dry-run")
+        out = result.stdout.decode()
+        self.assertEqual(result.returncode, 1, out)
+        self.assertIn("newest committed handoff is docs/handoff/2026-08-18.md", out)
+        self.assertNotIn("TEMPLATE.md", out)
+
     def test_nothing_is_spawned_on_a_dry_run(self):
         result = self.relay(self.repo(), "--dry-run")
         self.assertNotIn(b"spawned", result.stdout.replace(b"nothing spawned", b""))

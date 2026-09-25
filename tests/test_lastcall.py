@@ -1286,9 +1286,27 @@ class TestPruneOwnership(TempCase):
         return path
 
     def test_our_own_stale_state_is_pruned(self):
-        path = self.aged("session.json", {"band": "red", "peak": 1})
+        path = self.aged("session.json", {"_lastcall": 1, "band": "red", "peak": 1})
+        legacy = self.aged("claude-old.json", {"agent": "claude", "band": "red"})
         cg.prune_state(self.config())
         self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(legacy))
+
+    def test_state_files_carry_the_marker_that_makes_them_ours(self):
+        config = self.config()
+        cg.write_state(config, "s1", {"band": "red"})
+        with open(os.path.join(self.state, "claude-s1.json")) as fh:
+            self.assertEqual(json.load(fh)["_lastcall"], 1)
+
+    def test_generic_keys_are_not_ownership(self):
+        """Review finding: "updated" (or "band", "epoch") alone made any JSON
+        in a shared state_dir look like ours, and pruning deleted it."""
+        foreign = [self.aged("sync.json", {"updated": 1700000000, "items": []}),
+                   self.aged("game.json", {"band": "red", "epoch": 3}),
+                   self.aged("tool.json", {"agent": "renovate", "sig": "x"})]
+        cg.prune_state(self.config())
+        for path in foreign:
+            self.assertTrue(os.path.exists(path), path)
 
     def test_a_foreign_json_file_is_never_touched(self):
         path = self.aged("settings.json", {"env": {"OPENAI_API_KEY": "sk-live"}})

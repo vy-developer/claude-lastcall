@@ -24,11 +24,17 @@ ONBOARDED_FILE = "onboarded.json"
 LEARNED_FILE = "windows.json"
 DEBUG_FILE = "last-payload.json"
 
-# Keys that mark a JSON file as one this tool wrote. Pruning deletes only
-# those: state_dir is user-settable, and pointing it at ~/.claude used to mean
-# settings.json was removed after the TTL. Extension is not ownership.
-_STATE_KEYS = frozenset(("band", "peak", "max_observed", "epoch", "updated",
-                         "window_from_statusline", "sig", "record_id"))
+# What marks a JSON file as one this tool wrote. Pruning deletes only those:
+# state_dir is user-settable, and pointing it at ~/.claude used to mean
+# settings.json was removed after the TTL. Extension is not ownership, and
+# neither is a generic key such as "updated": every state file carries this
+# marker. A file from before the marker counts only with the "agent" key the
+# hooks have always written plus one of these.
+OWNER_KEY = "_lastcall"
+_LEGACY_KEYS = frozenset(("sig", "band", "epoch"))
+# The pre-2.0 directory (~/.claude/lastcall) is Last Call's own; its files
+# predate "agent" too.
+_PRE_2_KEYS = frozenset(("band", "peak", "epoch", "max_observed"))
 
 
 def _safe(session_id):
@@ -116,6 +122,7 @@ class SessionState(dict):
                 current.pop(key, None)
         current["updated"] = int(time.time())
         current["agent"] = self.agent
+        current[OWNER_KEY] = 1
         ok = _write(self.path, current)
         if ok:
             self._dirty = set()
@@ -261,10 +268,10 @@ def prune_state(config):
     if ttl_days <= 0:
         return
     cutoff = time.time() - (ttl_days * 86400)
-    directories = [state_dir(config)]
+    directories = [(state_dir(config), False)]
     if not config.get("state_dir"):
-        directories.append(legacy_state_dir())
-    for directory in directories:
+        directories.append((legacy_state_dir(), True))
+    for directory, pre_2 in directories:
         try:
             names = os.listdir(directory)
         except OSError:
@@ -279,7 +286,7 @@ def prune_state(config):
             try:
                 if os.path.getmtime(target) >= cutoff:
                     continue
-                if not _is_our_state(target):
+                if not _is_our_state(target, pre_2):
                     continue
                 os.remove(target)
             except OSError:
@@ -295,7 +302,7 @@ def _prune_lock(path, cutoff):
         pass
 
 
-def _is_our_state(path):
+def _is_our_state(path, pre_2=False):
     """True only for a file this tool created."""
     if os.path.basename(path) == DEBUG_FILE:
         return True
@@ -304,7 +311,13 @@ def _is_our_state(path):
             data = json.load(handle)
     except (OSError, ValueError):
         return False
-    return isinstance(data, dict) and bool(_STATE_KEYS & set(data))
+    if not isinstance(data, dict):
+        return False
+    if data.get(OWNER_KEY) == 1:
+        return True
+    if data.get("agent") in ("claude", "codex") and _LEGACY_KEYS & set(data):
+        return True
+    return bool(pre_2 and "updated" in data and _PRE_2_KEYS & set(data))
 
 
 # --------------------------------------------------------------------------

@@ -482,6 +482,70 @@ class TestPreconditions(RelayCoreCase):
         self.assertIn("fallback:    codex exec --json", result.stdout)
         self.assertEqual(self.calls(), [])
 
+    def write_codex_config(self, text):
+        folder = os.path.join(self.tmp, ".codex")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "config.toml")
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def test_app_mode_discloses_that_codex_will_trust_the_repo(self):
+        """Live-QA finding: the app-server marks the successor's cwd trusted
+        in ~/.codex/config.toml on a workspace-write thread/start. Say so
+        before spawning, and only while the repo is not trusted yet."""
+        repo = self.repo()
+        config = self.write_codex_config('model = "gpt-x"\n[projects."/elsewhere"]\n'
+                                         'trust_level = "trusted"\n')
+        with open(config) as fh:
+            before = fh.read()
+        result = self.relay(repo, "--agent", "codex", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("NOTE: Codex will mark %s as a trusted project in %s (Codex does this "
+                      "itself when the app-server starts a workspace-write thread)"
+                      % (repo, config), result.stdout)
+        with open(config) as fh:
+            self.assertEqual(fh.read(), before, "the check must be read-only")
+        self.write_codex_config('[projects."%s"] # added by Codex\ntrust_level = "trusted"\n'
+                                % repo)
+        result = self.relay(repo, "--agent", "codex", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("trusted project", result.stdout)
+
+    def test_the_trust_note_is_only_for_writable_app_threads(self):
+        repo = self.repo()
+        for args in (("--codex-mode", "exec"), ("--codex-sandbox", "read-only")):
+            result = self.relay(repo, "--agent", "codex", "--dry-run", *args)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertNotIn("trusted project", result.stdout, args)
+        result = self.relay(repo, "--agent", "claude", "--dry-run")
+        self.assertNotIn("trusted project", result.stdout)
+
+    def test_trusted_projects_parser_is_tolerant(self):
+        self.write_codex_config("\n".join([
+            'notify = ["x"]',
+            '[projects."/a/double"]',
+            'trust_level = "trusted"',
+            "[projects.'/b/literal']",
+            "trust_level = 'trusted'",
+            '[projects."/c/untrusted"]',
+            'trust_level = "untrusted"',
+            '[projects."C:\\\\Users\\\\me\\\\repo"]',
+            'trust_level = "trusted"',
+            '[hooks.state."lastcall@claude-lastcall:Stop"]',
+            'trust_level = "trusted"',
+            "[projects]",
+            '"/d/inline" = { trust_level = "trusted" }',
+            '"/e/inline-no" = { trust_level = "untrusted" }',
+            "[[weird]]",
+            'trust_level = "trusted"',
+            "not toml at all = = [",
+        ]) + "\n")
+        env = {"HOME": self.tmp}
+        self.assertEqual(relay.codex_trusted_projects(env),
+                         {"/a/double", "/b/literal", "C:\\Users\\me\\repo", "/d/inline"})
+        self.assertEqual(relay.codex_trusted_projects({"CODEX_HOME": "/nonexistent"}), set())
+
     def test_unknown_codex_mode_in_config_is_refused(self):
         repo = self.repo()
         os.makedirs(os.path.join(repo, ".claude"))

@@ -313,6 +313,12 @@ edits `~/.claude.json`.
   in once the turn is accepted, and keeps the server up until the turn ends or
   `codex_app_max_seconds` runs out. If app mode fails before the turn starts,
   the relay loudly falls back to `exec`.
+
+  Starting a `workspace-write` thread makes Codex itself mark the repo as a
+  trusted project in `~/.codex/config.toml` (`[projects."<repo>"]
+  trust_level = "trusted"`). An unattended successor needs that trust anyway,
+  so the relay does not prevent it. It reads the file (never writes it) and,
+  when the repo is not trusted yet, says so before spawning.
 - `exec` runs `codex exec --json`. That thread is hidden from the sidebar and
   from the default `codex resume` list.
 - `tmux` runs the TUI in a tmux session. It is the only mode that needs tmux.
@@ -505,7 +511,7 @@ on successors; do not set those yourself.
 python3 -m unittest discover -s tests -v
 ```
 
-673 tests, standard library only, no network. They cover the failure modes
+676 tests, standard library only, no network. They cover the failure modes
 that shaped the design: thresholds that can never fire, zones that never
 re-arm, sidechain usage counted as the main session's, Stop payloads Codex
 would reject, and a README that drifts from the code.

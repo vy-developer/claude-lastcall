@@ -133,6 +133,62 @@ def codex_home(env=None):
         env.get("HOME") or os.path.expanduser("~"), ".codex")
 
 
+# `[projects."<path>"]` in ~/.codex/config.toml, with `trust_level = "trusted"`.
+# Read line by line, never written: tomllib is 3.11+, and all that is needed is
+# the section header and one key. Also accepts the inline form under
+# `[projects]`: `"<path>" = { trust_level = "trusted" }`.
+_TOML_KEY = r"""("(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_-]+)"""
+_PROJECT_HEADER = re.compile(r"^\[\s*projects\s*\.\s*%s\s*\]\s*(?:#.*)?$" % _TOML_KEY)
+_PROJECTS_TABLE = re.compile(r"^\[\s*projects\s*\]\s*(?:#.*)?$")
+_PROJECT_INLINE = re.compile(r"^%s\s*=\s*\{(.*)\}\s*(?:#.*)?$" % _TOML_KEY)
+_TRUSTED = re.compile(r"""(?:^|[\s,{])trust_level\s*=\s*["']trusted["']""")
+
+
+def _toml_key(token):
+    if token.startswith('"'):
+        try:
+            return json.loads(token)
+        except ValueError:
+            return token[1:-1]
+    if token.startswith("'"):
+        return token[1:-1]
+    return token
+
+
+def codex_trusted_projects(env=None):
+    """The project paths ~/.codex/config.toml marks trusted (read-only; an
+    empty set when the file is missing or unreadable)."""
+    path = os.path.join(codex_home(env), "config.toml")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return set()
+    trusted, section, in_projects = set(), None, False
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("["):
+            header = _PROJECT_HEADER.match(line)
+            section = _toml_key(header.group(1)) if header else None
+            in_projects = bool(_PROJECTS_TABLE.match(line))
+            continue
+        if section is not None:
+            if line.startswith("trust_level") and _TRUSTED.search(line):
+                trusted.add(section)
+        elif in_projects:
+            inline = _PROJECT_INLINE.match(line)
+            if inline and _TRUSTED.search(inline.group(2)):
+                trusted.add(_toml_key(inline.group(1)))
+    return trusted
+
+
+def codex_project_trusted(repo, env=None):
+    def norm(path):
+        return os.path.normcase(os.path.normpath(path))
+    trusted = {norm(t) for t in codex_trusted_projects(env)}
+    return any(norm(p) in trusted for p in (repo, os.path.realpath(repo)))
+
+
 def ledger_dir(env=None):
     env = os.environ if env is None else env
     home = env.get("LASTCALL_HOME") or os.path.join(
@@ -1601,6 +1657,12 @@ class Relay:
                 else "; any request is declined"))
             self.say("  fallback:    %s  (if app mode fails before the turn starts)"
                      % shlex.join(p["fallback_argv"]))
+            sandbox = codex_app_sandbox(o)
+            if sandbox != "read-only" and not codex_project_trusted(p["repo"], self.env):
+                self.say("NOTE: Codex will mark %s as a trusted project in %s (Codex does this "
+                         "itself when the app-server starts a %s thread)"
+                         % (os.path.realpath(p["repo"]),
+                            os.path.join(codex_home(self.env), "config.toml"), sandbox))
         elif o.codex_mode == "exec":
             self.say("  log:         %s" % p["log"])
             self.say("  check-in:    thread.started on `codex exec --json` (hidden from the "

@@ -404,7 +404,9 @@ codex   desktop  site     fix the build                idle    –   9m   88k/25
 
 `RC` is Remote Control: ✓ connected, ✗ not connected, – not applicable.
 `CONTEXT` is judged against the same window the hooks use, and a note under
-the table flags models with conflicted learned windows. Claude sessions come
+the table flags models with conflicted learned windows. `--json` carries the
+same figures as `tokens`, `window`, `percent` and `window_source` (`null`
+when unknown). Claude sessions come
 from `~/.claude/sessions`. Codex sessions come from the rollouts a running
 `codex` holds open (checked with `lsof`); without `lsof`, recently written
 rollouts count.
@@ -511,7 +513,7 @@ on successors; do not set those yourself.
 python3 -m unittest discover -s tests -v
 ```
 
-676 tests, standard library only, no network. They cover the failure modes
+678 tests, standard library only, no network. They cover the failure modes
 that shaped the design: thresholds that can never fire, zones that never
 re-arm, sidechain usage counted as the main session's, Stop payloads Codex
 would reject, and a README that drifts from the code.

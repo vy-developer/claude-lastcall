@@ -32,7 +32,7 @@ def cmd_status(args) -> int:
     if args.surface:
         recs = [r for r in recs if r.surface == args.surface]
     if args.json:
-        print(json.dumps([r.to_dict() for r in recs], indent=2, ensure_ascii=False))
+        print(json.dumps([S.status_dict(r) for r in recs], indent=2, ensure_ascii=False))
     else:
         print(S.render_status(recs))
     return 0

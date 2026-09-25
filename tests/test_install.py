@@ -870,6 +870,32 @@ class TestSubcommands(Sandbox):
         self.assertIn("CONTEXT", out)
         self.assertIn("51k", out, "the usage provider was not registered")
 
+    def test_status_json_carries_the_context_the_table_shows(self):
+        """Live-QA finding: `status --json` had no CONTEXT data at all."""
+        sid = "11111111-2222-3333-4444-777777777777"
+        dump(os.path.join(self.claude_home, "sessions", "%d.json" % os.getpid()),
+             {"pid": os.getpid(), "sessionId": sid, "cwd": self.tmp, "status": "idle",
+              "entrypoint": "cli"})
+        transcript = os.path.join(self.claude_home, "projects", "-synthetic", sid + ".jsonl")
+        os.makedirs(os.path.dirname(transcript))
+        with open(transcript, "w") as fh:
+            fh.write(json.dumps({
+                "type": "assistant", "isSidechain": False, "sessionId": sid,
+                "timestamp": "2026-09-25T10:00:00.000Z",
+                "message": {"id": "msg_1", "model": "claude-synthetic",
+                            "usage": {"input_tokens": 1000, "cache_read_input_tokens": 50000,
+                                      "cache_creation_input_tokens": 0, "output_tokens": 10}},
+            }) + "\n")
+        dump(os.path.join(self.lastcall_home, "config.json"),
+             {"windows": {"claude-synthetic": 200000}})
+        code, out = self.run_cli("status", "--agent", "claude", "--json")
+        self.assertEqual(code, 0, out)
+        (row,) = json.loads(out)
+        self.assertEqual((row["tokens"], row["window"], row["percent"], row["window_source"]),
+                         (51000, 200000, 25.5, "map"))
+        code, table = self.run_cli("status", "--agent", "claude")
+        self.assertIn("51k/200k 26%", table)
+
     def test_status_notes_a_model_whose_learned_window_is_conflicted(self):
         sid = "11111111-2222-3333-4444-666666666666"
         dump(os.path.join(self.claude_home, "sessions", "%d.json" % os.getpid()),

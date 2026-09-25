@@ -521,6 +521,30 @@ class TestStatus(Homes):
             S.register_usage_provider("claude", lambda r: 1 / 0)
             self.assertEqual(S._usage_cell(rec), "?")
 
+    def test_status_dict_adds_the_context_fields(self):
+        rec = S.SessionRecord(agent="claude", session_id="x")
+
+        class U:
+            tokens, window, window_source = 90_000, 200_000, "transcript"
+
+        class NoWindow:
+            tokens, window, window_source = 90_000, None, "unknown"
+        keys = ("tokens", "window", "percent", "window_source")
+        with mock.patch.dict(S.USAGE_PROVIDERS, {}, clear=True):
+            d = S.status_dict(rec)
+            self.assertEqual([d[k] for k in keys], [None] * 4)
+            self.assertEqual(d["session_id"], "x")
+            S.register_usage_provider("claude", lambda r: U())
+            self.assertEqual([S.status_dict(rec)[k] for k in keys],
+                             [90_000, 200_000, 45.0, "transcript"])
+            S.register_usage_provider("claude", lambda r: NoWindow())
+            self.assertEqual([S.status_dict(rec)[k] for k in keys], [90_000, None, None, None])
+            S.register_usage_provider("claude", lambda r: None)
+            self.assertEqual([S.status_dict(rec)[k] for k in keys], [None] * 4)
+            S.register_usage_provider("claude", lambda r: 1 / 0)
+            self.assertEqual([S.status_dict(rec)[k] for k in keys], [None] * 4)
+        json.dumps(S.status_dict(rec))
+
     def test_to_dict(self):
         rec = S.SessionRecord(agent="codex", session_id="x", project=self.repo)
         d = rec.to_dict()

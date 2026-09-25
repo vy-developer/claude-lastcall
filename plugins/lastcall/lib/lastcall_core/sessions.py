@@ -754,21 +754,60 @@ def register_usage_provider(agent: str, fn: Callable[[SessionRecord], object]) -
     USAGE_PROVIDERS[agent] = fn
 
 
-def _usage_cell(rec: SessionRecord) -> str:
+_NO_PROVIDER = object()
+_PROVIDER_FAILED = object()
+
+
+def _usage_of(rec: SessionRecord):
     fn = USAGE_PROVIDERS.get(rec.agent)
     if fn is None:
-        return "\u2013"
+        return _NO_PROVIDER
     try:
-        usage = fn(rec)
+        return fn(rec)
     except Exception:  # an adapter bug must not break status
-        return "?"
+        return _PROVIDER_FAILED
+
+
+def context_fields(usage) -> dict:
+    """What the CONTEXT column shows, as data: tokens, window, percent and
+    window_source, each None when unknown."""
     tokens = getattr(usage, "tokens", None)
-    if not isinstance(tokens, int):
-        return "\u2013"
+    if not isinstance(tokens, int) or isinstance(tokens, bool):
+        return {"tokens": None, "window": None, "percent": None, "window_source": None}
     window = getattr(usage, "window", None)
-    if isinstance(window, int) and window > 0:
-        return "%s/%s %d%%" % (_k(tokens), _k(window), round(100.0 * tokens / window))
-    return _k(tokens)
+    if not (isinstance(window, int) and window > 0):
+        window = None
+    source = getattr(usage, "window_source", None)
+    if window is None or not isinstance(source, str) or source == "unknown":
+        source = None
+    return {"tokens": tokens, "window": window,
+            "percent": round(100.0 * tokens / window, 1) if window else None,
+            "window_source": source}
+
+
+def _cell(usage) -> str:
+    if usage is _NO_PROVIDER:
+        return "\u2013"
+    if usage is _PROVIDER_FAILED:
+        return "?"
+    ctx = context_fields(usage)
+    if ctx["tokens"] is None:
+        return "\u2013"
+    if ctx["window"]:
+        return "%s/%s %d%%" % (_k(ctx["tokens"]), _k(ctx["window"]),
+                               round(100.0 * ctx["tokens"] / ctx["window"]))
+    return _k(ctx["tokens"])
+
+
+def _usage_cell(rec: SessionRecord) -> str:
+    return _cell(_usage_of(rec))
+
+
+def status_dict(rec: SessionRecord) -> dict:
+    """``rec.to_dict()`` plus the CONTEXT data the status table shows."""
+    d = rec.to_dict()
+    d.update(context_fields(_usage_of(rec)))
+    return d
 
 
 def _k(n: int) -> str:

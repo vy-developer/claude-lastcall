@@ -992,9 +992,10 @@ def register_usage_providers(notes=None):
         # window the hooks judge by, or the column disagrees with the warnings.
         try:
             from .zones import session_window
-            window, _source, _assumed = session_window(usage, cwd=rec.cwd)
+            window, source, _assumed = session_window(usage, cwd=rec.cwd)
             if window:
                 usage.window = window
+                usage.window_source = source
             if notes is not None and rec.agent == "claude" and usage.model:
                 from .config import load_config
                 from .windows import learned_conflict, load_learned

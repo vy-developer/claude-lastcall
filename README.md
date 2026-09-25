@@ -83,6 +83,9 @@ which agent is calling (`LASTCALL_AGENT` forces it).
   this is `input + cache_read + cache_creation` of the newest main-session
   response; subagent and sidechain usage is skipped. For Codex, it is the
   rollout's newest `last_token_usage.total_tokens`.
+  A `PostToolUse` reading can lag one model call behind, because the agent
+  writes that call's usage just after the hook starts; `Stop` readings are
+  current.
 - **Warn once per zone.** Nothing is printed below every zone, so it costs no
   context. When a zone is first entered, whichever hook notices delivers the
   warning, once.

@@ -1,17 +1,18 @@
-"""`lastcall.py doctor`: show exactly what the guard resolves.
+"""`lastcall doctor`: show exactly what the guard resolves.
 
 The whole failure mode of this class of tool is looking healthy while doing
 nothing. This is the antidote: run it and see the real numbers, for either
 agent's transcript.
 """
 
+import json
 import os
 import shutil
 
 from .agents import detect_agent
 from .config import load_config, state_dir
 from .engine import effective_window, read_usage
-from .render import RELAY_SCRIPT, read_template
+from .render import RELAY_SCRIPT, cli_command, read_template
 from .state import read_state
 from .windows import (learned_conflict, learned_path, learned_window, load_learned,
                       match_window)
@@ -105,6 +106,131 @@ def windows_report(config):
     return lines
 
 
+# ---------------------------------------------------------------- install state
+#
+# Read from the agents' own files, never by running them: `claude plugin list`
+# alone takes most of a second, and doctor has to stay quick. The formats were
+# checked against Claude Code 2.1.281 and Codex CLI 0.153.4 installing into
+# throwaway config dirs:
+#   claude  settings.json "enabledPlugins": {"<id>": true};
+#           plugins/installed_plugins.json {"plugins": {"<id>": [{"scope": ...}]}}
+#   codex   config.toml [plugins."<id>"] enabled = true, and one
+#           [hooks.state."<source>:<event>:<group>:<index>"] trusted_hash per
+#           hook trusted through /hooks, where <source> is "<id>:hooks/hooks.json"
+#           for a plugin's hooks and the hooks.json path for the hooks method.
+
+_SNAKE_EVENTS = {"Stop": "stop", "SessionStart": "session_start",
+                 "PostCompact": "post_compact", "PostToolUse": "post_tool_use",
+                 "UserPromptSubmit": "user_prompt_submit"}
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def agent_install_state(agent):
+    """What is installed for ``agent`` at user level, from its files alone:
+    {"plugin": None | "enabled" | "disabled", "hooks": <our hooks-method
+    entries>, "hooks_file": path, "trusted": <events trusted> | None}."""
+    from . import cli, tomlish
+
+    pid = cli.plugin_id()
+    hooks_path = cli.hooks_file(agent)
+    state = {"hooks_file": hooks_path, "trusted": None,
+             "hooks": cli.count_ours(_read_json(hooks_path))}
+    if agent == cli.CLAUDE:
+        home = cli.claude_home()
+        installed = (_read_json(os.path.join(home, "plugins", "installed_plugins.json"))
+                     .get("plugins") or {})
+        enabled = (_read_json(os.path.join(home, "settings.json"))
+                   .get("enabledPlugins") or {})
+        if isinstance(installed, dict) and installed.get(pid):
+            state["plugin"] = ("enabled" if isinstance(enabled, dict)
+                               and enabled.get(pid) is True else "disabled")
+        else:
+            state["plugin"] = None
+        return state
+
+    flat = tomlish.load(os.path.join(cli.codex_home(), "config.toml"))
+    if any(key[:2] == ("plugins", pid) for key in flat):
+        state["plugin"] = ("disabled" if flat.get(("plugins", pid, "enabled")) is False
+                           else "enabled")
+    else:
+        state["plugin"] = None
+    sources = []
+    if state["plugin"]:
+        sources.append(lambda source: source.startswith(pid + ":"))
+    if state["hooks"]:
+        paths = {os.path.normcase(os.path.abspath(hooks_path)),
+                 os.path.normcase(os.path.realpath(hooks_path))}
+        sources.append(lambda source: os.path.normcase(source) in paths)
+    if sources:
+        wanted = set(_SNAKE_EVENTS.values())
+        trusted = set()
+        for key, value in flat.items():
+            if len(key) != 4 or key[:2] != ("hooks", "state") or key[3] != "trusted_hash":
+                continue
+            parts = key[2].rsplit(":", 3)
+            if value and len(parts) == 4 and parts[1] in wanted \
+                    and any(match(parts[0]) for match in sources):
+                trusted.add(parts[1])
+        state["trusted"] = len(trusted)
+    return state
+
+
+def install_report(which=shutil.which):
+    """Lines describing how Last Call is installed for each agent on PATH."""
+    from . import cli
+
+    pid = cli.plugin_id()
+    total = len(_SNAKE_EVENTS)
+    lines = ["\n  install (user level)"]
+    for agent in cli.AGENT_ORDER:
+        label = "    %-9s" % agent
+        pad = " " * len(label)
+        if not which(agent):
+            lines.append("%snot on PATH (skipped)" % label)
+            continue
+        state = agent_install_state(agent)
+        plugin = state["plugin"]
+        if plugin == "enabled":
+            lines.append("%sok   plugin %s enabled" % (label, pid))
+        elif plugin == "disabled":
+            if agent == cli.CLAUDE:
+                fix = "claude plugin enable %s" % pid
+            else:
+                fix = 'set enabled = true under [plugins."%s"] in %s' % (
+                    pid, os.path.join(cli.codex_home(), "config.toml"))
+            lines.append("%sMISS plugin %s installed but DISABLED -> %s" % (label, pid, fix))
+        else:
+            lines.append("%s---- plugin %s not installed" % (label, pid))
+        if state["hooks"]:
+            lines.append("%sok   hooks method: %d entries in %s"
+                         % (pad, state["hooks"], state["hooks_file"]))
+        else:
+            lines.append("%s---- hooks method: none in %s" % (pad, state["hooks_file"]))
+        if plugin and state["hooks"]:
+            lines.append("%sPROBLEM both are installed, so every hook fires twice -> %s"
+                         % (pad, cli_command("install --%s" % agent)))
+        elif not plugin and not state["hooks"]:
+            lines.append("%sMISS Last Call is not installed for %s -> %s"
+                         % (pad, agent, cli_command("install --%s" % agent)))
+        if state["trusted"] is not None:
+            if state["trusted"] >= total:
+                lines.append("%sok   hook trust: %d/%d Last Call hooks trusted"
+                             % (pad, total, total))
+            else:
+                lines.append("%sMISS hook trust: %d/%d Last Call hooks trusted -> run "
+                             "/hooks in Codex to trust them (until then they do not run)"
+                             % (pad, state["trusted"], total))
+    return lines
+
+
 def doctor(argv, version="?", env=None):
     env = os.environ if env is None else env
     payload = {"cwd": os.getcwd()}
@@ -143,6 +269,11 @@ def doctor(argv, version="?", env=None):
     print("  disabled      : %s" % bool(config["disabled"]))
     for line in windows_report(config):
         print(line)
+    try:
+        for line in install_report():
+            print(line)
+    except Exception as error:  # noqa: BLE001 - one broken file must not end doctor
+        print("\n  install (user level): could not read (%s)" % error)
 
     ready, checks = handover_status(config)
     print("\n  automatic handover: %s" % ("READY" if ready else "NOT SET UP"))
@@ -150,12 +281,13 @@ def doctor(argv, version="?", env=None):
         print("    %s %s" % ("ok  " if ok else "MISS", label))
     if not ready:
         print("    -> Last Call will warn, but nothing will carry the work")
-        print("       forward; the session just ends. Run: lastcall.py setup")
+        print("       forward; the session just ends. Run: %s" % cli_command("setup"))
 
     if not transcript:
+        doctor_command = cli_command("doctor")
         print("\nPass a transcript path to measure a real session, e.g.")
-        print("  lastcall.py doctor ~/.claude/projects/<project>/<session>.jsonl")
-        print("  lastcall.py doctor ~/.codex/sessions/YYYY/MM/DD/rollout-<...>.jsonl")
+        print("  %s ~/.claude/projects/<project>/<session>.jsonl" % doctor_command)
+        print("  %s ~/.codex/sessions/YYYY/MM/DD/rollout-<...>.jsonl" % doctor_command)
         return 0
 
     agent = detect_agent({"transcript_path": transcript}, env)

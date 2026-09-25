@@ -133,53 +133,14 @@ def codex_home(env=None):
         env.get("HOME") or os.path.expanduser("~"), ".codex")
 
 
-# `[projects."<path>"]` in ~/.codex/config.toml, with `trust_level = "trusted"`.
-# Read line by line, never written: tomllib is 3.11+, and all that is needed is
-# the section header and one key. Also accepts the inline form under
-# `[projects]`: `"<path>" = { trust_level = "trusted" }`.
-_TOML_KEY = r"""("(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_-]+)"""
-_PROJECT_HEADER = re.compile(r"^\[\s*projects\s*\.\s*%s\s*\]\s*(?:#.*)?$" % _TOML_KEY)
-_PROJECTS_TABLE = re.compile(r"^\[\s*projects\s*\]\s*(?:#.*)?$")
-_PROJECT_INLINE = re.compile(r"^%s\s*=\s*\{(.*)\}\s*(?:#.*)?$" % _TOML_KEY)
-_TRUSTED = re.compile(r"""(?:^|[\s,{])trust_level\s*=\s*["']trusted["']""")
-
-
-def _toml_key(token):
-    if token.startswith('"'):
-        try:
-            return json.loads(token)
-        except ValueError:
-            return token[1:-1]
-    if token.startswith("'"):
-        return token[1:-1]
-    return token
-
-
 def codex_trusted_projects(env=None):
-    """The project paths ~/.codex/config.toml marks trusted (read-only; an
-    empty set when the file is missing or unreadable)."""
-    path = os.path.join(codex_home(env), "config.toml")
-    try:
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-    except (OSError, UnicodeDecodeError):
-        return set()
-    trusted, section, in_projects = set(), None, False
-    for raw in lines:
-        line = raw.strip()
-        if line.startswith("["):
-            header = _PROJECT_HEADER.match(line)
-            section = _toml_key(header.group(1)) if header else None
-            in_projects = bool(_PROJECTS_TABLE.match(line))
-            continue
-        if section is not None:
-            if line.startswith("trust_level") and _TRUSTED.search(line):
-                trusted.add(section)
-        elif in_projects:
-            inline = _PROJECT_INLINE.match(line)
-            if inline and _TRUSTED.search(inline.group(2)):
-                trusted.add(_toml_key(inline.group(1)))
-    return trusted
+    """The project paths ~/.codex/config.toml marks trusted: `[projects."<path>"]`
+    with `trust_level = "trusted"`, or the inline form under `[projects]`.
+    Read-only; an empty set when the file is missing or unreadable."""
+    flat = _core_module("tomlish").load(os.path.join(codex_home(env), "config.toml"))
+    return {key[1] for key, value in flat.items()
+            if len(key) == 3 and key[0] == "projects" and key[2] == "trust_level"
+            and value == "trusted"}
 
 
 def codex_project_trusted(repo, env=None):
@@ -485,17 +446,20 @@ def newest_committed_handoff(repo, handoff_dir):
 # ------------------------------------------------------------------ config
 
 
-def _config_module():
-    """lastcall_core.config — relatively when imported as part of the package,
+def _core_module(name):
+    """lastcall_core.<name> — relatively when imported as part of the package,
     else (run as a script, or loaded by path) from this file's own lib/."""
-    if __package__:
-        from . import config
-        return config
     import importlib
+    if __package__:
+        return importlib.import_module("." + name, __package__)
     lib = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if lib not in sys.path:
         sys.path.insert(0, lib)
-    return importlib.import_module("lastcall_core.config")   # our own package
+    return importlib.import_module("lastcall_core." + name)   # our own package
+
+
+def _config_module():
+    return _core_module("config")
 
 
 def _relay_block(path):

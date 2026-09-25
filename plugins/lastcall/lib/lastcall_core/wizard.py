@@ -14,7 +14,7 @@ import sys
 from .config import PROJECT_CONFIG_NAME, find_project_config, home_dir, load_config
 from .doctor import handover_status
 from .render import (HANDOFF_SKELETON, ONBOARDING_QUESTIONS, ONBOARDING_RECOMMENDED,
-                     RELAY_TEMPLATE, WRAPUP_STEPS)
+                     RELAY_TEMPLATE, WRAPUP_STEPS, cli_command)
 from .windows import validate_windows
 
 VERIFIERS = (
@@ -453,7 +453,7 @@ def setup(argv):
         print("their EXPECTED results. A handoff whose Step 0 cannot fail is a")
         print("handoff that proves nothing.")
     if not ready and handover:
-        print("\nFix the MISS lines above, then re-run: lastcall doctor")
+        print("\nFix the MISS lines above, then re-run: %s" % cli_command("doctor"))
     return 0
 
 

@@ -18,6 +18,37 @@ SCRIPT_PATH = os.path.join(PLUGIN_ROOT, "scripts", "lastcall.py")
 RELAY_SCRIPT = os.path.join(PLUGIN_ROOT, "lib", "lastcall_core", "relay.py")
 RELAY_LAUNCHER = os.path.join(PLUGIN_ROOT, "bin", "lastcall")
 RELAY_COMMAND = "python3 %s relay" % shlex.quote(RELAY_LAUNCHER)
+
+
+def lastcall_linked(which=None):
+    """True when `lastcall` on PATH is this checkout's launcher (the symlink,
+    or the .cmd shim on Windows, that `lastcall install` makes)."""
+    if which is None:
+        import shutil  # lazily: the hook path rarely gets here
+        which = shutil.which
+    found = which("lastcall")
+    if not found:
+        return False
+    try:
+        if os.path.realpath(found) == os.path.realpath(RELAY_LAUNCHER):
+            return True
+        if os.name == "nt" and os.path.isfile(found):
+            with open(found, encoding="utf-8", errors="replace") as handle:
+                return RELAY_LAUNCHER + ".cmd" in handle.read()
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def cli_command(subcommand, which=None):
+    """How to tell a person to run ``subcommand``: `lastcall setup` when that
+    command reaches this checkout, else a path that works without the link
+    (the hook script for setup and doctor, the launcher for the rest)."""
+    if lastcall_linked(which):
+        return "lastcall %s" % subcommand
+    word = subcommand.split(" ", 1)[0]
+    target = SCRIPT_PATH if word in ("setup", "doctor") else RELAY_LAUNCHER
+    return "python3 %s %s" % (shlex.quote(target), subcommand)
 LEGACY_RELAY_SCRIPT = os.path.join(PLUGIN_ROOT, "relay", "handoff.sh")
 _SHELL_BEFORE_RELAY = re.compile(r"\b(?:bash|sh)[ \t]+(?=\{relay\})")
 RELAY_TEMPLATE = os.path.join(PLUGIN_ROOT, "templates", "handoff-relay.md")
@@ -100,7 +131,7 @@ AUTOMATIC HANDOVER IS NOT SET UP for this project, so nothing will start a
 successor session or carry this work forward — when you stop, the work stops.
 Tell the user that, once, and point them at:
 
-    python3 {setup} setup
+    {setup_command}
 
 Configure this text: set "template" in .lastcall.json."""
 
@@ -470,7 +501,10 @@ def render(config, zone, tokens, window, transcript=None, assumed=False,
     if assumed and window:
         header += "\n" + ASSUMED_WINDOW_NOTE
 
-    body = fill(_SHELL_BEFORE_RELAY.sub("", zone_body(config, zone)), values)
+    text = _SHELL_BEFORE_RELAY.sub("", zone_body(config, zone))
+    if "{setup_command}" in text:  # a PATH lookup, only when it is shown
+        values["setup_command"] = cli_command("setup")
+    body = fill(text, values)
     return fill(header, values) + "\n\n" + body
 
 
@@ -481,7 +515,8 @@ def block_reason(zone):
 
 def onboarding_message():
     # replace, not format: the text is full of JSON braces.
-    return ONBOARDING.replace("{setup}", SCRIPT_PATH)
+    return (ONBOARDING.replace(PROMPT_DOCTOR, cli_command("doctor"))
+            .replace("{setup}", SCRIPT_PATH))
 
 
 def compaction_message(config, previous_zone=None):

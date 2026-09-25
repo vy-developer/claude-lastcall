@@ -818,6 +818,146 @@ class TestMachineSetup(Sandbox):
             self.assertIn('"%~dp0lastcall"', fh.read())
 
 
+# ---------------------------------------------------------------- doctor: install state
+
+SNAKE_EVENTS = ("stop", "session_start", "post_compact", "post_tool_use",
+                "user_prompt_submit")
+
+
+@posix_only
+class TestDoctorInstallState(Sandbox):
+    """Live-QA finding: doctor said nothing about how (or whether) Last Call
+    is installed, or whether Codex trusts its hooks."""
+
+    agents_on_path = ("claude", "codex")
+
+    def doctor(self, path_extra=()):
+        code, out = self.run_cli("doctor", path_extra=path_extra)
+        self.assertEqual(code, 0, out)
+        return out
+
+    def install_plugin_files(self, codex_enabled=True):
+        dump(os.path.join(self.claude_home, "plugins", "installed_plugins.json"),
+             {"version": 2, "plugins": {PLUGIN_ID: [{"scope": "user", "version": "1.8.0"}]}})
+        dump(self.claude_settings, {"enabledPlugins": {PLUGIN_ID: True}})
+        self.write_codex_config('[marketplaces.%s]\nsource_type = "local"\n\n'
+                                '[plugins."%s"]\nenabled = %s\n'
+                                % (MARKET, PLUGIN_ID, "true" if codex_enabled else "false"))
+
+    def write_codex_config(self, text, append=False):
+        os.makedirs(self.codex_home, exist_ok=True)
+        with open(os.path.join(self.codex_home, "config.toml"), "a" if append else "w") as fh:
+            fh.write(text)
+
+    def trust(self, source, events=SNAKE_EVENTS):
+        self.write_codex_config("".join(
+            '\n[hooks.state."%s:%s:0:0"]\ntrusted_hash = "sha256:synthetic"\n' % (source, e)
+            for e in events), append=True)
+
+    def test_nothing_installed_says_how_to_install(self):
+        out = self.doctor()
+        self.assertIn("install (user level)", out)
+        for agent in ("claude", "codex"):
+            self.assertIn("MISS Last Call is not installed for %s -> " % agent, out)
+            self.assertIn("install --%s" % agent, out)
+        self.assertNotIn("hook trust", out, "nothing to trust yet")
+
+    def test_plugin_install_and_codex_hook_trust(self):
+        self.install_plugin_files()
+        out = self.doctor()
+        self.assertEqual(out.count("ok   plugin %s enabled" % PLUGIN_ID), 2, out)
+        self.assertIn("MISS hook trust: 0/5 Last Call hooks trusted -> run /hooks in Codex", out)
+        self.trust(PLUGIN_ID + ":hooks/hooks.json", SNAKE_EVENTS[:3])
+        self.assertIn("MISS hook trust: 3/5", self.doctor())
+        self.trust("other@market:hooks/hooks.json", SNAKE_EVENTS[3:])
+        self.assertIn("MISS hook trust: 3/5", self.doctor(), "another plugin's trust counted")
+        self.trust(PLUGIN_ID + ":hooks/hooks.json", SNAKE_EVENTS[3:])
+        out = self.doctor()
+        self.assertIn("ok   hook trust: 5/5 Last Call hooks trusted", out)
+        self.assertNotIn("run /hooks", out)
+
+    def test_disabled_plugins_are_called_out(self):
+        self.install_plugin_files(codex_enabled=False)
+        dump(self.claude_settings, {"enabledPlugins": {PLUGIN_ID: False}})
+        out = self.doctor()
+        self.assertIn("DISABLED -> claude plugin enable %s" % PLUGIN_ID, out)
+        self.assertIn('DISABLED -> set enabled = true under [plugins."%s"]' % PLUGIN_ID, out)
+
+    def test_hooks_method_entries_and_their_trust(self):
+        code, out = self.run_cli("install", "--claude", "--codex", "--method", "hooks",
+                                 "--no-link-bin")
+        self.assertEqual(code, 0, out)
+        out = self.doctor()
+        self.assertIn("ok   hooks method: 5 entries in %s" % self.claude_settings, out)
+        self.assertIn("ok   hooks method: 5 entries in %s" % self.codex_hooks, out)
+        self.assertIn("MISS hook trust: 0/5", out)
+        self.trust(self.codex_hooks)
+        self.assertIn("ok   hook trust: 5/5", self.doctor())
+        hooks = load(self.claude_settings)["hooks"]
+        self.install_plugin_files()
+        dump(self.claude_settings, {"hooks": hooks, "enabledPlugins": {PLUGIN_ID: True}})
+        out = self.doctor()
+        self.assertEqual(out.count("PROBLEM both are installed, so every hook fires twice"), 2,
+                         out)
+
+    def test_an_agent_not_on_path_is_skipped(self):
+        os.remove(os.path.join(self.fake_bin, "codex"))
+        out = self.doctor()
+        self.assertIn("codex    not on PATH (skipped)", out)
+
+    def test_the_report_reads_files_and_runs_nothing(self):
+        """doctor must stay fast: no `claude plugin list` (most of a second)."""
+        from lastcall_core import doctor
+        self.install_plugin_files()
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(subprocess, "run", side_effect=AssertionError("ran")), \
+                mock.patch.object(subprocess, "Popen", side_effect=AssertionError("ran")):
+            lines = doctor.install_report(which=lambda name: "/fake/" + name)
+        self.assertTrue(any("plugin %s enabled" % PLUGIN_ID in line for line in lines), lines)
+
+    def test_hints_name_the_lastcall_command_when_it_is_linked(self):
+        out = self.doctor()
+        self.assertIn("Run: python3 %s setup" % HOOK_SCRIPT, out)
+        self.assertIn("python3 %s doctor ~/.claude/projects" % HOOK_SCRIPT, out)
+        self.assertIn("-> python3 %s install --claude" % LAUNCHER, out)
+        bindir = os.path.join(self.tmp, "linked")
+        os.makedirs(bindir)
+        os.symlink(LAUNCHER, os.path.join(bindir, "lastcall"))
+        out = self.doctor(path_extra=[bindir])
+        self.assertIn("Run: lastcall setup", out)
+        self.assertIn("  lastcall doctor ~/.claude/projects", out)
+        self.assertIn("-> lastcall install --claude", out)
+        self.assertNotIn("lastcall.py", out)
+
+
+class TestCommandHints(unittest.TestCase):
+    def test_cli_command_prefers_the_linked_command(self):
+        from lastcall_core import render
+        linked = lambda name: LAUNCHER if name == "lastcall" else None
+        other = lambda name: "/usr/local/bin/lastcall" if name == "lastcall" else None
+        self.assertEqual(render.cli_command("setup", linked), "lastcall setup")
+        self.assertEqual(render.cli_command("setup", other), "python3 %s setup" % HOOK_SCRIPT)
+        self.assertEqual(render.cli_command("doctor", lambda name: None),
+                         "python3 %s doctor" % HOOK_SCRIPT)
+        self.assertEqual(render.cli_command("install --codex", other),
+                         "python3 %s install --codex" % LAUNCHER)
+
+    def test_the_session_texts_use_it(self):
+        from lastcall_core import render
+        from lastcall_core.config import DEFAULTS
+        from lastcall_core.zones import resolve_zones
+        with mock.patch.object(render, "lastcall_linked", return_value=True):
+            self.assertIn("lastcall doctor", render.onboarding_message())
+            self.assertNotIn("{setup}", render.onboarding_message())
+            config = dict(DEFAULTS, _project_dir=ROOT, _config_path=None)
+            message = render.render(config, resolve_zones(config)[0], 150_000, 200_000)
+            self.assertIn("    lastcall setup\n", message)
+        with mock.patch.object(render, "lastcall_linked", return_value=False):
+            message = render.render(config, resolve_zones(config)[0], 150_000, 200_000)
+            self.assertIn("    python3 %s setup\n" % HOOK_SCRIPT, message)
+            self.assertIn("python3 %s doctor" % HOOK_SCRIPT, render.onboarding_message())
+
+
 # ---------------------------------------------------------------- the other subcommands
 
 class TestSubcommands(Sandbox):

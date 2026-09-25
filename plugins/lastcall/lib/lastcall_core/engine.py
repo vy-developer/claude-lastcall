@@ -24,7 +24,7 @@ Delivery (what reaches the model, per event):
   SessionStart, unconfigured      the onboarding prompt, once per project.
 
 DESIGN — fail passive. Unreadable transcript, stale reading, anything at all
-unexpected: stay quiet rather than guess. `lastcall.py doctor` shows what was
+unexpected: stay quiet rather than guess. `lastcall doctor` shows what was
 resolved.
 """
 

@@ -433,6 +433,10 @@ hold a hash, never prompt text.
 `lastcall doctor` shows what resolved: the config files, any `PROBLEM`, the
 zones, the `windows` map and learned windows, and whether **automatic
 handover** is `READY` or `NOT SET UP`, with an `ok`/`MISS` line per piece.
+For each agent on `PATH` it also reports the install: whether the plugin is
+installed and enabled, any hooks-method entries (both at once fire every hook
+twice), and for Codex how many Last Call hooks `/hooks` has trusted. It reads
+the agents' own files and runs neither CLI, so it stays quick.
 Give it a transcript (`~/.claude/projects/…/<session>.jsonl` or
 `~/.codex/sessions/…/rollout-….jsonl`) to measure a real session: agent,
 model, tokens, window and its source, percentage and zone.
@@ -513,7 +517,7 @@ on successors; do not set those yourself.
 python3 -m unittest discover -s tests -v
 ```
 
-678 tests, standard library only, no network. They cover the failure modes
+687 tests, standard library only, no network. They cover the failure modes
 that shaped the design: thresholds that can never fire, zones that never
 re-arm, sidechain usage counted as the main session's, Stop payloads Codex
 would reject, and a README that drifts from the code.

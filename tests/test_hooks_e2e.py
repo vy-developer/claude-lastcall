@@ -492,6 +492,22 @@ class TestOnboarding(HookCase):
         self.configure_globally({"mode": "advisory"})
         self.assertIsNone(self.run_hook("SessionStart", self.claude_payload("SessionStart")))
 
+    def test_the_inert_global_config_the_installer_writes_does_not_count(self):
+        """Review finding: `lastcall install` writes ~/.lastcall/config.json
+        with every option parked under "_example" — nothing active — and that
+        file alone suppressed the onboarding offer for good."""
+        sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+        from lastcall_core.cli import global_config_text
+        with open(os.path.join(self.lastcall_home, "config.json"), "w") as handle:
+            handle.write(global_config_text())
+        output = self.run_hook("SessionStart", self.claude_payload("SessionStart"))
+        self.assertIn("NOT CONFIGURED", self.context_of(output, "SessionStart"))
+
+    def test_a_broken_config_file_still_counts_as_configured(self):
+        with open(os.path.join(self.lastcall_home, "config.json"), "w") as handle:
+            handle.write("{not json")
+        self.assertIsNone(self.run_hook("SessionStart", self.claude_payload("SessionStart")))
+
     def test_never_in_the_home_directory(self):
         payload = self.claude_payload("SessionStart", cwd=self.home)
         environment = dict(self.env)

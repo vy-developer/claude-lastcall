@@ -118,8 +118,8 @@ class TestSetupWizardDocs(unittest.TestCase):
     doc tests looked at the numbering."""
 
     def source(self):
-        with open(os.path.join(ROOT, "plugins", "lastcall", "scripts",
-                               "lastcall.py"), encoding="utf-8") as handle:
+        with open(os.path.join(ROOT, "plugins", "lastcall", "lib", "lastcall_core",
+                               "wizard.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_readme_shows_every_question_the_wizard_asks(self):

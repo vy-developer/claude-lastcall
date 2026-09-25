@@ -58,10 +58,11 @@ Linux, macOS and Windows against 3.9, 3.11 and 3.13.
 
 ```
 lastcall.py setup      configure this project — six questions, writes
-                       .claude/lastcall.json and docs/handoff/TEMPLATE.md
+                       .lastcall.json and docs/handoff/TEMPLATE.md
 lastcall.py doctor     show what resolved: window, zones, handover readiness
 lastcall.py doctor <transcript.jsonl>
-                       measure a real session and report its zone
+                       measure a real session (Claude Code or Codex) and
+                       report its agent, window, zone and compaction
 lastcall.py --version
 
 relay/handoff.sh --dry-run    resolve everything, spawn nothing
@@ -75,7 +76,7 @@ tells you which piece is missing.
 
 ## Tell it how big your window is
 
-This is the one thing it will not guess, and it is worth explaining why.
+On Claude Code this is the one thing it cannot read, and it is worth explaining why.
 
 A model identifier does not reveal the window size. Measured on a real 5.1 MB
 transcript: a session running the 1M-context Opus records its model as plain
@@ -83,9 +84,15 @@ transcript: a session running the 1M-context Opus records its model as plain
 tokens. That is 371% of the window the identifier implies. Any tool that infers
 the window from the model name is wrong on that session and cannot tell.
 
-Guessing low is the dangerous direction: a 1M session mislabelled as 200K gets
-told to wrap up at 15% full, which actively wrecks good sessions. So Last Call
-stays **silent** when it does not know, and says so loudly when asked:
+Codex does not have this problem: it writes the usable window into every
+session file, and Last Call reads it from there. On Claude Code, with no exact
+source, Last Call **assumes the standard 200,000 tokens** (`fallback_window_tokens`)
+for as long as the tokens in use fit in it. A warning judged against an assumed
+window says so in the message, tells a 1M session to carry on, and never blocks
+the stop — guessing low is the dangerous direction, so an assumed window may
+only ever nudge. A `"[1m]"` model in `ANTHROPIC_MODEL` or `settings.json` that
+names the session's model counts as 1M. Set `fallback_window_tokens` to `null`
+to stay silent until the window is known instead. Check what it resolved:
 
 ```
 python3 .../lastcall.py doctor ~/.claude/projects/<project>/<session>.jsonl
@@ -110,7 +117,8 @@ It prints a normal status line too: `Opus 5 | myrepo | ctx [####------] 43% YELL
 If your Claude Code version names those fields differently, `statusline.py --dump`
 prints the raw payload so you can check.
 
-**2. Just tell it.** `.claude/lastcall.json`:
+**2. Just tell it.** `~/.lastcall/config.json` (every project) or
+`.lastcall.json` (one project):
 
 ```json
 { "context_window_tokens": 200000 }
@@ -123,8 +131,14 @@ only helps 1M users, and only after they are already deep into a session.
 
 ## Configuration
 
-`.claude/lastcall.json` in your project. Every field is optional, and every one
-can be overridden per-run with `LASTCALL_<FIELD>` in the environment —
+One file format for Claude Code and Codex, layered (later wins): built-in
+defaults, then `~/.lastcall/config.json` (`$LASTCALL_HOME/config.json`), then the
+nearest project config found walking up from the project directory —
+`.lastcall.json`, `.lastcall/config.json`, the legacy `.claude/lastcall.json`,
+or `.codex/lastcall.json` — never your home directory. Unknown keys are reported
+by `doctor`, with a suggestion when they look like a typo. Every field is
+optional, and every one can be overridden per-run with `LASTCALL_<FIELD>` in the
+environment —
 `LASTCALL_RED_PERCENT=70` or `LASTCALL_red_percent=70`, both work. Copy
 [`plugins/lastcall/lastcall.example.json`](plugins/lastcall/lastcall.example.json)
 to start from a commented version.
@@ -138,12 +152,14 @@ to start from a commented version.
 | `gates` | `null` | commands that must pass before handing over; shown to the assistant as `{gates}` |
 | `verifier` | `null` | a second model asked to check the work; shown as `{verifier}` |
 | `relay` | `null` | relay settings: `repo`, `handoff_dir`, `name_prefix`, `dirty_baseline`, `remote_control`, `skip_permissions`, `model`, `fallback_model`, `kill_predecessor` |
-| `context_window_tokens` | `null` | window size; `null` means "work it out or stay quiet" |
+| `context_window_tokens` | `null` | window size; `null` means "work it out" (Codex reports it; on Claude Code see above) |
+| `fallback_window_tokens` | `200000` | Claude Code with no exact window: assume this one, warn but never block; `null` stays silent instead |
 | `mode` | `"block_once"` | `block_once` blocks the stop a single time at red so the handoff actually gets written; `advisory` never blocks |
 | `template` | `null` | path to your own wrap-up instructions |
+| `compaction_note` | `null` | after a compaction, remind the model to re-read its plan and handoff files; `null` is the built-in text, `false` turns it off, a string replaces it |
 | `include_output_tokens` | `false` | count the last response's output too — budget for the next turn's input rather than the current window |
 | `debug` | `false` | write a redacted copy of the last hook payload |
-| `state_dir` | `~/.claude/lastcall` | where per-session state lives |
+| `state_dir` | `~/.lastcall/state` | where per-session state lives (state from `~/.claude/lastcall` is picked up) |
 | `state_ttl_days` | `14` | prune state files older than this |
 | `disabled` | `false` | turn the whole thing off without uninstalling |
 
@@ -238,10 +254,19 @@ zones : nudge@50%[own text]  winddown@70%[own text]  closing@88%[block][own text
 Nothing, while you are below every zone. That is the point, and it is why this
 costs no context until it matters.
 
-On the turn a zone is first entered, the hook returns JSON on stdout and Claude
-Code injects its `additionalContext` into the conversation as hook feedback.
-The assistant reads it as an instruction. It arrives **once per zone entry**,
-not every turn.
+When a zone is first entered, the hook that notices returns JSON on stdout and
+the agent puts it in front of the model. It arrives **once per zone entry**,
+not every turn, on whichever hook sees the change first:
+
+| hook | Claude Code | Codex |
+|---|---|---|
+| `PostToolUse`, `UserPromptSubmit` | `additionalContext`, mid-turn | `additionalContext`, mid-turn |
+| `Stop` (a warning) | `additionalContext` — the model continues once to read it | `decision: "block"` with the message as the reason — the only Stop output Codex shows the model |
+| `Stop` (a `block` zone) | `decision: "block"` plus the message, once | `decision: "block"` with the message, once |
+| `SessionStart` after a compaction | a short "re-read your plan and handoff files" note | the same |
+
+Codex rejects a Stop payload that carries anything else, block and all, so the
+output for each agent is built by its adapter rather than by hand.
 
 The message is two parts. Last Call generates the first — the numbers, plus the
 zone's `headline` — and you own the second entirely:
@@ -254,32 +279,40 @@ Finish what is in flight; start nothing new.
 <everything from here down is your template>
 ```
 
-If the zone has `block`, the hook also returns `decision: "block"`, which stops
-the assistant ending its turn and hands it that reason. It blocks **once**:
-Claude Code sets `stop_hook_active` on the retry, and Last Call sees that flag
-and stands down, so it can never trap a session in a loop of its own making.
+If the zone has `block`, the Stop hook returns `decision: "block"`, which stops
+the assistant ending its turn and hands it that reason. It blocks **once** per
+zone (again only after a compaction re-arms it): the agent sets
+`stop_hook_active` on the retry, and Last Call says nothing at all while that
+flag is set, so it can never trap a session in a loop of its own making —
+Codex, unlike Claude Code, has no loop cap of its own.
 
 To see a real message rather than trust this description, point `doctor` at any
 session transcript.
 
 ## How it works
 
-Three hooks, each doing one thing:
+One script, `scripts/lastcall.py <Event>`, registered for five hooks. It works
+out which agent called it (Claude Code or Codex) from the transcript path, the
+payload and the environment, or `LASTCALL_AGENT`:
 
 | hook | job |
 |---|---|
-| `Stop` | measure, and warn or block on a band change |
-| `SessionStart` | clear stale state, prune old files |
-| `PostCompact` | re-arm the bands after compaction freed up room |
+| `PostToolUse` | measure and warn mid-turn; skipped cheaply when the transcript has not changed |
+| `UserPromptSubmit` | measure and warn before the model starts the turn |
+| `Stop` | measure, warn, or block once at a `block` zone |
+| `SessionStart` | fresh session: reset; resume: keep what was already said; compaction: re-arm and inject the note; unconfigured: offer onboarding, once per project |
+| `PostCompact` | re-arm the zones after compaction freed up room |
 
 Design rules it sticks to:
 
 - **Silent while green.** Below the threshold it emits nothing, so it never
   spends context warning you about context.
-- **Once per band.** It speaks on a band *change*, not every turn.
-- **Fail passive, never fail green.** Unknown window, unreadable transcript,
-  broken config, unhandled exception — it goes quiet rather than guessing, and
-  never takes the session down with it.
+- **Once per band.** It speaks on a band *change*, not every turn, and a
+  resumed session does not hear it twice.
+- **Fail passive, never fail green.** Unreadable transcript, broken config,
+  unhandled exception — it goes quiet rather than guessing, and never takes the
+  session down with it. The one assumption it makes (a 200K window on Claude
+  Code) is labelled as one and can only nudge, never block.
 - **Re-arms after compaction.** A compact drops usage back to green; the bands
   reset so the next climb warns again. It detects the drop directly, so this
   works even without the `PostCompact` hook registered.
@@ -293,7 +326,7 @@ Design rules it sticks to:
   subdirectory of the project, so a derived path is wrong twice over.
 
 Context usage is `input + cache_read + cache_creation`, matching how Claude Code
-reports it. `cache_read` dominates — reading `input_tokens` alone reports about
+reports it; on Codex it is the newest response's `total_tokens`. `cache_read` dominates — reading `input_tokens` alone reports about
 `2` on a session actually holding 690,000.
 
 ## Why 40% and 55%
@@ -313,17 +346,18 @@ lot between adjacent releases.
 
 ## Onboarding
 
-**Install it, restart Claude Code, and it asks you.** No second terminal, no
-wizard. The `SessionStart` hook notices there is no configuration for this
-project and tells the assistant to set it up with you, in the conversation:
+**Install it and it already works** on its defaults. The first session in a
+project with no configuration (and no `~/.lastcall/config.json`) also offers to
+tailor it — once per project, not every session:
 
 ```
-LAST CALL IS INSTALLED HERE BUT NOT CONFIGURED, so it is currently doing
-nothing. Configure it WITH the user, in this conversation.
+LAST CALL IS INSTALLED HERE BUT NOT CONFIGURED for this project. It already
+runs on its defaults (a warning at 40% and 55% of the context window), so
+nothing is broken.
 ```
 
-The assistant reads your repo first — CLAUDE.md, README, package.json, Makefile,
-CI config — so it proposes your actual test command rather than asking for one
+If you take it up, the assistant reads your repo first — AGENTS.md, CLAUDE.md,
+README, package.json, Makefile, CI config — so it proposes your actual test command rather than asking for one
 that is already written down. It then settles **everything** with you:
 
 | | |
@@ -342,8 +376,8 @@ Both onboarding texts are covered by tests asserting they mention every option
 a user is actually onboarded onto — the prompt went stale once, shipping
 features the assistant could not offer because nothing told it they existed.
 
-Once configured it never asks again. If you do not want it in a project, tell
-the assistant so and it writes `{"disabled": true}`, which also silences it.
+It never asks twice in the same project. If you do not want Last Call in a
+project at all, tell the assistant so and it writes `{"disabled": true}`.
 
 You can trigger the same interview yourself at any time:
 
@@ -360,11 +394,11 @@ python3 <plugin>/scripts/lastcall.py setup
 That path accepts any token count at the window question — type `500,000` and
 you get 500,000.
 
-Either way the configuration lands in `.claude/lastcall.json` **in that project
-only**. Projects never share it: the config is found by walking up from the
-working directory to the nearest `.claude/` — never your home directory's,
-which is Claude Code's own — and `CLAUDE_PROJECT_DIR` wins when Claude Code sets
-it. Two checkouts side by side keep entirely separate
+Either way the configuration lands in `.lastcall.json` **in that project
+only** (an existing `.claude/lastcall.json` is updated in place instead).
+Projects never share it: the config is found by walking up from the working
+directory to the nearest project config — never in your home directory — and
+`CLAUDE_PROJECT_DIR` wins when Claude Code sets it. Two checkouts side by side keep entirely separate
 thresholds, gates and templates, and per-session state is keyed by session id.
 
 ### A second opinion
@@ -396,11 +430,11 @@ on your machine — whether this is a git repository, whether tmux, git and the
 `claude` CLI are on `PATH`:
 
 ```
-1/6  How big is this project's context window?
+1/6  How big is this project's context window (Claude Code)?
   1) 200,000 tokens — standard  <- recommended
   2) 1,000,000 tokens — extended
-     Getting this wrong is the one thing that makes Last Call useless,
-     so it refuses to guess.
+     Or type any number of tokens, e.g. 500000. Codex reports its own
+     window, so this only matters for Claude Code sessions.
 
 2/6  Hand over to a fresh session automatically when context runs low?
   y) yes — write a handoff, then spawn a successor in tmux  <- recommended
@@ -431,7 +465,7 @@ on your machine — whether this is a git repository, whether tmux, git and the
      what lets a chain of sessions continue while you are away.
 ```
 
-It writes `.claude/lastcall.json`, creates `docs/handoff/TEMPLATE.md` seeded
+It writes `.lastcall.json`, creates `docs/handoff/TEMPLATE.md` seeded
 with that command, and tells you exactly what is and is not wired up:
 
 ```
@@ -579,7 +613,8 @@ forever: no tool call, no transcript, and a timeout that tells you nothing.
 The relay checks `~/.claude.json` before spawning and refuses with an
 actionable message, or records the trust for you with `--trust`.
 
-The relay reads its settings from `relay` in `.claude/lastcall.json`, so you
+The relay reads its settings from `relay` in `.claude/lastcall.json` (it does
+not yet look in `.lastcall.json` or `~/.lastcall/config.json`), so you
 configure it once and never pass flags:
 
 ```json
@@ -653,7 +688,7 @@ the relay reports that as a precondition failure and never edits `~/.claude.json
 python3 -m unittest discover -s tests -v
 ```
 
-386 tests, standard library only, no network. They cover the failure modes that
+401 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

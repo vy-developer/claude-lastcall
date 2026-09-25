@@ -623,7 +623,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-235 tests, standard library only, no network. They cover the failure modes that
+351 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

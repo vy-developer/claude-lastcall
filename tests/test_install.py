@@ -549,6 +549,22 @@ class TestHooksMethod(Sandbox):
                                  'python3 "%s" %s' % (HOOK_SCRIPT, event))
             self.assertEqual(hooks["PostToolUse"][0]["matcher"], "*")
 
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "POSIX symlinks")
+    def test_a_symlinked_settings_file_is_written_through_not_replaced(self):
+        """Review finding: os.replace swapped a symlinked settings.json (a
+        dotfiles repo) for a regular file."""
+        real = os.path.join(self.tmp, "dotfiles", "claude-settings.json")
+        dump(real, {"permissions": {"allow": ["Bash"]}})
+        os.makedirs(os.path.dirname(self.claude_settings), exist_ok=True)
+        os.symlink(real, self.claude_settings)
+        code, out = self.install()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(os.path.islink(self.claude_settings))
+        written = load(real)
+        self.assertEqual(written["permissions"], {"allow": ["Bash"]})
+        self.assertIn("Stop", written["hooks"])
+        self.assertTrue(os.path.isfile(real + cli.BACKUP_SUFFIX))
+
     def test_merges_into_existing_files_without_losing_anything(self):
         foreign = {"type": "command", "command": "/opt/tools/my-lastcall.py-wrapper --verbose"}
         dump(self.claude_settings, {"permissions": {"allow": ["Bash"]},

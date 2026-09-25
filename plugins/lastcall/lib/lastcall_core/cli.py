@@ -235,7 +235,13 @@ def save_json(path, data):
 
     settings.json routinely holds API keys, so the backup is owner-only: a
     copy at the original 644 would be a second world-readable live secret.
+
+    A symlinked file (a dotfiles repo, say) is written THROUGH: os.replace on
+    the link itself would swap it for a regular file and quietly detach the
+    user's settings from wherever they keep them.
     """
+    if os.path.islink(path):
+        path = os.path.realpath(path)
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)

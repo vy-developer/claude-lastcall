@@ -28,13 +28,13 @@
 #   CLAUDE_BIN TMUX_BIN          read by relay.py itself
 #   SETTLE LOG_DIR PROJECTS_DIR GIT_BIN   no longer used
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 RELAY="$HERE/../lib/lastcall_core/relay.py"
 PYTHON_BIN=${PYTHON_BIN:-python3}
 
 echo "handoff.sh is deprecated: it now runs relay.py (\`lastcall relay\`); use that directly." >&2
 
-skip_set= remote_set= retire_set= config_dir_set=
+skip_set='' remote_set='' retire_set='' config_dir_set=''
 
 # Rewrite "$@" in place: each original argument is shifted off the front and
 # its translation appended to the back, so after $n rounds only the

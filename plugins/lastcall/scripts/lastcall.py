@@ -294,19 +294,31 @@ def project_dir(payload):
     CLAUDE_PROJECT_DIR is set by Claude Code for hooks and is the project root.
     `cwd` in the payload is wherever the session happens to be *now*, which may
     be a subdirectory, so it is only a starting point to search upward from.
+
+    The home directory is never a match on the way up. ~/.claude is Claude
+    Code's own user directory and exists on every machine that runs it, so
+    treating it as a project marker resolved EVERY directory without a
+    .claude/ of its own to $HOME — and setup would then write
+    ~/.claude/lastcall.json, a config every such directory silently shared.
     """
     env = os.environ.get("CLAUDE_PROJECT_DIR")
     if env and os.path.isdir(env):
         return env
     start = payload.get("cwd") or os.getcwd()
     path = os.path.abspath(start)
+    home = _home()
     while True:
-        if os.path.isdir(os.path.join(path, ".claude")):
+        if os.path.isdir(os.path.join(path, ".claude")) \
+                and os.path.realpath(path) != home:
             return path
         parent = os.path.dirname(path)
         if parent == path:
             return os.path.abspath(start)
         path = parent
+
+
+def _home():
+    return os.path.realpath(os.path.expanduser("~"))
 
 
 # Coercion is driven by the key, never by the default value. Inferring it from
@@ -1200,6 +1212,17 @@ def setup(argv):
     root = config["_project_dir"]
     target = os.path.join(root, ".claude", "lastcall.json")
     interactive = sys.stdin.isatty()
+
+    # project_dir() never walks up TO home, but run from home itself, or with
+    # CLAUDE_PROJECT_DIR pointing there, it still lands on it. A config in
+    # ~/.claude is not "this project's" config; refuse rather than write it.
+    if os.path.realpath(root) == _home():
+        print("Last Call setup refuses to configure your home directory:")
+        print("  %s would sit in Claude Code's own user directory, not in a"
+              % target)
+        print("  project. cd into the project you want to configure and run")
+        print("  setup again.")
+        return 1
 
     existing = {}
     if os.path.isfile(target):

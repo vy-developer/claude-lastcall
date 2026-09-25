@@ -385,6 +385,19 @@ class TestConfigResolution(RelayCase):
         result = self.run_from(self.tmp, "--repo", repo)
         self.assertRegex(result.stdout.decode(), r"successor:\s+besiderepo-")
 
+    def test_a_config_in_the_home_claude_directory_is_not_picked_up(self):
+        """~/.claude is Claude Code's user directory, not a project. The walk
+        up must pass it by, the same way the hook's project_dir() does."""
+        os.makedirs(os.path.join(self.tmp, ".claude"))
+        with open(os.path.join(self.tmp, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"relay": {"name_prefix": "fromhome"}}, fh)
+        repo = self.repo()
+        result = self.run_from(repo, "--repo", repo)
+        out = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, out)
+        self.assertIn("<none found>", out)
+        self.assertNotRegex(out, r"successor:\s+fromhome-")
+
     def test_no_config_anywhere_still_runs_on_defaults(self):
         repo = self.repo()
         result = self.run_from(self.tmp, "--repo", repo)

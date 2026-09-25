@@ -165,10 +165,15 @@ find_config_dir() {
         printf '%s' "$CLAUDE_PROJECT_DIR"; return
     fi
     # Walk up from the working directory, the same way the hook's project_dir()
-    # does, because CLAUDE_PROJECT_DIR is not set in a plain shell.
-    local dir; dir=$(pwd -P)
+    # does, because CLAUDE_PROJECT_DIR is not set in a plain shell. And, like
+    # it, never stop at $HOME: ~/.claude is Claude Code's user directory, and a
+    # lastcall.json there would be picked up by every directory beneath it.
+    local dir home
+    dir=$(pwd -P)
+    home=$(cd "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")
     while :; do
-        [ -f "$dir/.claude/lastcall.json" ] && { printf '%s' "$dir"; return; }
+        [ "$dir" != "$home" ] && [ -f "$dir/.claude/lastcall.json" ] \
+            && { printf '%s' "$dir"; return; }
         [ "$dir" = "/" ] && break
         dir=$(dirname "$dir")
     done

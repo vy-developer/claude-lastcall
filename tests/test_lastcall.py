@@ -1185,6 +1185,39 @@ class TestProjectIsolation(TempCase):
         self.addCleanup(os.environ.pop, "CLAUDE_PROJECT_DIR", None)
         self.assertEqual(cg.load_config({"cwd": a})["gates"], ["b-gate"])
 
+    def fake_home(self):
+        """A home directory with the ~/.claude every Claude Code user has."""
+        home = os.path.join(self.dir, "home")
+        os.makedirs(os.path.join(home, ".claude"))
+        project = os.path.join(home, "code", "project")
+        os.makedirs(project)
+        return home, project
+
+    def test_the_home_directory_is_never_a_project(self):
+        """~/.claude always exists, so it matched every directory without a
+        .claude/ of its own and they all resolved to $HOME."""
+        home, project = self.fake_home()
+        self.addCleanup(os.environ.__setitem__, "HOME", os.environ["HOME"])
+        os.environ["HOME"] = home
+        project_env = os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        if project_env is not None:
+            self.addCleanup(os.environ.__setitem__, "CLAUDE_PROJECT_DIR",
+                            project_env)
+        self.assertEqual(cg.project_dir({"cwd": project}), project)
+
+    def test_setup_never_writes_into_the_home_claude_directory(self):
+        home, project = self.fake_home()
+        env = dict(os.environ, HOME=home)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        for cwd in (project, home):
+            subprocess.run([sys.executable, SCRIPT, "setup"], input=b"",
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           env=env, cwd=cwd)
+        self.assertFalse(os.path.exists(
+            os.path.join(home, ".claude", "lastcall.json")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(project, ".claude", "lastcall.json")))
+
     def test_state_files_are_keyed_by_session_not_by_project(self):
         config = self.config()
         cg.write_state(config, "session-one", {"band": "red"})

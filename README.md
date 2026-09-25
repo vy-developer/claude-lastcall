@@ -362,8 +362,9 @@ you get 500,000.
 
 Either way the configuration lands in `.claude/lastcall.json` **in that project
 only**. Projects never share it: the config is found by walking up from the
-working directory to the nearest `.claude/`, and `CLAUDE_PROJECT_DIR` wins when
-Claude Code sets it. Two checkouts side by side keep entirely separate
+working directory to the nearest `.claude/` — never your home directory's,
+which is Claude Code's own — and `CLAUDE_PROJECT_DIR` wins when Claude Code sets
+it. Two checkouts side by side keep entirely separate
 thresholds, gates and templates, and per-session state is keyed by session id.
 
 ### A second opinion
@@ -619,7 +620,7 @@ whole section.
 python3 -m unittest discover -s tests -v
 ```
 
-221 tests, standard library only, no network. They cover the failure modes that
+224 tests, standard library only, no network. They cover the failure modes that
 motivated this: thresholds that can never fire, bands that never re-arm,
 sidechain usage read as the main session's, and path-valued config silently
 discarded.

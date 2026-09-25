@@ -386,12 +386,20 @@ def durability(repo, handoff, allow_dirty=False, allow_uncommitted=False, baseli
                         "committed, so that check is SKIPPED" % repo)
         return problems, warnings
     if not allow_uncommitted:
-        status = _git(repo, "status", "--porcelain", "--", handoff)
-        if status.returncode != 0:
-            problems.append("cannot read git status for the handoff — refusing to "
-                            "assume it is committed")
-        elif status.stdout.strip():
-            problems.append("handoff is not committed: %s — commit it first" % handoff)
+        # Tracked AND identical to HEAD. `git status` alone says nothing about
+        # a gitignored file, so a handoff that was never committed passed.
+        tracked = _git(repo, "ls-files", "--error-unmatch", "--", handoff)
+        if tracked.returncode != 0:
+            problems.append("handoff is not committed: %s — commit it first%s" % (
+                handoff, " (it is gitignored)" if _git(
+                    repo, "check-ignore", "-q", "--", handoff).returncode == 0 else ""))
+        else:
+            changed = _git(repo, "diff", "--quiet", "HEAD", "--", handoff)
+            if changed.returncode == 1:
+                problems.append("handoff is not committed: %s — commit it first" % handoff)
+            elif changed.returncode != 0:
+                problems.append("cannot compare the handoff with HEAD — refusing to "
+                                "assume it is committed")
     if not allow_dirty:
         status = _git(repo, "status", "--porcelain", "--ignore-submodules=dirty")
         dirty = [line for line in status.stdout.splitlines()

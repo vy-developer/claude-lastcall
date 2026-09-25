@@ -1308,5 +1308,33 @@ class TestRetriesNeverVerifyAStaleSuccessor(RelayV2Case):
         self.assertEqual((checkin["via"], checkin["nonce"]), ("exec-json", spawns[1]["nonce"]))
 
 
+
+class TestCommittedMeansCommitted(RelayV2Case):
+    """Review finding: `git status --porcelain` is silent about a gitignored
+    file, so a handoff that was never committed passed the check."""
+
+    def test_a_gitignored_handoff_is_not_committed(self):
+        repo = self.repo(handoff=None)
+        with open(os.path.join(repo, ".gitignore"), "w") as fh:
+            fh.write("docs/handoff/\n")
+        subprocess.run(["git", "-C", repo, "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "ignore"], check=True)
+        with open(os.path.join(repo, "docs", "handoff", "2026-09-25.md"), "w") as fh:
+            fh.write("# Secretly local\n")
+        result = self.relay(repo, "--dry-run")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("handoff is not committed", result.stdout)
+        self.assertIn("gitignored", result.stdout)
+
+    def test_staged_but_uncommitted_changes_do_not_count(self):
+        repo = self.repo()
+        with open(os.path.join(repo, "docs", "handoff", "2026-09-25.md"), "a") as fh:
+            fh.write("more\n")
+        subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+        result = self.relay(repo, "--dry-run", "--allow-dirty")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("handoff is not committed", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

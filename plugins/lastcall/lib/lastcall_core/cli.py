@@ -1,6 +1,7 @@
 """The `lastcall` command: install once per machine, then look around.
 
     lastcall install [--claude] [--codex] [--method plugin|hooks] [--dry-run]
+    lastcall install --refresh [--claude] [--codex] [--dry-run]   after git pull
     lastcall uninstall [--claude] [--codex] [--method plugin|hooks] [--dry-run]
     lastcall status [--json] ...        live sessions of both agents
     lastcall tidy ...                   propose names for old chats
@@ -26,6 +27,7 @@ this tool recognises as its own.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -489,7 +491,7 @@ def _do(argv, out, what):
     return True
 
 
-def plugin_install(agent, binary, out):
+def plugin_install(agent, binary, out, refresh=False):
     cmds = plugin_commands(agent, binary)
     state = plugin_state(agent, binary, out)
     name = marketplace_name()
@@ -505,11 +507,134 @@ def plugin_install(agent, binary, out):
                 % (agent, name, _describe_source(state.market)))
     if state.plugin is None:
         return _do(cmds["install"], out, "installing the plugin")
+    if refresh:
+        return plugin_refresh(agent, binary, out, state)
     if not state.enabled and cmds["enable"]:
         return _do(cmds["enable"], out, "enabling the plugin")
     out.say("  %s: %s already installed%s" % (
         agent, plugin_id(), "" if state.enabled else " (disabled)"))
     return True
+
+
+# ---------------------------------------------------------------- refresh
+#
+# After `git pull` in this checkout, what each agent runs can be stale. What
+# the agents actually do with a LOCAL-directory marketplace (checked against
+# Claude Code 2.1.281 and Codex CLI 0.153.4 in throwaway config dirs):
+#
+#   claude  `plugin install` copies the plugin into plugins/cache/<m>/<p>/<ver>,
+#           but a plugin from a local-directory marketplace "loads in place"
+#           from the checkout (the CLI says so, and 2.1.281 computes
+#           loadsInPlaceFrom for local sources; not yet confirmed from inside
+#           a live session), so pulled edits apply at the next session start
+#           or /reload-plugins. `plugin update` is gated on
+#           the version: same version -> "already at the latest version", a
+#           bumped one -> re-recorded. `plugin marketplace update <name>`
+#           re-reads the catalog ("Validating local marketplace").
+#   codex   copies the plugin into $CODEX_HOME/plugins/cache/<m>/<p>/<ver> and
+#           runs that copy. There is no update command for a local marketplace:
+#           `plugin marketplace upgrade` refreshes Git marketplaces only (a
+#           local one fails with "is not configured as a Git marketplace").
+#           Re-running `plugin add` re-copies the cache from the source, deleted
+#           files included, but also re-enables a disabled plugin.
+
+_TREE_SKIP_DIRS = frozenset(("__pycache__", ".git", ".pytest_cache"))
+_TREE_SKIP_FILES = frozenset((".DS_Store",))
+
+
+def tree_digest(root):
+    """{relative path: sha256} of the files under ``root``, bytecode and OS
+    litter left out; None when ``root`` is not a directory."""
+    if not os.path.isdir(root):
+        return None
+    digest = {}
+    for folder, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in _TREE_SKIP_DIRS)
+        for name in files:
+            if name in _TREE_SKIP_FILES or name.endswith((".pyc", ".pyo")):
+                continue
+            path = os.path.join(folder, name)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            try:
+                with open(path, "rb") as fh:
+                    digest[rel] = hashlib.sha256(fh.read()).hexdigest()
+            except OSError:
+                digest[rel] = None
+    return digest
+
+
+def codex_cache_dir(version_text):
+    return os.path.join(codex_home(), "plugins", "cache", marketplace_name(),
+                        PLUGIN_NAME, version_text)
+
+
+def _codex_market_is_git(market):
+    """From `codex plugin marketplace list --json`: marketplaceSource.sourceType."""
+    if not isinstance(market, dict):
+        return False
+    kind = (market.get("marketplaceSource") or {}).get("sourceType")
+    return kind not in (None, "local")
+
+
+def refresh_commands(agent, binary):
+    """Exact argv for `install --refresh`, per agent (see the notes above)."""
+    name, pid = marketplace_name(), plugin_id()
+    if agent == CLAUDE:
+        return {
+            "market_update": [binary, "plugin", "marketplace", "update", name],
+            "update": [binary, "plugin", "update", pid, "--scope", "user"],
+        }
+    return {
+        "market_update": [binary, "plugin", "marketplace", "upgrade", name],
+        "readd": [binary, "plugin", "add", pid],
+        "remove": [binary, "plugin", "remove", pid],
+    }
+
+
+def plugin_refresh(agent, binary, out, state):
+    """Bring an installed plugin up to this checkout. Idempotent: a second run
+    finds nothing to do and changes nothing."""
+    cmds = refresh_commands(agent, binary)
+    ours = state.market_is_ours
+    current = version()
+    installed = str(state.plugin.get("version") or "") or None
+    if agent == CLAUDE:
+        # Cheap and harmless for a local catalog; pulls a Git one.
+        if not _do(cmds["market_update"], out, "updating the marketplace"):
+            return False
+        if not ours or (installed and installed != current):
+            argv = list(cmds["update"])
+            scope = state.plugin.get("scope")
+            if scope in ("user", "project", "local"):
+                argv[-1] = scope
+            if not _do(argv, out, "updating the plugin"):
+                return False
+        if ours:
+            out.say("  %s: loads Last Call in place from %s; restart open sessions "
+                    "(or run /reload-plugins) to pick up the pull" % (agent, PLUGIN_ROOT))
+        return True
+
+    if not state.enabled:
+        out.say("  %s: %s is disabled; not refreshed (re-adding it would enable it)"
+                % (agent, plugin_id()))
+        return True
+    if not ours:
+        if _codex_market_is_git(state.market):
+            if not _do(cmds["market_update"], out, "upgrading the marketplace"):
+                return False
+    else:
+        cache = codex_cache_dir(installed or current)
+        if installed == current and tree_digest(cache) == tree_digest(PLUGIN_ROOT):
+            out.say("  %s: plugin cache already matches this checkout (%s)" % (agent, cache))
+            return True
+        out.say("  %s: no update command for a local marketplace (`plugin marketplace "
+                "upgrade` is Git-only); re-adding the plugin to re-copy its cache" % agent)
+    if _do(cmds["readd"], out, "re-adding the plugin"):
+        return True
+    out.say("  %s: falling back to remove + add of the plugin (the marketplace stays)"
+            % agent)
+    return (_do(cmds["remove"], out, "removing the plugin")
+            and _do(cmds["readd"], out, "adding the plugin"))
 
 
 def plugin_uninstall(agent, binary, out):
@@ -695,8 +820,13 @@ def cmd_install(args):
         out.say("No agent found on PATH (looked for: %s)." % ", ".join(AGENT_ORDER))
         out.say("Name one explicitly: lastcall install --claude --method hooks")
         return 1
-    header = "Installing Last Call %s (%s method) for: %s%s" % (
-        version(), args.method, ", ".join(agents), "  [dry run]" if args.dry_run else "")
+    if args.refresh and args.method != "plugin":
+        out.say("--refresh updates the agents' plugin copies; the hooks method runs "
+                "this checkout directly, so there is nothing to refresh")
+        return 2
+    header = "%s Last Call %s (%s method) for: %s%s" % (
+        "Refreshing" if args.refresh else "Installing", version(), args.method,
+        ", ".join(agents), "  [dry run]" if args.dry_run else "")
     out.say(header)
     if project:
         out.say("  project: %s" % project)
@@ -724,7 +854,7 @@ def cmd_install(args):
                             % (agent, agent))
                     ok = False
                 else:
-                    ok = plugin_install(agent, binary, out)
+                    ok = plugin_install(agent, binary, out, refresh=args.refresh)
                     if ok:
                         # A 1.x hooks-method install left behind would fire
                         # every event twice alongside the plugin.
@@ -752,7 +882,7 @@ def cmd_install(args):
         trust_note(out)
     if installed and not project:
         desktop_note(out, installed)
-    if installed and not args.dry_run:
+    if installed and not args.dry_run and not args.refresh:
         out.say("")
         command = command_name()
         out.say("Last Call will WARN when context runs low. Handing work over to a")
@@ -889,6 +1019,9 @@ def build_parser():
                      help="symlink the `lastcall` command into DIR "
                           "(default: ~/.local/bin, when it is on PATH)")
     ins.add_argument("--no-link-bin", action="store_true", help="do not link the command")
+    ins.add_argument("--refresh", action="store_true",
+                     help="plugin method, after `git pull`: bring each agent's installed "
+                          "copy up to this checkout (installs it where missing)")
     ins.add_argument("--python", metavar="PATH",
                      help="hooks method: interpreter the hook commands name (default: python3)")
     ins.set_defaults(func=cmd_install)

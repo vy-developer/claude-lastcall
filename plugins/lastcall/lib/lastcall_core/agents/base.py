@@ -47,6 +47,11 @@ class Usage(object):
     fresh          whether the reading is known to include the response the
                    hook fired for: True / False when read_usage was given a
                    way to tell (see ClaudeAgent.read_usage), else None.
+    compaction_id  identity of the compaction behind ``compacted`` (Claude's
+                   compact_boundary uuid or timestamp, Codex's compacted
+                   line timestamp): the same compaction reads the same
+                   whether it is newer than every reading or sits between the
+                   newest two, so it re-arms the zones exactly once.
     """
 
     # A plain class rather than a dataclass: hooks run on every tool call, and
@@ -54,11 +59,11 @@ class Usage(object):
     # the whole measurement.
     __slots__ = ("tokens", "window", "window_source", "model", "compacted",
                  "session_id", "agent", "turn_id", "measured_at", "stale",
-                 "record_id", "fresh")
+                 "record_id", "fresh", "compaction_id")
 
     def __init__(self, tokens, window, window_source, model, compacted,
                  session_id, agent, turn_id=None, measured_at=None, stale=False,
-                 record_id=None, fresh=None):
+                 record_id=None, fresh=None, compaction_id=None):
         self.tokens = tokens
         self.window = window
         self.window_source = window_source
@@ -71,6 +76,7 @@ class Usage(object):
         self.stale = stale
         self.record_id = record_id
         self.fresh = fresh
+        self.compaction_id = compaction_id
 
     def __eq__(self, other):
         if other.__class__ is not self.__class__:

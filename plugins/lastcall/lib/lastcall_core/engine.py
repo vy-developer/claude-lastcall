@@ -223,7 +223,10 @@ def _judge(agent, config, payload, event, env, out, state, usage, signature,
     tokens = usage.tokens
     peak = state.number("peak")
     if usage.compacted:
-        key = "%s|%s" % (usage.record_id, usage.measured_at)
+        # Keyed on the compaction itself: the same compaction is first seen
+        # newer than every reading, then between the newest two, and a key
+        # from the reading (record id, time) re-armed — and warned — twice.
+        key = usage.compaction_id or "%s|%s" % (usage.record_id, usage.measured_at)
         if state.get("compaction_key") != key:
             state["compaction_key"] = key
             _rearm(state)

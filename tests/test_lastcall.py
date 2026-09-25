@@ -649,6 +649,43 @@ class TestParallelHooks(TempCase):
         self.assertFalse(os.path.exists(lock))
 
 
+class TestOneCompactionRearmsOnce(TempCase):
+    """Review finding: the compaction key was record_id|measured_at, which
+    changes between the first reading after a compaction and the next one, so
+    a single compaction re-armed the zones twice and the zone warned twice."""
+
+    def reply(self, tokens, number):
+        return json.dumps({"type": "assistant", "sessionId": "s1", "isSidechain": False,
+                           "timestamp": "2026-09-25T10:%02d:00.000Z" % number,
+                           "message": {"id": "msg_%d" % number, "model": "claude-sonnet-5",
+                                       "usage": {"input_tokens": 10,
+                                                 "cache_read_input_tokens": tokens - 10,
+                                                 "cache_creation_input_tokens": 0,
+                                                 "output_tokens": 50}}})
+
+    def stop(self, config, lines):
+        import io
+        out = io.StringIO()
+        cg.handle_stop(config, {"transcript_path": self.transcript(lines), "session_id": "s1",
+                                "hook_event_name": "Stop"}, out=out)
+        return out.getvalue().strip() or None
+
+    def test_the_zone_warns_once_after_one_compaction(self):
+        config = self.config()
+        lines = [self.reply(150_000, 1)]
+        self.assertIsNotNone(self.stop(config, lines))                  # yellow
+        lines.append(json.dumps({
+            "type": "system", "subtype": "compact_boundary", "sessionId": "s1",
+            "isSidechain": False, "uuid": "b-1", "timestamp": "2026-09-25T10:30:00.000Z",
+            "compactMetadata": {"trigger": "auto", "preTokens": 150_000,
+                                "postTokens": 145_000}}))
+        self.assertIsNotNone(self.stop(config, lines))                  # re-armed: yellow
+        epoch = cg.read_state(config, "s1")["epoch"]
+        lines.append(self.reply(146_000, 31))
+        self.assertIsNone(self.stop(config, lines))                     # same compaction
+        self.assertEqual(cg.read_state(config, "s1")["epoch"], epoch)
+
+
 class TestOutputContract(TempCase):
     def test_emits_required_hook_event_name(self):
         """Without hookEventName the CLI rejects the payload, the hook still

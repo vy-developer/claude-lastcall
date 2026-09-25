@@ -324,6 +324,20 @@ class TestClaudeUsage(TempDirCase):
         self.assertEqual(usage.tokens, 61000)
         self.assertFalse(usage.compacted)
 
+    def test_one_compaction_has_one_identity_before_and_after_the_next_reply(self):
+        """Review finding: the engine keyed compactions on record_id|measured_at,
+        which differ between "boundary newer than every reply" and "boundary
+        between the newest two replies" — one compaction re-armed twice."""
+        entries = [claude_assistant(850000), claude_boundary(15000)]
+        first = CLAUDE.read_usage(self.claude_transcript(entries), SID)
+        entries.append(claude_assistant(60000))
+        second = CLAUDE.read_usage(self.claude_transcript(entries), SID)
+        self.assertTrue(first.compacted and second.compacted)
+        self.assertNotEqual((first.record_id, first.measured_at),
+                            (second.record_id, second.measured_at))
+        self.assertIsNotNone(first.compaction_id)
+        self.assertEqual(first.compaction_id, second.compaction_id)
+
     def test_window_is_proved_by_evidence_never_guessed_from_the_name(self):
         path = self.claude_transcript([claude_assistant(150000, model="claude-opus-test")])
         usage = CLAUDE.read_usage(path, SID)
@@ -521,6 +535,18 @@ class TestCodexUsage(TempDirCase):
         self.assertTrue(usage.compacted)
         entries += [codex_usage_record(30000, "resp_c"), codex_token_count(30000)]
         self.assertFalse(self.read(self.rollout(entries)).compacted)
+
+    def test_one_compaction_has_one_identity_stale_or_not(self):
+        compacted = codex_compacted()
+        compacted["timestamp"] = "2026-01-02T10:05:00.000Z"
+        entries = [codex_turn_context(), codex_usage_record(225000, "resp_a"),
+                   codex_token_count(225000), compacted]
+        stale = self.read(self.rollout(entries))
+        entries += [codex_usage_record(17000, "resp_b"), codex_token_count(17000)]
+        fresh = self.read(self.rollout(entries))
+        self.assertTrue(stale.stale and stale.compacted and fresh.compacted)
+        self.assertEqual(stale.compaction_id, "timestamp:2026-01-02T10:05:00.000Z")
+        self.assertEqual(fresh.compaction_id, stale.compaction_id)
 
     def test_rate_limit_only_updates_are_ignored(self):
         path = self.rollout([codex_turn_context(), codex_token_count(30000),
@@ -755,7 +781,7 @@ class TestLibraryHygiene(unittest.TestCase):
         data = usage.to_dict()
         self.assertEqual(set(data), {"tokens", "window", "window_source", "model", "compacted",
                                      "session_id", "agent", "turn_id", "measured_at", "stale",
-                                     "record_id", "fresh"})
+                                     "record_id", "fresh", "compaction_id"})
         json.dumps(data)
 
     def test_library_parses_as_python_3_9_and_uses_only_the_standard_library(self):

@@ -1114,5 +1114,80 @@ class TestLastcallRelayCommand(RelayV2Case):
         self.assertIn("usage: lastcall relay", help_text)
 
 
+
+# tmux that really runs the command it is given (in the background, as
+# `new-session -d` would) and reports every pane alive.
+RUNNING_TMUX = """#!/bin/sh
+case "$1" in
+new-session) eval "last=\\${$#}"; sh -c "$last" >/dev/null 2>&1 & exit 0 ;;
+display-message) echo 0; exit 0 ;;
+esac
+exit 0
+"""
+
+# The interactive Codex TUI, as far as the relay can see it: a rollout whose
+# session_meta says when the session was created, written a moment after start.
+TUI_CODEX = r'''#!%(python)s
+import datetime, json, os, sys, time, uuid
+args = sys.argv[1:]
+if "--no-alt-screen" not in args:
+    sys.exit(0)
+time.sleep(0.2)
+home = os.environ.get("CODEX_HOME") or os.path.join(os.environ["HOME"], ".codex")
+day = os.path.join(home, "sessions", "2026", "09", "25")
+os.makedirs(day, exist_ok=True)
+tid = os.environ.get("FAKE_TUI_ID") or str(uuid.uuid4())
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%%Y-%%m-%%dT%%H:%%M:%%S.%%fZ")
+with open(os.path.join(day, "rollout-2026-09-25T00-00-01-%%s.jsonl" %% tid), "w") as fh:
+    fh.write(json.dumps({"timestamp": now, "type": "session_meta", "payload": {
+        "id": tid, "timestamp": now, "cwd": os.getcwd(), "source": "cli"}}) + "\n")
+time.sleep(5)
+'''
+
+
+def write_rollout(home, tid, cwd, created, source="cli"):
+    day = os.path.join(home, ".codex", "sessions", "2026", "09", "25")
+    os.makedirs(day, exist_ok=True)
+    path = os.path.join(day, "rollout-2026-09-25T00-00-00-%s.jsonl" % tid)
+    meta = {"id": tid, "cwd": cwd, "source": source}
+    if created is not None:
+        meta["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(created))
+    with open(path, "w") as fh:
+        fh.write(json.dumps({"type": "session_meta", "payload": meta}) + "\n")
+    return path
+
+
+class TestTmuxSuccessorIdentity(RelayV2Case):
+    """Review finding: the tmux-mode scan filtered by mtime, so the
+    predecessor's own (constantly written) rollout was taken as the successor."""
+
+    PRED = "01a0d9aa-0000-7000-8000-000000000001"
+    SUCC = "01a0d9bb-0000-7000-8000-000000000002"
+
+    def test_scan_needs_creation_after_the_spawn_and_skips_the_predecessor(self):
+        repo = self.repo()
+        start = time.time()
+        write_rollout(self.tmp, self.PRED, repo, start - 3600)       # old, but just written
+        write_rollout(self.tmp, "01a0d9cc-0000-7000-8000-000000000003", repo, None)
+        write_rollout(self.tmp, "01a0d9dd-0000-7000-8000-000000000004", repo, start + 1)
+        found = relay.scan_new_rollouts(repo, start, {"HOME": self.tmp})
+        self.assertEqual([m["id"] for _, m in found], ["01a0d9dd-0000-7000-8000-000000000004"])
+        write_rollout(self.tmp, self.PRED, repo, start + 1)
+        found = relay.scan_new_rollouts(repo, start, {"HOME": self.tmp}, exclude=(self.PRED,))
+        self.assertNotIn(self.PRED, [m["id"] for _, m in found])
+
+    def test_the_predecessors_busy_rollout_is_never_the_successor(self):
+        repo = self.repo()
+        pred = write_rollout(self.tmp, self.PRED, repo, time.time() - 3600)
+        os.utime(pred, None)
+        self.stub("tmux", RUNNING_TMUX)
+        self.stub("codex", TUI_CODEX % {"python": sys.executable})
+        result = self.relay(repo, "--agent", "codex", "--codex-mode", "tmux", "--no-name-thread",
+                            extra={"CODEX_THREAD_ID": self.PRED, "FAKE_TUI_ID": self.SUCC})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        checkin = [r for r in self.ledger() if r["event"] == "checkin"]
+        self.assertEqual([r["session_id"] for r in checkin], [self.SUCC], result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

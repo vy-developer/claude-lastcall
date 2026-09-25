@@ -27,8 +27,9 @@ What it does, in order, refusing at the first failure:
        claude  its SessionStart hook (injected via --settings) runs
                `relay.py checkin ...` which appends session_id + transcript_path
        codex   app: the runner, once turn/start is accepted; exec: the
-               `thread.started` event on `codex exec --json`; tmux: a new
-               rollout whose cwd is the repo;
+               `thread.started` event on `codex exec --json`; tmux: the
+               plugin's check-in, else the one rollout created after the
+               spawn whose cwd is the repo (never the predecessor's);
        any     with the Last Call plugin installed, the engine's SessionStart
                hook also checks in (successor_session_start) and tells the
                successor which generation it is and which handoff to read;
@@ -60,6 +61,7 @@ Exit codes: 0 successor checked in; 1 precondition failure, nothing spawned;
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -675,24 +677,64 @@ def _session_meta(path):
     except (OSError, ValueError):
         return None
     if first.get("type") == "session_meta":
-        return first.get("payload") or {}
+        meta = dict(first.get("payload") or {})
+        if not meta.get("timestamp") and first.get("timestamp"):
+            meta["timestamp"] = first["timestamp"]     # the line was written at creation
+        return meta
     return None
 
 
-def scan_new_rollouts(repo, since, env=None):
-    """Rollouts created after `since` whose session cwd is `repo` (tmux mode)."""
+def _epoch(value):
+    """ISO-8601 (Z or offset, any fraction length) -> epoch seconds, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    match = re.match(r"^(.*?T\d\d:\d\d:\d\d)(\.\d+)?(.*)$", text)
+    if match:
+        text = "%s.%s%s" % (match.group(1), (match.group(2) or ".0")[1:7].ljust(6, "0"),
+                            match.group(3))
+    try:
+        stamp = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.timestamp()
+
+
+def rollout_created(meta):
+    """When the session a rollout belongs to was CREATED (session_meta's
+    timestamp), as epoch seconds; None when the rollout does not say."""
+    return _epoch((meta or {}).get("timestamp"))
+
+
+def scan_new_rollouts(repo, since, env=None, exclude=()):
+    """Interactive rollouts whose session was CREATED at or after `since`
+    and whose cwd is `repo` (tmux mode), oldest first.
+
+    Creation, not mtime: the predecessor's own rollout — and any other thread
+    active in the same repo — is written to all the time, so a fresh mtime
+    proves nothing. A rollout that does not say when it was created cannot
+    be proven new and is skipped. Ids in `exclude` (the predecessor's) are
+    never a successor."""
     root = os.path.join(codex_home(env), "sessions")
+    excluded = set(i for i in exclude if i)
     found = []
     for path in glob.glob(os.path.join(root, "*", "*", "*", "rollout-*.jsonl")):
         try:
             if os.path.getmtime(path) < since - 1:
-                continue
+                continue    # cheap pre-filter: not even written since the spawn
         except OSError:
             continue
         meta = _session_meta(path)
-        if meta and os.path.realpath(meta.get("cwd") or "") == os.path.realpath(repo) \
+        if not meta or (meta.get("id") or meta.get("session_id")) in excluded:
+            continue
+        created = rollout_created(meta)
+        if created is None or created < since - 0.5:
+            continue
+        if os.path.realpath(meta.get("cwd") or "") == os.path.realpath(repo) \
                 and meta.get("source") != "exec" and not isinstance(meta.get("source"), dict):
-            found.append((os.path.getmtime(path), path, meta))
+            found.append((created, path, meta))
     return [(p, m) for _, p, m in sorted(found)]
 
 
@@ -1468,8 +1510,9 @@ class Relay:
                      "Codex app and the default `codex resume` list)")
         else:
             self.say("  tmux:        %s" % p["tmux_session"])
-            self.say("  check-in:    new rollout under %s whose cwd is the repo"
-                     % os.path.join(codex_home(self.env), "sessions"))
+            self.say("  check-in:    the plugin's SessionStart hook; without it, the one "
+                     "rollout under %s CREATED after the spawn whose cwd is the repo "
+                     "(never the predecessor's)" % os.path.join(codex_home(self.env), "sessions"))
         self.say("  permissions: %s" % ("SKIPPED (unattended)" if o.skip_permissions
                                         else (o.permission_mode or "normal")
                                         if p["agent"] == "claude" else
@@ -1754,13 +1797,33 @@ class Relay:
             return self.fail(EXIT_PRECONDITION, "tmux could not start %s: %s"
                              % (p["tmux_session"], spawned.stdout.strip()))
         self.say("spawned: tmux session %s" % p["tmux_session"])
+        predecessor = p["predecessor"].get("session_id")
+        seen = {}
 
         def check():
-            for path, meta in scan_new_rollouts(p["repo"], started, self.env):
-                return append_record(p["ledger"], checkin_record(
-                    {"session_id": meta.get("id") or meta.get("session_id"),
-                     "transcript_path": path, "cwd": meta.get("cwd")},
-                    p["chain"], p["generation"], "codex", p["handoff"], via="rollout-scan"))
+            # The plugin's SessionStart check-in (matched by _wait before this
+            # runs) is the proof we want. A scanned rollout is only a stand-in
+            # when that hook is not installed: it must be unambiguous, not the
+            # predecessor's, and survive a grace period in which the hook
+            # could still check in.
+            found = scan_new_rollouts(p["repo"], started, self.env, exclude=(predecessor,))
+            if len(found) > 1:
+                seen.pop("at", None)
+                seen.pop("path", None)
+                if not seen.get("warned"):
+                    seen["warned"] = True
+                    self.say("WARNING: %d new Codex threads in %s since the spawn — waiting for "
+                             "the successor's own check-in instead of guessing" % (
+                                 len(found), p["repo"]))
+            elif found:
+                path, meta = found[0]
+                if seen.get("path") != path:
+                    seen.update(path=path, at=time.time())
+                elif time.time() - seen["at"] >= o.hook_grace:
+                    return append_record(p["ledger"], checkin_record(
+                        {"session_id": meta.get("id") or meta.get("session_id"),
+                         "transcript_path": path, "cwd": meta.get("cwd")},
+                        p["chain"], p["generation"], "codex", p["handoff"], via="rollout-scan"))
             dead = subprocess.run([o.tmux_bin, "display-message", "-p", "-t",
                                    "=%s:0.0" % p["tmux_session"], "#{pane_dead}"],
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

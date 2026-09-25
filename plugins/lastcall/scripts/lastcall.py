@@ -645,9 +645,12 @@ def resolve_zones(config):
                 at = float(entry.get("at"))
             except (TypeError, ValueError):
                 continue  # a malformed zone is dropped, not fatal
+        # "is not None", not truthiness: at_tokens 0 is a real (if odd)
+        # threshold, and treating it as absent formatted a None percentage and
+        # raised — on the hook path, where that means the guard goes silent.
         name = str(entry.get("name")
-                   or ("%s tokens" % "{:,}".format(at_tokens) if at_tokens
-                       else "%g%%" % at))
+                   or ("%s tokens" % "{:,}".format(at_tokens)
+                       if at_tokens is not None else "%g%%" % at))
         zones.append({
             "name": name,
             "at": at,
@@ -688,6 +691,25 @@ def zone_for(tokens, window, zones):
         return None
     reached.sort(key=lambda pair: pair[0])
     return reached[-1][1]
+
+
+def describe_threshold(zone):
+    """Where a zone fires, the way a person would say it: "40%" or "400k".
+
+    A zone carries EITHER a percentage or a token count, never both, so
+    anything that prints one has to ask which. doctor used to format "at"
+    unconditionally, and on a config written in tokens — the very route the
+    onboarding recommends — "at" is None and doctor crashed instead of
+    answering "is this thing working?".
+    """
+    tokens = zone.get("at_tokens")
+    if tokens is None:
+        return "%g%%" % zone["at"]
+    if tokens >= 1_000_000 and tokens % 100_000 == 0:
+        return "%gM" % (tokens / 1_000_000.0)
+    if tokens >= 1_000 and tokens % 1_000 == 0:
+        return "%dk" % (tokens // 1_000)
+    return "{:,}".format(tokens)
 
 
 def band_for(percent, config, window=None):
@@ -1406,8 +1428,8 @@ def doctor(argv):
     zones = resolve_zones(config)
     if zones:
         print("  zones         : %s" % ("  ".join(
-            "%s@%g%%%s%s" % (
-                zone["name"], zone["at"],
+            "%s@%s%s%s" % (
+                zone["name"], describe_threshold(zone),
                 "[block]" if zone["block"] else "",
                 "[own text]" if (zone["template"] or zone["message"]) else "",
             ) for zone in zones)))
@@ -1440,6 +1462,24 @@ def doctor(argv):
         return 1
     print("  model         : %s" % (model or "(unknown)"))
     print("  in use        : %s tokens" % "{:,}".format(tokens))
+    # Answer with the same comparison the Stop hook makes, on the same numbers.
+    # band_for() rebuilds a token count from a percentage and the CONFIGURED
+    # window, so wherever the real window differs — a config the evidence has
+    # disproven, or zones written in tokens — doctor named a band the hook
+    # would never have fired.
+    zone = zone_for(tokens, window, zones)
+    band = zone["name"] if zone else "green"
+    if window is None and any(z["at_tokens"] is not None for z in zones):
+        # Absolute zones need no window, and the hook fires them without one.
+        # Reporting "SILENT" here sent people to fix a setting that was never
+        # the problem.
+        print("  window        : UNKNOWN — not needed, zones in tokens fire "
+              "on the count alone")
+        if any(z["at_tokens"] is None for z in zones):
+            print("  PROBLEM       : the percentage zones are skipped until the "
+                  "window is known")
+        print("  band          : %s" % band.upper())
+        return 0
     if window is None:
         print("  window        : UNKNOWN")
         print("\n  -> the guard stays SILENT: it will not guess the window size.")
@@ -1457,7 +1497,7 @@ def doctor(argv):
               % "{:,}".format(window))
         print("                  line report the real figure.")
     print("  percent       : %.1f%%" % percent)
-    print("  band          : %s" % band_for(percent, config).upper())
+    print("  band          : %s" % band.upper())
     print("  headroom      : %s tokens" % "{:,}".format(max(0, window - tokens)))
     return 0
 

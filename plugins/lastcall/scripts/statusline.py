@@ -106,7 +106,10 @@ def main(argv):
         label = "ctx %s %.0f%%" % (gauge(percent), percent)
         if band_for and load_config:
             try:
-                band = band_for(percent, load_config(payload))
+                # Pass the real window. Without it band_for rebuilds the
+                # token count against the CONFIGURED window (or 1M), so zones
+                # written in tokens showed RED on a 200k session at 75%.
+                band = band_for(percent, load_config(payload), window)
                 if band != "green":
                     label += " " + band.upper()
             except Exception:  # noqa: BLE001

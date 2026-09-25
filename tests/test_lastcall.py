@@ -1370,6 +1370,58 @@ class TestAbsoluteZones(TempCase):
             {"name": "bad", "at_tokens": "four hundred thousand"}]))
         self.assertEqual([z["name"] for z in zones], ["ok"])
 
+    def test_a_zero_token_zone_without_a_name_does_not_crash(self):
+        zones = cg.resolve_zones(self.config(zones=[{"at_tokens": 0}]))
+        self.assertEqual(zones[0]["name"], "0 tokens")
+
+    def run_script(self, script, *args, stdin=b""):
+        os.makedirs(os.path.join(self.dir, ".claude"), exist_ok=True)
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+            json.dump({"zones": self.zones()}, fh)
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = self.dir
+        env["LASTCALL_STATE_DIR"] = self.state
+        env["LASTCALL_TRACE"] = "1"
+        for key in list(env):
+            if key.upper().startswith("LASTCALL_") and key.upper() not in (
+                    "LASTCALL_STATE_DIR", "LASTCALL_TRACE"):
+                env.pop(key)
+        return subprocess.run([sys.executable, script] + list(args),
+                              input=stdin, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=env, cwd=self.dir)
+
+    def test_doctor_lists_zones_written_in_tokens(self):
+        """Reported: doctor formatted every zone as a percentage, and on the
+        token-count config the onboarding recommends it crashed outright."""
+        result = self.run_script(SCRIPT, "doctor")
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b"yellow@400k", result.stdout)
+        self.assertIn(b"red@550k[block]", result.stdout)
+
+    def test_doctor_measures_absolute_zones_without_a_window(self):
+        """The hook fires these with no window at all, so doctor must not
+        claim the guard would stay silent."""
+        path = self.transcript([assistant_line(420_000)])
+        result = self.run_script(SCRIPT, "doctor", path)
+        out = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, out + result.stderr.decode())
+        self.assertIn("band          : YELLOW", out)
+        self.assertNotIn("SILENT", out)
+
+    def test_statusline_bands_use_the_real_window(self):
+        """150k of a 200k window is under a 400k zone. Rebuilt against the
+        default 1M window it read as 750k and the status line showed RED."""
+        statusline = os.path.join(os.path.dirname(SCRIPT), "statusline.py")
+        payload = {"session_id": "s1", "cwd": self.dir,
+                   "context_window_size": 200_000,
+                   "context_used_tokens": 150_000}
+        result = self.run_script(statusline,
+                                 stdin=json.dumps(payload).encode())
+        out = result.stdout.decode()
+        self.assertIn("75%", out)
+        self.assertNotIn("RED", out)
+        self.assertNotIn("YELLOW", out)
+
     def test_the_message_omits_percentages_when_there_is_no_window(self):
         config = self.config(zones=self.zones(), context_window_tokens=None)
         zone = cg.resolve_zones(config)[0]

@@ -1,12 +1,38 @@
 {
-  "description": "Last Call — measure context usage at Stop, re-arm on compaction.",
+  "description": "Last Call — measure context usage (Claude Code and Codex), warn once per zone, block once at the last one, re-arm on compaction.",
   "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" PostToolUse",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" PostToolUse",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" UserPromptSubmit",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" UserPromptSubmit",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" Stop",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" Stop",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" Stop",
             "timeout": 15
           }
         ]
@@ -17,7 +43,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" SessionStart",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" SessionStart",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" SessionStart",
             "timeout": 10
           }
         ]
@@ -28,7 +55,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" PostCompact",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall-hook\" PostCompact",
+            "commandWindows": "py -3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py\" PostCompact",
             "timeout": 10
           }
         ]

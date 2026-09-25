@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to .claude/lastcall.json in your project. Every field is optional; these are the defaults. Override any of them per-run with LASTCALL_<FIELD> in the environment.",
+  "_comment": "Copy to .lastcall.json in your project (or ~/.lastcall/config.json for every project; a legacy .claude/lastcall.json is still read). Every field is optional; these are the defaults. Override any of them per-run with LASTCALL_<FIELD> in the environment. Keys starting with _ are comments; any other unknown key is reported by doctor.",
 
   "_comment_zones": "Two zones named yellow and red is only the default. Set 'zones' to define your own: any number, your names, your thresholds, your instructions, and which ones hold the stop. When 'zones' is set, yellow_percent and red_percent are ignored.",
   "yellow_percent": 40,
@@ -16,29 +16,39 @@
   "min_window_tokens": null,
 
   "_comment_zones_example": [
-    {"name": "winddown", "at": 60, "template": ".claude/winddown.md"},
+    {"name": "winddown", "at": 60, "template": ".lastcall/winddown.md"},
     {"name": "closing", "at": 85, "block": true, "message": "Closing time. Finish the handoff, commit, stop."}
   ],
 
   "_comment_gates": "Commands that must pass before handing over — tests, linters, a review gate. Surfaced to the assistant as {gates} in your wrap-up template. Nothing here is executed by the hook: running your test suite at Stop time would hang the session.",
   "gates": null,
 
-  "_comment_verifier": "A second model asked to check the work before it is handed over, shown to the assistant as {verifier}. A different model reading the diff against your plan documents catches what the session that wrote it cannot. Detected automatically by setup if codex or gemini is on PATH.",
+  "_comment_verifier": "A second model asked to check the work before it is handed over, shown to the assistant as {verifier}. A different model reading the diff against your plan documents catches what the session that wrote it cannot. Detected automatically by setup if codex, gemini or claude is on PATH.",
   "verifier": null,
 
-  "_comment_relay": "Settings for the optional relay, read by relay/handoff.sh. handoff_dir defaults to docs/handoff. remote_control names the successor so you can reach it from anywhere. skip_permissions starts it with --dangerously-skip-permissions, which is what makes an unattended chain possible.",
+  "_comment_relay": "Settings for the optional relay (`lastcall relay`, i.e. lib/lastcall_core/relay.py; the old relay/handoff.sh is a deprecated shim for it). The relay blocks of ~/.lastcall/config.json and this file merge key by key; flags win. agent is claude or codex — unset means the agent running the predecessor, so set it only to hand over across agents. handoff_dir defaults to docs/handoff. remote_control names a Claude successor so you can reach it from anywhere. permission_mode is the successor's permission mode: inherit (the default) starts a Claude successor in auto mode, or in bypass mode when the session handing over is in bypass mode; auto, default, acceptEdits, plan and dontAsk pin it; bypassPermissions (or the older skip_permissions: true) always starts it without permission prompts, which makes an unattended chain possible. skip_permissions: false never inherits bypass. A Codex successor keeps codex_sandbox and codex_approval unless the mode is bypass, which gives it full access. kill_predecessor (or retire_predecessor) retires the old session once the successor has checked in. codex_mode is app (default), exec or tmux; codex_model picks a Codex successor's model.",
   "relay": null,
 
-  "_comment_relay_example": {"handoff_dir": "docs/handoff", "name_prefix": "myproject", "remote_control": true, "skip_permissions": true, "model": "opus", "fallback_model": "fable,sonnet", "kill_predecessor": true},
+  "_comment_relay_example": {"handoff_dir": "docs/handoff", "name_prefix": "myproject", "remote_control": true, "permission_mode": "inherit", "model": "opus", "fallback_model": "fable,sonnet", "kill_predecessor": true, "codex_mode": "app"},
 
-  "_comment_window": "The one thing Last Call will not guess. null means 'use an exact source or stay silent'. Set it to 200000 or 1000000 if you are not using the bundled status line.",
+  "_comment_window": "null means 'use an exact source'. Codex writes its window into every session, so this only matters for Claude Code, whose transcript does not say whether a session has 200K or 1M. Set it to 200000 or 1000000 if you are not using the bundled status line.",
   "context_window_tokens": null,
+
+  "_comment_windows": "Model -> context window, for Claude Code sessions nothing reports the window for. Keys are a model id (exact), a prefix, or a glob with * and ?; prefix a key with 'claude:' or 'codex:' to limit it to one agent. Exact beats the longest prefix or glob. Merged across the global and project configs. Windows proven by a session (more than 200K tokens in use, the status line, a Codex rollout) are learned automatically into <state_dir>/windows.json; entries here override them. Codex always uses the window its rollout states.",
+  "_comment_windows_example": {"claude-opus-5-5": 1000000, "claude-sonnet-*": 200000, "claude:opus": 1000000},
+  "windows": null,
+
+  "_comment_fallback_window": "Claude Code with no exact source: judge the zones against this window, but never block, and say in the message that it was assumed. Once more tokens than this are in use the real window is proven anyway. null keeps Last Call silent until the window is known.",
+  "fallback_window_tokens": 200000,
 
   "_comment_mode": "block_once holds the stop a single time at red so the handoff actually gets written. advisory never blocks.",
   "mode": "block_once",
 
-  "_comment_template": "Path to your own wrap-up instructions, absolute or relative to the project. Placeholders: {percent} {tokens} {window} {remaining} {zone} {gates} {transcript} {relay}",
+  "_comment_template": "Path to your own wrap-up instructions, absolute or relative to the project. Placeholders: {percent} {tokens} {window} {remaining} {zone} {gates} {verifier} {agent} {transcript} {relay}",
   "template": null,
+
+  "_comment_compaction_note": "Injected after a compaction, telling the model its memory is now a summary and to re-read its plan and handoff files. null is the built-in text, false turns it off, a string replaces it.",
+  "compaction_note": null,
 
   "include_output_tokens": false,
   "debug": false,

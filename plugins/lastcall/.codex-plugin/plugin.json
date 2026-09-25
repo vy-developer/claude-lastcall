@@ -1,0 +1,28 @@
+{
+  "name": "lastcall",
+  "version": "1.8.0",
+  "description": "Warns the assistant when the session's context window is filling up, so it wraps up and writes a handoff instead of silently working from a compacted memory.",
+  "author": {
+    "name": "vy-developer"
+  },
+  "homepage": "https://github.com/vy-developer/claude-lastcall",
+  "repository": "https://github.com/vy-developer/claude-lastcall",
+  "license": "MIT",
+  "keywords": [
+    "hooks",
+    "context",
+    "handoff",
+    "sessions"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Last Call",
+    "shortDescription": "Warns the agent before its context window runs out",
+    "developerName": "vy-developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Lifecycle hooks"
+    ],
+    "websiteURL": "https://github.com/vy-developer/claude-lastcall"
+  }
+}

@@ -20,5 +20,13 @@
 *.md   text eol=lf
 *.yml  text eol=lf
 
+# The `lastcall` launcher has a shebang and no extension, so name it: a CRLF
+# shebang line makes the kernel look for "python3\r". The Windows launcher is
+# a batch file, which cmd.exe expects with CRLF.
+plugins/lastcall/bin/lastcall text eol=lf
+# The hook launcher runs under sh from every agent, Git Bash included.
+plugins/lastcall/scripts/lastcall-hook text eol=lf
+*.cmd  text eol=crlf
+
 # Everything else: let git decide, but never guess at binaries.
 * text=auto

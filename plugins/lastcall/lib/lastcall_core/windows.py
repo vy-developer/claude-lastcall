@@ -1,0 +1,389 @@
+"""Model -> context window: the `windows` map and the windows learned so far.
+
+Claude Code transcripts never say how big a session's window is, and the same
+model identifier is used for the 200K and the 1M variant. Two things close
+that gap without guessing:
+
+  the `windows` config key   {"claude-opus-5-5": 1000000, "claude-*": 200000,
+                              "claude:opus": 1000000}
+                             matched against the session's model: an exact key
+                             beats a pattern, a longer pattern beats a shorter
+                             one, and a key qualified with its agent
+                             ("claude:...") beats an unqualified one. A key
+                             without "*" or "?" is a prefix; with them it is a
+                             glob ("[" is literal, so "opus[1m]" is a key).
+
+  learned windows            <state_dir>/windows.json, written whenever a
+                             session PROVES its window: more than 200K tokens
+                             in use (so 1M), the status line reporting the
+                             exact figure, or a Codex rollout stating it.
+                             Keyed "agent:model", latest proof wins, with the
+                             source and time of that proof kept for doctor.
+
+A learned window is a fact about ANOTHER session. The same Claude model id
+runs with 200K or 1M, so a learned 1M does not silence the guard: it is
+treated as assumed (advisory, never blocks) until this session's own tokens
+prove it. And when a session on that model auto-compacts well below the
+learned window, that proves the model also runs smaller: the entry is marked
+conflicted and ignored, and the session falls back to the assumed 200K until
+the user pins the model in `windows` (doctor and status say so).
+
+Both are advisory data about a MODEL, not about a session, so both rank below
+anything that describes the session itself (explicit config, the status line
+cache) — see zones.resolve_window for the full order.
+"""
+
+import json
+import os
+import re
+import time
+
+from .config import state_dir
+from .state import SessionLock
+
+LEARNED_FILE = "windows.json"
+AGENTS = ("claude", "codex")
+
+# A model that names its window ("opus[1m]") says more than a key that does
+# not, so such a model is only matched by keys that carry the marker too.
+_ONE_M_MARKER = re.compile(r"\[1m\]", re.I)
+
+# How long a writer waits for another one. Learning is best-effort: past
+# this, the proof is skipped (that session's next hook learns it again),
+# never written without the lock, which could drop another writer's entry.
+LOCK_TIMEOUT = 2.0
+
+# Windows refuses os.replace onto a file another process has open (a reader
+# outside the lock). Such a read lasts microseconds, so retry briefly.
+REPLACE_ATTEMPTS = 20
+
+# Claude auto-compacts close to the end of its window. An auto-compaction
+# below this share of a learned window proves a smaller window for the model.
+CONFLICT_RATIO = 0.6
+
+LEARNED_WINDOW_NOTE = """\
+(The {window:,}-token window here was LEARNED from another session on this
+model, not reported by this one, so this warning is advisory and never
+blocks. If this session runs the smaller window, compaction may come first:
+pinning the model in "windows" in ~/.lastcall/config.json makes it exact.)"""
+
+
+# --------------------------------------------------------------------------
+# The `windows` config map
+# --------------------------------------------------------------------------
+
+def _split_key(key):
+    """(agent or None, pattern) for a map key."""
+    head, sep, tail = key.partition(":")
+    if sep and head.strip().lower() in AGENTS:
+        return head.strip().lower(), tail.strip()
+    return None, key.strip()
+
+
+def _is_glob(pattern):
+    return "*" in pattern or "?" in pattern
+
+
+def _glob_regex(pattern):
+    """fnmatch without character classes: only * and ? are special."""
+    parts = []
+    for char in pattern:
+        if char == "*":
+            parts.append(".*")
+        elif char == "?":
+            parts.append(".")
+        else:
+            parts.append(re.escape(char))
+    return re.compile("".join(parts) + r"\Z", re.I)
+
+
+def validate_windows(value):
+    """(clean map or None, [problems]). Bad entries are dropped one by one;
+    a value that is not an object at all is dropped whole."""
+    if value is None:
+        return None, []
+    if not isinstance(value, dict):
+        return None, ['windows should be an object like {"claude-opus-5-5": '
+                      '1000000}, got %s — ignored' % type(value).__name__]
+    clean = {}
+    problems = []
+    for key, window in value.items():
+        if not isinstance(key, str) or str(key).startswith("_"):
+            continue  # "_comment" keys, as everywhere else in the config
+        head, sep, _tail = key.partition(":")
+        agent, pattern = _split_key(key)
+        if not pattern:
+            problems.append('windows key "%s" names no model — ignored' % key)
+            continue
+        if sep and agent is None and re.match(r"[A-Za-z]+\Z", head.strip()):
+            problems.append('windows key "%s": "%s" is not an agent (%s) — the '
+                            "whole key is matched as a model name"
+                            % (key, head, "/".join(AGENTS)))
+        if isinstance(window, bool) or not isinstance(window, int):
+            problems.append('windows["%s"] should be a number of tokens, got %r '
+                            "— ignored" % (key, window))
+            continue
+        if window <= 0:
+            problems.append('windows["%s"] should be a positive number of '
+                            "tokens, got %s — ignored" % (key, window))
+            continue
+        clean[key] = window
+    return clean, problems
+
+
+def match_window(windows, agent, model):
+    """(window, key) of the best `windows` entry for ``model``, or
+    (None, None).
+
+    Ranking: exact beats pattern; among patterns the longer (more literal
+    characters) wins; at equal rank an agent-qualified key beats a bare one.
+    Case-insensitive.
+    """
+    if not windows or not isinstance(model, str) or not model:
+        return None, None
+    lowered = model.strip().lower()
+    marked = bool(_ONE_M_MARKER.search(lowered))
+    agent = (agent or "").lower()
+    best = None
+    for key, window in windows.items():
+        if not isinstance(key, str) or isinstance(window, bool) \
+                or not isinstance(window, int) or window <= 0:
+            continue
+        key_agent, pattern = _split_key(key)
+        if key_agent and key_agent != agent:
+            continue
+        pattern = pattern.lower()
+        if not pattern:
+            continue
+        if marked and not _ONE_M_MARKER.search(pattern):
+            continue
+        if pattern == lowered:
+            rank = (2, len(pattern))
+        elif _is_glob(pattern):
+            if not _glob_regex(pattern).match(lowered):
+                continue
+            rank = (1, len(pattern.replace("*", "").replace("?", "")))
+        elif lowered.startswith(pattern):
+            rank = (1, len(pattern))
+        else:
+            continue
+        rank = rank + (1 if key_agent else 0,)
+        if best is None or rank > best[0]:
+            best = (rank, window, key)
+    if best is None:
+        return None, None
+    return best[1], best[2]
+
+
+# --------------------------------------------------------------------------
+# Learned windows
+# --------------------------------------------------------------------------
+
+def learned_path(config):
+    return os.path.join(state_dir(config), LEARNED_FILE)
+
+
+def learned_key(agent, model):
+    return "%s:%s" % ((agent or "claude").lower(), model.strip().lower())
+
+
+def _read(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    models = data.get("models") if isinstance(data, dict) else None
+    return models if isinstance(models, dict) else {}
+
+
+def load_learned(config):
+    """{"agent:model": {"window", "source", "at", "agent", "model", "seen"}}.
+    Empty when there is nothing learned or the file is unreadable."""
+    return _read(learned_path(config))
+
+
+def learned_window(learned, agent, model):
+    """(window, entry) learned for ``model`` under ``agent``, or (None, None)
+    — also when the entry is conflicted: the model has been seen with more
+    than one window, so what one session learned says nothing about the
+    next."""
+    if not learned or not isinstance(model, str) or not model.strip():
+        return None, None
+    entry = learned.get(learned_key(agent, model))
+    if not isinstance(entry, dict) or entry.get("conflict"):
+        return None, None
+    window = entry.get("window")
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        return None, None
+    return window, entry
+
+
+def learned_conflict(learned, agent, model):
+    """The conflict recorded for ``model`` ({"pre_tokens", "window", "at"}),
+    or None."""
+    if not learned or not isinstance(model, str) or not model.strip():
+        return None
+    entry = learned.get(learned_key(agent, model))
+    conflict = entry.get("conflict") if isinstance(entry, dict) else None
+    return conflict if isinstance(conflict, dict) else None
+
+
+def record_learned(config, agent, model, window, source, now=None):
+    """Merge one proof into the learned map. True when it was written.
+
+    Read-modify-write under a lock, and swapped in with os.replace, so two
+    sessions learning at once keep both entries and a reader never sees half
+    a file. Only this one key is touched.
+    """
+    if not isinstance(model, str) or not model.strip() or not window:
+        return False
+    try:
+        window = int(window)
+    except (TypeError, ValueError):
+        return False
+    if window <= 0:
+        return False
+    now = int(now if now is not None else time.time())
+
+    def change(entry):
+        seen = entry.get("seen") if isinstance(entry.get("seen"), dict) else {}
+        seen[str(window)] = now
+        new = {"agent": (agent or "claude").lower(), "model": model.strip(),
+               "window": window, "source": source, "at": now, "seen": seen}
+        if entry.get("conflict"):
+            new["conflict"] = entry["conflict"]   # only the user's map settles it
+        return new
+    return _update(config, learned_key(agent, model), change)
+
+
+def _update(config, key, change):
+    """Read-modify-write one entry of windows.json under the lock. ``change``
+    takes the current entry ({} when absent) and returns the new one, or None
+    to leave the file alone. True when written; False when there was nothing
+    to write, or the lock or the write failed."""
+    path = learned_path(config)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError:
+        return False
+    # flock on POSIX, msvcrt.locking on Windows: both exclude other processes
+    # and other threads alike. The whole read-merge-write happens under it.
+    with SessionLock(path + ".lock", timeout=LOCK_TIMEOUT) as lock:
+        if not lock.acquired:
+            return False
+        models = _read(path)
+        entry = models.get(key) if isinstance(models.get(key), dict) else {}
+        new = change(dict(entry))
+        if new is None:
+            return False
+        models[key] = new
+        temporary = "%s.tmp%d.%s" % (path, os.getpid(), os.urandom(4).hex())
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump({"version": 1, "models": models}, handle, indent=1,
+                          sort_keys=True)
+            _replace(temporary, path)
+        except OSError:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            return False
+    return True
+
+
+def _replace(source, target):
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.01)
+
+
+def record_conflict(config, agent, model, pre_tokens, window, now=None):
+    """Mark the learned window of ``model`` as contradicted: a session on it
+    auto-compacted at ``pre_tokens``, far below the learned ``window``."""
+    if not isinstance(model, str) or not model.strip():
+        return False
+    now = int(now if now is not None else time.time())
+
+    def change(entry):
+        if not entry:
+            return None
+        entry["conflict"] = {"pre_tokens": int(pre_tokens), "window": int(window), "at": now}
+        return entry
+    return _update(config, learned_key(agent, model), change)
+
+
+def check_compaction(config, agent_name, state, usage):
+    """After a NEW compaction: does it contradict the window learned for this
+    model? Claude only (Codex states its window in every rollout); never
+    against the user's `windows` map, which is authoritative; never for a
+    session that itself proved more than the standard window. Records the
+    conflict and returns True when it does."""
+    from .agents.claude import STANDARD_WINDOW
+    if agent_name != "claude":
+        return False
+    pre = getattr(usage, "compaction_pre_tokens", None)
+    model = getattr(usage, "model", None)
+    if not pre or not isinstance(model, str) or not model.strip():
+        return False
+    if match_window(config.get("windows"), agent_name, model)[0]:
+        return False
+    try:
+        if int((state or {}).get("max_observed") or 0) > STANDARD_WINDOW:
+            return False
+    except (TypeError, ValueError):
+        return False
+    window, _entry = learned_window(load_learned(config), agent_name, model)
+    if not window or window <= STANDARD_WINDOW or pre >= CONFLICT_RATIO * window:
+        return False
+    return record_conflict(config, agent_name, model, pre, window)
+
+
+def proof_for(agent_name, state, usage):
+    """(window, source) this session has PROVED for its model, or
+    (None, None). Only exact reports and hard evidence count: config, the
+    map, settings and the fallback are claims, and learning from a claim
+    would turn one wrong setting into a machine-wide belief."""
+    from .agents.claude import window_from_evidence
+    state = state or {}
+    if agent_name == "codex":
+        if usage is not None and usage.window and usage.window_source == "transcript":
+            return int(usage.window), "rollout"
+        return None, None
+    statusline = state.get("window_from_statusline")
+    if statusline:
+        try:
+            return int(statusline), "statusline"
+        except (TypeError, ValueError):
+            pass
+    # This reading only, not the session's max_observed: after a /model
+    # switch the peak belongs to the previous model's window.
+    proven = window_from_evidence(int(getattr(usage, "tokens", 0) or 0))
+    if proven:
+        return proven, "evidence"
+    return None, None
+
+
+def learn(config, agent_name, state, usage):
+    """Record what this session proved about its model, once per session per
+    (model, window): the session state remembers it, so the hook on every
+    tool call does not touch windows.json again. Returns True on a write."""
+    model = getattr(usage, "model", None)
+    if not isinstance(model, str) or not model.strip():
+        return False
+    window, source = proof_for(agent_name, state, usage)
+    if not window:
+        return False
+    marker = [model, window, source]
+    if state.get("learned") == marker:
+        return False
+    if record_learned(config, agent_name, model, window, source):
+        state["learned"] = marker
+        return True
+    return False

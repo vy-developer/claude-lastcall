@@ -9,20 +9,29 @@ re-armed after compaction, a transcript path derived by mangling cwd, and
 subagent usage records being read as the main session's context.
 """
 
+import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "plugins", "lastcall", "scripts", "lastcall.py")
 sys.path.insert(0, os.path.dirname(SCRIPT))
 
 import lastcall as cg  # noqa: E402
+from lastcall_core import render, wizard  # noqa: E402
+
+# Never read the real ~/.lastcall/config.json: a machine-wide config would
+# change what every test here measures.
+_HOME = tempfile.mkdtemp(prefix="lastcall-home-")
+os.environ["LASTCALL_HOME"] = _HOME
 
 
 def assistant_line(tokens, model="claude-sonnet-5", session="s1", sidechain=False):
@@ -42,11 +51,24 @@ def assistant_line(tokens, model="claude-sonnet-5", session="s1", sidechain=Fals
     })
 
 
+def _restore_env(name, value):
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+
+
 class TempCase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="lastcall-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.state = os.path.join(self.dir, "state")
+        # These fixtures are Claude Code transcripts. Pin the agent so the
+        # suite means the same thing when it is run from inside Codex, whose
+        # environment markers would otherwise point detection at Codex.
+        previous = os.environ.get("LASTCALL_AGENT")
+        os.environ["LASTCALL_AGENT"] = "claude"
+        self.addCleanup(_restore_env, "LASTCALL_AGENT", previous)
 
     def transcript(self, lines):
         path = os.path.join(self.dir, "session.jsonl")
@@ -198,7 +220,7 @@ class TestReverseReader(TempCase):
 
     def test_empty_file_yields_nothing(self):
         path = os.path.join(self.dir, "empty.jsonl")
-        open(path, "w").close()
+        open(path, "w", encoding="utf-8").close()
         self.assertEqual(list(cg.iter_lines_reverse(path)), [])
 
 
@@ -298,7 +320,7 @@ class TestMeasure(TempCase):
 class TestConfig(TempCase):
     def test_file_overrides_defaults(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"yellow_percent": 50, "mode": "advisory"}, fh)
         config = cg.load_config({"cwd": self.dir})
         self.assertEqual(config["yellow_percent"], 50)
@@ -307,7 +329,7 @@ class TestConfig(TempCase):
 
     def test_env_overrides_file_field_by_field(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"yellow_percent": 50, "mode": "advisory"}, fh)
         os.environ["LASTCALL_YELLOW_PERCENT"] = "33"
         self.addCleanup(os.environ.pop, "LASTCALL_YELLOW_PERCENT", None)
@@ -330,7 +352,7 @@ class TestConfig(TempCase):
 
     def test_broken_config_does_not_raise(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             fh.write("{ broken")
         config = cg.load_config({"cwd": self.dir})
         self.assertEqual(config["yellow_percent"], cg.DEFAULTS["yellow_percent"])
@@ -374,7 +396,7 @@ class TestTemplate(TempCase):
 
     def test_user_template_is_used_and_interpolated(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("at {percent:.0f}% with {remaining:,} left")
         config = self.config(template=path)
         message = cg.render(config, self.zone(config, "yellow"), 140_000, 200_000)
@@ -382,7 +404,7 @@ class TestTemplate(TempCase):
 
     def test_template_with_stray_braces_still_warns(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("use {unknown_placeholder} here")
         config = self.config(template=path)
         message = cg.render(config, self.zone(config, "red"), 180_000, 200_000)
@@ -454,10 +476,10 @@ class TestZones(TempCase):
 
     def test_per_zone_template_file_beats_the_global_one(self):
         specific = os.path.join(self.dir, "closing.md")
-        with open(specific, "w") as fh:
+        with open(specific, "w", encoding="utf-8") as fh:
             fh.write("closing instructions at {percent:.0f}%")
         shared = os.path.join(self.dir, "shared.md")
-        with open(shared, "w") as fh:
+        with open(shared, "w", encoding="utf-8") as fh:
             fh.write("shared instructions")
         config = self.config(template=shared, zones=[
             {"name": "early", "at": 50},
@@ -548,13 +570,123 @@ class TestStateAndRearm(TempCase):
     def test_reset_rearms(self):
         config = self.config()
         self.assertIsNotNone(self.run_stop(config, 145_000))
-        cg.handle_reset(config, {"session_id": "s1"})
+        import contextlib
+        import io
+        # Unconfigured, SessionStart prints the onboarding prompt; keep it
+        # out of the test run's output.
+        with contextlib.redirect_stdout(io.StringIO()):
+            cg.handle_reset(config, {"session_id": "s1"})
         self.assertIsNotNone(self.run_stop(config, 145_000))
 
     def test_sessions_do_not_share_state(self):
         config = self.config()
         self.assertIsNotNone(self.run_stop(config, 145_000, session="s1"))
         self.assertIsNotNone(self.run_stop(config, 145_000, session="s2"))
+
+
+class TestParallelHooks(TempCase):
+    """Review finding: parallel tool calls fire PostToolUse hooks at the same
+    moment, and every one of them emitted the same warning."""
+
+    def test_concurrent_post_tool_use_hooks_warn_once(self):
+        import io
+        import threading
+        from unittest import mock
+        engine = sys.modules["lastcall_core.engine"]
+        config = self.config()
+        path = self.transcript([assistant_line(145_000)])       # yellow
+        real_render = engine.render
+        # Hold whichever hook gets to the warning first until the second one
+        # has had every chance to reach it too.
+        together = threading.Barrier(2, timeout=1.0)
+
+        def slow_render(*args, **kwargs):
+            try:
+                together.wait()
+            except threading.BrokenBarrierError:
+                pass
+            return real_render(*args, **kwargs)
+
+        outputs = [io.StringIO(), io.StringIO()]
+
+        def hook(out):
+            cg.handle_stop(config, {"transcript_path": path, "session_id": "s1",
+                                    "hook_event_name": "PostToolUse"}, out=out)
+
+        with mock.patch.object(engine, "render", slow_render):
+            threads = [threading.Thread(target=hook, args=(out,)) for out in outputs]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        spoke = [out.getvalue() for out in outputs if out.getvalue().strip()]
+        self.assertEqual(len(spoke), 1, spoke)
+        self.assertIn("YELLOW", spoke[0])
+        self.assertEqual(cg.read_state(config, "s1")["band"], "yellow")
+
+    def test_the_lock_excludes_without_fcntl_or_msvcrt_too(self):
+        import builtins
+        from unittest import mock
+        real_import = builtins.__import__
+
+        def no_locking(name, *args, **kwargs):
+            if name in ("fcntl", "msvcrt"):
+                raise ImportError(name)
+            return real_import(name, *args, **kwargs)
+
+        path = os.path.join(self.state, "claude-s1.json.lock")
+        with mock.patch.object(builtins, "__import__", no_locking):
+            with lc_state.SessionLock(path) as first:
+                with lc_state.SessionLock(path, timeout=0.05) as second:
+                    self.assertEqual((first.acquired, second.acquired), (True, False))
+            with lc_state.SessionLock(path, timeout=0.05) as third:
+                self.assertTrue(third.acquired)
+
+    def test_the_lock_sidecar_is_pruned_with_its_session(self):
+        config = self.config(state_ttl_days=1)
+        lock = os.path.join(self.state, "claude-old.json.lock")
+        os.makedirs(self.state, exist_ok=True)
+        open(lock, "w", encoding="utf-8").close()
+        os.utime(lock, (time.time() - 3 * 86400,) * 2)
+        cg.prune_state(config)
+        self.assertFalse(os.path.exists(lock))
+
+
+class TestOneCompactionRearmsOnce(TempCase):
+    """Review finding: the compaction key was record_id|measured_at, which
+    changes between the first reading after a compaction and the next one, so
+    a single compaction re-armed the zones twice and the zone warned twice."""
+
+    def reply(self, tokens, number):
+        return json.dumps({"type": "assistant", "sessionId": "s1", "isSidechain": False,
+                           "timestamp": "2026-09-25T10:%02d:00.000Z" % number,
+                           "message": {"id": "msg_%d" % number, "model": "claude-sonnet-5",
+                                       "usage": {"input_tokens": 10,
+                                                 "cache_read_input_tokens": tokens - 10,
+                                                 "cache_creation_input_tokens": 0,
+                                                 "output_tokens": 50}}})
+
+    def stop(self, config, lines):
+        import io
+        out = io.StringIO()
+        cg.handle_stop(config, {"transcript_path": self.transcript(lines), "session_id": "s1",
+                                "hook_event_name": "Stop"}, out=out)
+        return out.getvalue().strip() or None
+
+    def test_the_zone_warns_once_after_one_compaction(self):
+        config = self.config()
+        lines = [self.reply(150_000, 1)]
+        self.assertIsNotNone(self.stop(config, lines))                  # yellow
+        lines.append(json.dumps({
+            "type": "system", "subtype": "compact_boundary", "sessionId": "s1",
+            "isSidechain": False, "uuid": "b-1", "timestamp": "2026-09-25T10:30:00.000Z",
+            "compactMetadata": {"trigger": "auto", "preTokens": 150_000,
+                                "postTokens": 145_000}}))
+        self.assertIsNotNone(self.stop(config, lines))                  # re-armed: yellow
+        epoch = cg.read_state(config, "s1")["epoch"]
+        lines.append(self.reply(146_000, 31))
+        self.assertIsNone(self.stop(config, lines))                     # same compaction
+        self.assertEqual(cg.read_state(config, "s1")["epoch"], epoch)
 
 
 class TestOutputContract(TempCase):
@@ -660,20 +792,38 @@ class TestEndToEnd(TempCase):
         )
         target = os.path.join(self.state, "last-payload.json")
         self.assertTrue(os.path.exists(target))
-        with open(target) as handle:
+        with open(target, encoding="utf-8") as handle:
             self.assertNotIn("SECRET", handle.read())
 
-    def test_unknown_window_is_silent_end_to_end(self):
-        """Without a window the guard must emit nothing at all, even at a token
-        count that would be red on every plausible window."""
+    def test_unknown_window_is_silent_end_to_end_without_a_fallback(self):
+        """With the fallback switched off, an unknown window means silence,
+        even at a token count that would be red on every plausible window."""
         path = self.transcript([assistant_line(190_000)])
         result = self.invoke(
             {"transcript_path": path, "session_id": "s1",
              "hook_event_name": "Stop", "cwd": self.dir},
-            env={"LASTCALL_CONTEXT_WINDOW_TOKENS": "auto"},
+            env={"LASTCALL_CONTEXT_WINDOW_TOKENS": "auto",
+                 "LASTCALL_FALLBACK_WINDOW_TOKENS": "none",
+                 "CLAUDE_CONFIG_DIR": self.dir},
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"")
+
+    def test_unknown_window_falls_back_to_an_advisory_warning(self):
+        """Zero config on Claude Code: the window is assumed, the warning says
+        so, and an assumed window never blocks the stop."""
+        path = self.transcript([assistant_line(190_000)])
+        result = self.invoke(
+            {"transcript_path": path, "session_id": "s1",
+             "hook_event_name": "Stop", "cwd": self.dir},
+            env={"LASTCALL_CONTEXT_WINDOW_TOKENS": "auto",
+                 "CLAUDE_CONFIG_DIR": self.dir},
+        )
+        output = json.loads(result.stdout.decode())
+        text = output["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("LAST CALL — RED", text)
+        self.assertIn("assumed the", text)
+        self.assertNotIn("decision", output)
 
     def test_doctor_runs_without_a_transcript(self):
         process = subprocess.run(
@@ -693,42 +843,64 @@ class TestTemplateWhitespace(TempCase):
 
     def test_leading_indentation_of_the_first_line_survives(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n\n  1. FINISH what is in flight.\n     continued here\n  2. THEN this.\n\n")
         config = self.config(template=path)
         body = cg.zone_body(config, cg.resolve_zones(config)[0])
         self.assertEqual(
             body, "  1. FINISH what is in flight.\n     continued here\n  2. THEN this.")
 
-    def test_relay_placeholder_resolves_to_the_shipped_script(self):
-        """A wrap-up template says "run {relay}" and must get a real path, so
-        nobody has to hand-edit one that changes with every plugin update."""
+    def test_relay_placeholder_resolves_to_the_shipped_command(self):
+        """A wrap-up template says "run {relay}" and must get a real command,
+        so nobody has to hand-edit a path that changes with every update."""
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
-            fh.write("step 6: run bash {relay}")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("step 6: run {relay}")
         config = self.config(template=path)
         message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
-        self.assertIn(cg.RELAY_SCRIPT, message)
+        self.assertIn("step 6: run %s" % cg.RELAY_COMMAND, message)
         self.assertTrue(os.path.isfile(cg.RELAY_SCRIPT), cg.RELAY_SCRIPT)
+        # Split as the shell of the platform would: POSIX shlex rules eat
+        # the backslashes of a Windows path.
+        if os.name == "nt":
+            words = [w.strip('"') for w in shlex.split(cg.RELAY_COMMAND, posix=False)]
+        else:
+            words = shlex.split(cg.RELAY_COMMAND)
+        self.assertTrue(os.path.isfile(words[1]), words[1])
+        self.assertEqual(words[2], "relay")
+
+    def test_a_1x_bash_relay_line_still_renders_a_runnable_command(self):
+        """Older templates say "bash {relay}"; {relay} is now a python command,
+        and `bash python3 ...` would fail, so render drops the shell."""
+        path = os.path.join(self.dir, "wrap.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("run bash {relay} --dry-run, or sh {relay}")
+        config = self.config(template=path)
+        message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
+        self.assertIn("run %s --dry-run, or %s" % (cg.RELAY_COMMAND, cg.RELAY_COMMAND),
+                      message)
+        self.assertNotIn("bash python3", message)
 
     def test_shipped_relay_template_renders(self):
         template = os.path.join(ROOT, "plugins", "lastcall", "templates",
                                 "handoff-relay.md")
         config = self.config(template=template)
         message = cg.render(config, cg.resolve_zones(config)[0], 130_000, 200_000)
-        self.assertIn("bash %s" % cg.RELAY_SCRIPT, message)
+        self.assertIn(cg.RELAY_COMMAND, message)
+        self.assertNotIn("bash ", message)
+        self.assertIn("--agent codex", message)
         self.assertNotIn("{relay}", message)
 
     def test_surrounding_blank_lines_are_still_trimmed(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n\nbody\n\n\n")
         config = self.config(template=path)
         self.assertEqual(cg.zone_body(config, cg.resolve_zones(config)[0]), "body")
 
     def test_whitespace_only_template_falls_back(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n   \n")
         config = self.config(template=path)
         self.assertEqual(cg.zone_body(config, cg.resolve_zones(config)[0]),
@@ -755,7 +927,7 @@ class TestHandoverReadiness(TempCase):
 
     def test_a_plain_template_is_configured_but_not_wired(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("just write some notes")
         ready, checks = cg.handover_status(self.config(template=path))
         self.assertTrue(checks["template configured"])
@@ -767,6 +939,27 @@ class TestHandoverReadiness(TempCase):
             {"name": "closing", "at": 80, "template": cg.RELAY_TEMPLATE}])
         _ready, checks = cg.handover_status(config)
         self.assertTrue(checks["template invokes the relay"])
+
+    def test_tmux_is_not_required_unless_codex_runs_in_tmux(self):
+        """The relay needs relay.py, git and the successor's CLI; tmux only
+        for codex_mode "tmux"."""
+        _ready, checks = cg.handover_status(self.config(template=cg.RELAY_TEMPLATE))
+        self.assertNotIn("tmux on PATH", checks)
+        self.assertIn("claude or codex CLI on PATH", checks)
+        self.assertTrue(checks["relay script present"])
+        _ready, checks = cg.handover_status(self.config(
+            template=cg.RELAY_TEMPLATE, relay={"agent": "codex", "codex_mode": "tmux"}))
+        self.assertIn("codex CLI on PATH", checks)
+        self.assertIn("tmux on PATH (codex_mode tmux)", checks)
+
+    def test_a_template_calling_the_relay_by_name_counts_as_wired(self):
+        for line in ("lastcall relay --agent codex", "python3 /x/relay.py",
+                     "bash /x/relay/handoff.sh"):
+            path = os.path.join(self.dir, "wrap.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("finally: " + line)
+            _ready, checks = cg.handover_status(self.config(template=path))
+            self.assertTrue(checks["template invokes the relay"], line)
 
     def test_relay_script_and_template_actually_ship(self):
         self.assertTrue(os.path.isfile(cg.RELAY_SCRIPT), cg.RELAY_SCRIPT)
@@ -802,18 +995,21 @@ class TestSetupCommand(TempCase):
         result = self.run_setup(self.dir)
         self.assertEqual(result.returncode, 0,
                          result.stdout.decode("utf-8", "replace"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json")) as handle:
+        with open(os.path.join(self.dir, ".lastcall.json"), encoding="utf-8") as handle:
             written = json.load(handle)
-        self.assertEqual(written["context_window_tokens"], 200_000)
+        # The recommendation: the windows map, not a single figure that would
+        # override even the status line's exact one.
+        self.assertEqual(written["windows"], {"claude-*": 200_000})
+        self.assertNotIn("context_window_tokens", written)
         self.assertNotIn("template", written)
 
     def test_setup_preserves_unrelated_existing_settings(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
         target = os.path.join(self.dir, ".claude", "lastcall.json")
-        with open(target, "w") as fh:
+        with open(target, "w", encoding="utf-8") as fh:
             json.dump({"mode": "advisory", "yellow_percent": 33}, fh)
         self.run_setup(self.dir)
-        with open(target) as handle:
+        with open(target, encoding="utf-8") as handle:
             written = json.load(handle)
         self.assertEqual(written["mode"], "advisory")
         self.assertEqual(written["yellow_percent"], 33)
@@ -842,7 +1038,7 @@ class TestSetupRecommendations(TempCase):
         result = self.run_setup(root)
         self.assertEqual(result.returncode, 0,
                          result.stdout.decode("utf-8", "replace"))
-        with open(os.path.join(root, ".claude", "lastcall.json")) as handle:
+        with open(os.path.join(root, ".lastcall.json"), encoding="utf-8") as handle:
             written = json.load(handle)
         self.assertNotIn("template", written)
         self.assertFalse(os.path.exists(
@@ -866,6 +1062,180 @@ class TestSetupRecommendations(TempCase):
         self.assertIn("make check", rendered)
         self.assertIn("2026-08-19", rendered)
         self.assertNotIn("{verify_block}", rendered)
+
+
+class _TTY(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class TestSetupWizardInterview(TempCase):
+    """`lastcall setup` is the third front end of ONE onboarding: it must ask
+    render.ONBOARDING_QUESTIONS in their order, recommend what the
+    conversational texts recommend, and write what was answered. PATH is
+    faked (claude and codex present, gemini and git absent) so every machine,
+    CI included, walks the same interview."""
+
+    ON_PATH = ("claude", "codex")
+
+    def run_wizard(self, answers, existing=None, on_path=ON_PATH):
+        target = os.path.join(self.dir, ".lastcall.json")
+        if existing is not None:
+            with open(target, "w", encoding="utf-8") as fh:
+                json.dump(existing, fh)
+        feed = iter(answers)
+
+        def fake_input(prompt=""):
+            return next(feed, "")
+
+        def fake_which(name, *args, **kwargs):
+            return "/fake/bin/" + name if name in on_path else None
+
+        environ = {"CLAUDE_PROJECT_DIR": self.dir,
+                   "LASTCALL_HOME": os.path.join(self.dir, "home"),
+                   "LASTCALL_STATE_DIR": self.state}
+        out = io.StringIO()
+        cwd = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, cwd)
+        with mock.patch.dict(os.environ, environ), \
+                mock.patch("shutil.which", fake_which), \
+                mock.patch("sys.stdin", _TTY()), \
+                mock.patch("builtins.input", fake_input), \
+                mock.patch("sys.stdout", out):
+            code = wizard.setup([])
+        self.assertEqual(code, 0, out.getvalue())
+        with open(target, encoding="utf-8") as fh:
+            return json.load(fh), out.getvalue()
+
+    @staticmethod
+    def numbered(text):
+        return [line for line in text.splitlines()
+                if line[:1].isdigit() and "/" in line.split()[0]]
+
+    def test_it_asks_the_shared_questions_in_their_order(self):
+        _written, out = self.run_wizard([])
+        total = len(render.ONBOARDING_QUESTIONS)
+        self.assertEqual(self.numbered(out),
+                         ["%d/%d  %s" % (n, total, q.ask)
+                          for n, q in enumerate(render.ONBOARDING_QUESTIONS, 1)])
+
+    def test_without_handover_it_stops_before_the_relay_questions(self):
+        # warn, its percentages, the window, wrap-up, gates, verifier: Enter.
+        _written, out = self.run_wizard(["", "", "", "", "", "", "n"])
+        asked = [q.ask for q in render.ONBOARDING_QUESTIONS if not q.handover_only]
+        self.assertEqual([line.split("  ", 1)[1] for line in self.numbered(out)], asked)
+
+    def test_enter_everywhere_never_runs_unattended(self):
+        """Bypass needs explicit consent: Enter means inherit (auto, or bypass
+        only when the predecessor already is), and the predecessor is retired
+        only when the handover is unattended — the rule the prompt states."""
+        written, _out = self.run_wizard([])
+        self.assertEqual(written["relay"]["permission_mode"], "inherit")
+        self.assertNotIn("skip_permissions", written["relay"])
+        self.assertFalse(written["relay"]["kill_predecessor"])
+        self.assertTrue(written["relay"]["remote_control"])
+        self.assertNotIn("agent", written["relay"])
+        self.assertEqual(written["template"], cg.RELAY_TEMPLATE)
+        self.assertEqual(written["windows"], render.ONBOARDING_RECOMMENDED["windows"])
+
+    def test_handover_is_not_recommended_without_an_agent_cli(self):
+        written, out = self.run_wizard([], on_path=())
+        self.assertNotIn("relay", written)
+        self.assertIn("none of codex, gemini, claude is on PATH", out)
+
+    def test_a_full_interview_writes_what_was_answered(self):
+        written, _out = self.run_wizard(
+            ["t", "300k 450k", "1m",
+             "update docs/STATUS.md {always}; never push",
+             "pytest -q, ruff check", "n",
+             "y", "codex", "make check", "gpt-5-codex", "bypass", "n", ""])
+        self.assertEqual(written["zones"], [
+            {"name": "yellow", "at_tokens": 300_000},
+            {"name": "red", "at_tokens": 450_000, "block": True}])
+        self.assertEqual(written["min_window_tokens"], 1_000_000)
+        self.assertEqual(written["gates"], ["pytest -q", "ruff check"])
+        self.assertNotIn("verifier", written)
+        relay = written["relay"]
+        self.assertEqual(relay["agent"], "codex")
+        self.assertEqual(relay["codex_model"], "gpt-5-codex")
+        self.assertNotIn("model", relay)
+        self.assertEqual(relay["permission_mode"], "bypassPermissions")
+        self.assertFalse(relay["remote_control"])
+        # Unattended, so retiring the predecessor is the recommendation.
+        self.assertTrue(relay["kill_predecessor"])
+        self.assertEqual(written["template"], os.path.join(".lastcall", "wrapup.md"))
+        with open(os.path.join(self.dir, ".lastcall", "wrapup.md"), encoding="utf-8") as fh:
+            wrapup = fh.read()
+        self.assertIn("never push", wrapup)
+        self.assertIn("{relay}", wrapup)
+        with open(os.path.join(self.dir, "docs", "handoff", "TEMPLATE.md"), encoding="utf-8") as fh:
+            self.assertIn("make check", fh.read())
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": self.dir,
+                                          "LASTCALL_HOME": os.path.join(self.dir, "home")}):
+            config = cg.load_config({"cwd": self.dir})
+        message = cg.render(config, cg.resolve_zones(config)[0], 350_000, None)
+        self.assertIn("update docs/STATUS.md {always}", message)
+        self.assertIn("pytest -q", message)
+
+    def test_claude_models_and_a_per_model_window_map(self):
+        written, _out = self.run_wizard(
+            ["p", "35 50", "3", "claude-opus-5-5=1000000, claude-sonnet-*=200k",
+             "", "", "1",
+             "y", "claude", "", "opus, fable, sonnet", "default", "y", "n"],
+            existing={"context_window_tokens": 500_000, "mode": "advisory"})
+        self.assertEqual(written["windows"], {"claude-opus-5-5": 1_000_000,
+                                              "claude-sonnet-*": 200_000})
+        self.assertNotIn("context_window_tokens", written)
+        self.assertEqual((written["yellow_percent"], written["red_percent"]), (35, 50))
+        self.assertEqual(written["mode"], "advisory")
+        self.assertTrue(written["verifier"].startswith("codex exec"))
+        relay = written["relay"]
+        self.assertEqual(relay["agent"], "claude")
+        self.assertEqual(relay["model"], "opus")
+        self.assertEqual(relay["fallback_model"], "fable,sonnet")
+        self.assertNotIn("codex_model", relay)
+        self.assertEqual(relay["permission_mode"], "default")
+        self.assertFalse(relay["kill_predecessor"])
+
+    def test_bypass_takes_the_typed_word_and_a_stale_skip_permissions_goes(self):
+        """"yes" is not a permission mode: it is asked again, and only
+        "bypass" makes the successor unattended. The old key would outrank
+        the new one, so the wizard removes it."""
+        written, out = self.run_wizard(
+            ["", "", "", "", "", "", "y", "", "", "", "", "yes", "auto", "", ""],
+            existing={"relay": {"skip_permissions": True}})
+        self.assertIn("'yes' is not one of the options", out)
+        self.assertEqual(written["relay"]["permission_mode"], "auto")
+        self.assertNotIn("skip_permissions", written["relay"])
+        self.assertFalse(written["relay"]["kill_predecessor"])
+
+    def test_nonsense_is_asked_again_not_swallowed(self):
+        written, out = self.run_wizard(["t", "banana", "550k 400k", "400k 550k"])
+        self.assertIn("lower first", out)
+        self.assertEqual(written["zones"][0]["at_tokens"], 400_000)
+
+
+class TestWizardParsing(unittest.TestCase):
+    def test_token_counts(self):
+        self.assertEqual(wizard.parse_tokens("400,000, 550,000"), [400_000, 550_000])
+        self.assertEqual(wizard.parse_tokens("400k 1.5m"), [400_000, 1_500_000])
+        self.assertIsNone(wizard.parse_tokens("lots"))
+
+    def test_pairs_must_ascend(self):
+        self.assertEqual(wizard.parse_pair("40% 55%", 100), [40, 55])
+        self.assertIsNone(wizard.parse_pair("55 40"))
+        self.assertIsNone(wizard.parse_pair("40 155", 100))
+
+    def test_window_pairs(self):
+        clean, problems = wizard.parse_windows("claude-opus-5-5=1m, claude:opus=1000000")
+        self.assertEqual(clean, {"claude-opus-5-5": 1_000_000, "claude:opus": 1_000_000})
+        self.assertEqual(problems, [])
+        self.assertTrue(wizard.parse_windows("opus")[1])
+
+    def test_yes_and_no_are_accepted_words(self):
+        self.assertEqual(cg.parse_answer("yes", {"y": "", "n": ""}), "y")
+        self.assertEqual(cg.parse_answer("No", {"y": "", "n": ""}), "n")
 
 
 class TestGatesAndTranscript(TempCase):
@@ -892,7 +1262,7 @@ class TestGatesAndTranscript(TempCase):
 
     def test_transcript_path_reaches_the_template(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("audit against {transcript}")
         config = self.config(template=path)
         message = cg.render(config, cg.resolve_zones(config)[0],
@@ -901,7 +1271,7 @@ class TestGatesAndTranscript(TempCase):
 
     def test_transcript_placeholder_degrades_without_a_path(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("audit against {transcript}")
         config = self.config(template=path)
         message = cg.render(config, cg.resolve_zones(config)[0], 150_000, 200_000)
@@ -920,7 +1290,7 @@ class TestGatesAndTranscript(TempCase):
 
     def test_relay_template_covers_the_full_sequence(self):
         with open(os.path.join(ROOT, "plugins", "lastcall", "templates",
-                               "handoff-relay.md")) as handle:
+                               "handoff-relay.md"), encoding="utf-8") as handle:
             text = handle.read().lower()
         for step in ("update", "gates", "audit", "commit", "hand over",
                      "subagent", "teammate", "workflow", "no user prompt"):
@@ -956,7 +1326,7 @@ class TestPlaceholderFormatting(TempCase):
 
     def body(self, template_text, tokens=439_373, window=500_000):
         path = os.path.join(self.dir, "t.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(template_text)
         config = self.config(template=path)
         rendered = cg.render(config, cg.resolve_zones(config)[0], tokens, window)
@@ -1002,9 +1372,52 @@ class TestConfigValidation(TempCase):
 
     def load(self, raw):
         os.makedirs(os.path.join(self.dir, ".claude"), exist_ok=True)
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump(raw, fh)
         return cg.load_config({"cwd": self.dir})
+
+    def write_raw(self, text):
+        os.makedirs(os.path.join(self.dir, ".claude"), exist_ok=True)
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def scrubbed_env(self):
+        env = {k: v for k, v in os.environ.items()
+               if not k.upper().startswith("LASTCALL_")}
+        env["CLAUDE_PROJECT_DIR"] = self.dir
+        env["LASTCALL_STATE_DIR"] = self.state
+        return env
+
+    def test_a_config_that_does_not_parse_is_reported_by_doctor(self):
+        """It used to be skipped in silence, leaving the guard on defaults —
+        which looks exactly like a config that parsed."""
+        self.write_raw('{"mode": "advisory",}')
+        result = subprocess.run([sys.executable, SCRIPT, "doctor"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=self.scrubbed_env(), cwd=self.dir)
+        out = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertRegex(out, r"PROBLEM\s+: cannot read .*lastcall\.json")
+
+    def test_a_config_that_is_not_an_object_is_reported(self):
+        self.write_raw('["yellow", 40]')
+        config = cg.load_config({"cwd": self.dir})
+        self.assertTrue(any("JSON object" in p for p in config["_problems"]))
+        self.assertEqual(config["mode"], cg.DEFAULTS["mode"])
+
+    def test_the_hook_stays_silent_on_a_config_that_does_not_parse(self):
+        self.write_raw("{not json")
+        path = self.transcript([assistant_line(20_000)])
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "Stop"],
+            input=json.dumps({"transcript_path": path, "session_id": "s1",
+                              "hook_event_name": "Stop",
+                              "cwd": self.dir}).encode(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=self.scrubbed_env())
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"")
 
     def test_wrong_type_falls_back_and_is_reported(self):
         config = self.load({"yellow_percent": "quite full"})
@@ -1051,16 +1464,34 @@ class TestPruneOwnership(TempCase):
     def aged(self, name, content):
         os.makedirs(self.state, exist_ok=True)
         path = os.path.join(self.state, name)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(content, fh)
         old = time.time() - (400 * 86400)
         os.utime(path, (old, old))
         return path
 
     def test_our_own_stale_state_is_pruned(self):
-        path = self.aged("session.json", {"band": "red", "peak": 1})
+        path = self.aged("session.json", {"_lastcall": 1, "band": "red", "peak": 1})
+        legacy = self.aged("claude-old.json", {"agent": "claude", "band": "red"})
         cg.prune_state(self.config())
         self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(legacy))
+
+    def test_state_files_carry_the_marker_that_makes_them_ours(self):
+        config = self.config()
+        cg.write_state(config, "s1", {"band": "red"})
+        with open(os.path.join(self.state, "claude-s1.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["_lastcall"], 1)
+
+    def test_generic_keys_are_not_ownership(self):
+        """Review finding: "updated" (or "band", "epoch") alone made any JSON
+        in a shared state_dir look like ours, and pruning deleted it."""
+        foreign = [self.aged("sync.json", {"updated": 1700000000, "items": []}),
+                   self.aged("game.json", {"band": "red", "epoch": 3}),
+                   self.aged("tool.json", {"agent": "renovate", "sig": "x"})]
+        cg.prune_state(self.config())
+        for path in foreign:
+            self.assertTrue(os.path.exists(path), path)
 
     def test_a_foreign_json_file_is_never_touched(self):
         path = self.aged("settings.json", {"env": {"OPENAI_API_KEY": "sk-live"}})
@@ -1070,7 +1501,7 @@ class TestPruneOwnership(TempCase):
     def test_unparseable_json_is_left_alone(self):
         os.makedirs(self.state, exist_ok=True)
         path = os.path.join(self.state, "broken.json")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("{not json")
         old = time.time() - (400 * 86400)
         os.utime(path, (old, old))
@@ -1086,7 +1517,7 @@ class TestHandoverAcrossZones(TempCase):
 
     def layout(self, yellow_text, red_text):
         for name, text in (("winddown.md", yellow_text), ("wrapup.md", red_text)):
-            with open(os.path.join(self.dir, name), "w") as fh:
+            with open(os.path.join(self.dir, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
         return self.config(zones=[
             {"name": "yellow", "at": 40,
@@ -1131,7 +1562,7 @@ class TestVerifier(TempCase):
 
     def test_verifier_reaches_the_template(self):
         path = os.path.join(self.dir, "wrap.md")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("second opinion: {verifier}")
         config = self.config(template=path, verifier="codex review")
         message = cg.render(config, cg.resolve_zones(config)[0], 150_000, 200_000)
@@ -1155,7 +1586,7 @@ class TestProjectIsolation(TempCase):
     def project(self, name, **settings):
         root = os.path.join(self.dir, name)
         os.makedirs(os.path.join(root, ".claude"))
-        with open(os.path.join(root, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(root, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump(settings, fh)
         return root
 
@@ -1179,6 +1610,40 @@ class TestProjectIsolation(TempCase):
         os.environ["CLAUDE_PROJECT_DIR"] = b
         self.addCleanup(os.environ.pop, "CLAUDE_PROJECT_DIR", None)
         self.assertEqual(cg.load_config({"cwd": a})["gates"], ["b-gate"])
+
+    def fake_home(self):
+        """A home directory with the ~/.claude every Claude Code user has."""
+        home = os.path.join(self.dir, "home")
+        os.makedirs(os.path.join(home, ".claude"))
+        project = os.path.join(home, "code", "project")
+        os.makedirs(project)
+        return home, project
+
+    def test_the_home_directory_is_never_a_project(self):
+        """~/.claude always exists, so it matched every directory without a
+        .claude/ of its own and they all resolved to $HOME."""
+        home, project = self.fake_home()
+        for name in ("HOME", "USERPROFILE"):   # expanduser reads USERPROFILE on Windows
+            self.addCleanup(_restore_env, name, os.environ.get(name))
+            os.environ[name] = home
+        project_env = os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        if project_env is not None:
+            self.addCleanup(os.environ.__setitem__, "CLAUDE_PROJECT_DIR",
+                            project_env)
+        self.assertEqual(cg.project_dir({"cwd": project}), project)
+
+    def test_setup_never_writes_into_the_home_claude_directory(self):
+        home, project = self.fake_home()
+        env = dict(os.environ, HOME=home, USERPROFILE=home)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        for cwd in (project, home):
+            subprocess.run([sys.executable, SCRIPT, "setup"], input=b"",
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           env=env, cwd=cwd)
+        self.assertFalse(os.path.exists(
+            os.path.join(home, ".claude", "lastcall.json")))
+        self.assertFalse(os.path.exists(os.path.join(home, ".lastcall.json")))
+        self.assertTrue(os.path.isfile(os.path.join(project, ".lastcall.json")))
 
     def test_state_files_are_keyed_by_session_not_by_project(self):
         config = self.config()
@@ -1257,13 +1722,13 @@ class TestSessionStartOnboarding(TempCase):
 
     def test_a_configured_project_is_silent(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"context_window_tokens": 500_000}, fh)
         self.assertEqual(self.session_start(self.dir).stdout, b"")
 
     def test_declining_silences_it(self):
         os.makedirs(os.path.join(self.dir, ".claude"))
-        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w") as fh:
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
             json.dump({"disabled": True}, fh)
         self.assertEqual(self.session_start(self.dir).stdout, b"")
 
@@ -1309,7 +1774,7 @@ class TestDisprovenWindow(unittest.TestCase):
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "s.jsonl")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(assistant_line(743_106, model="claude-opus-5") + "\n")
         config = self.config(200_000)
         tokens, window, source, _model = cg.measure(
@@ -1365,6 +1830,58 @@ class TestAbsoluteZones(TempCase):
             {"name": "bad", "at_tokens": "four hundred thousand"}]))
         self.assertEqual([z["name"] for z in zones], ["ok"])
 
+    def test_a_zero_token_zone_without_a_name_does_not_crash(self):
+        zones = cg.resolve_zones(self.config(zones=[{"at_tokens": 0}]))
+        self.assertEqual(zones[0]["name"], "0 tokens")
+
+    def run_script(self, script, *args, stdin=b""):
+        os.makedirs(os.path.join(self.dir, ".claude"), exist_ok=True)
+        with open(os.path.join(self.dir, ".claude", "lastcall.json"), "w", encoding="utf-8") as fh:
+            json.dump({"zones": self.zones()}, fh)
+        env = dict(os.environ)
+        env["CLAUDE_PROJECT_DIR"] = self.dir
+        env["LASTCALL_STATE_DIR"] = self.state
+        env["LASTCALL_TRACE"] = "1"
+        for key in list(env):
+            if key.upper().startswith("LASTCALL_") and key.upper() not in (
+                    "LASTCALL_STATE_DIR", "LASTCALL_TRACE"):
+                env.pop(key)
+        return subprocess.run([sys.executable, script] + list(args),
+                              input=stdin, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=env, cwd=self.dir)
+
+    def test_doctor_lists_zones_written_in_tokens(self):
+        """Reported: doctor formatted every zone as a percentage, and on the
+        token-count config the onboarding recommends it crashed outright."""
+        result = self.run_script(SCRIPT, "doctor")
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b"yellow@400k", result.stdout)
+        self.assertIn(b"red@550k[block]", result.stdout)
+
+    def test_doctor_measures_absolute_zones_without_a_window(self):
+        """The hook fires these with no window at all, so doctor must not
+        claim the guard would stay silent."""
+        path = self.transcript([assistant_line(420_000)])
+        result = self.run_script(SCRIPT, "doctor", path)
+        out = result.stdout.decode()
+        self.assertEqual(result.returncode, 0, out + result.stderr.decode())
+        self.assertIn("band          : YELLOW", out)
+        self.assertNotIn("SILENT", out)
+
+    def test_statusline_bands_use_the_real_window(self):
+        """150k of a 200k window is under a 400k zone. Rebuilt against the
+        default 1M window it read as 750k and the status line showed RED."""
+        statusline = os.path.join(os.path.dirname(SCRIPT), "statusline.py")
+        payload = {"session_id": "s1", "cwd": self.dir,
+                   "context_window_size": 200_000,
+                   "context_used_tokens": 150_000}
+        result = self.run_script(statusline,
+                                 stdin=json.dumps(payload).encode())
+        out = result.stdout.decode()
+        self.assertIn("75%", out)
+        self.assertNotIn("RED", out)
+        self.assertNotIn("YELLOW", out)
+
     def test_the_message_omits_percentages_when_there_is_no_window(self):
         config = self.config(zones=self.zones(), context_window_tokens=None)
         zone = cg.resolve_zones(config)[0]
@@ -1409,3 +1926,142 @@ class TestMinimumWindow(TempCase):
     def test_no_floor_means_no_restriction(self):
         config = self.config(context_window_tokens=200_000)
         self.assertIsNone(config["min_window_tokens"])
+
+
+import lastcall_core.config as lc_config  # noqa: E402  (on sys.path via the script)
+import lastcall_core.state as lc_state  # noqa: E402
+
+
+class TestStateMerge(TempCase):
+    """The status line and the hooks write the same session's state file.
+    Neither may wipe out the other's fields."""
+
+    def test_a_hook_write_keeps_the_status_line_window(self):
+        config = self.config()
+        lc_state.update_state(config, "s1", {"window_from_statusline": 1_000_000})
+        stale = cg.read_state(config, "s1")
+        stale.pop("window_from_statusline")
+        cg.write_state(config, "s1", dict(stale, band="yellow"))
+        state = cg.read_state(config, "s1")
+        self.assertEqual(state["window_from_statusline"], 1_000_000)
+        self.assertEqual(state["band"], "yellow")
+
+    def test_session_state_saves_only_what_it_changed(self):
+        config = self.config()
+        mine = lc_state.SessionState(config, "s1", "codex")
+        lc_state.update_state(config, "s1", {"window_from_statusline": 5}, "codex")
+        mine["band"] = "red"
+        mine.save()
+        state = cg.read_state(config, "s1", "codex")
+        self.assertEqual(state["window_from_statusline"], 5)
+        self.assertEqual(state["band"], "red")
+        self.assertEqual(state["agent"], "codex")
+
+    def test_agents_do_not_share_a_session_file(self):
+        config = self.config()
+        cg.write_state(config, "same-id", {"band": "red"}, "claude")
+        self.assertEqual(cg.read_state(config, "same-id", "codex"), {})
+
+    def test_onboarding_is_recorded_per_project(self):
+        config = self.config()
+        self.assertFalse(lc_state.was_onboarded(config, self.dir))
+        lc_state.mark_onboarded(config, self.dir, "claude")
+        self.assertTrue(lc_state.was_onboarded(config, self.dir))
+        self.assertFalse(lc_state.was_onboarded(config, os.path.join(self.dir, "other")))
+
+    def test_the_onboarding_record_is_never_pruned(self):
+        config = self.config(state_ttl_days=1)
+        lc_state.mark_onboarded(config, self.dir)
+        path = os.path.join(self.state, lc_state.ONBOARDED_FILE)
+        old = time.time() - 400 * 86400
+        os.utime(path, (old, old))
+        cg.prune_state(config)
+        self.assertTrue(os.path.exists(path))
+
+
+class TestConfigSearch(TempCase):
+    """One agent-neutral config, layered: defaults < global < project < env."""
+
+    def setUp(self):
+        super(TestConfigSearch, self).setUp()
+        self.env = {"LASTCALL_HOME": os.path.join(self.dir, "lc-home"),
+                    "HOME": os.path.join(self.dir, "home")}
+        os.makedirs(self.env["LASTCALL_HOME"])
+        os.makedirs(self.env["HOME"])
+
+    def write(self, path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+    def test_global_config_is_read(self):
+        self.write(os.path.join(self.env["LASTCALL_HOME"], "config.json"), {"red_percent": 60})
+        config = lc_config.load_config({"cwd": self.dir}, self.env)
+        self.assertEqual(config["red_percent"], 60)
+        self.assertTrue(config["_configured"])
+
+    def test_every_project_file_name_is_found(self):
+        for name in lc_config.PROJECT_CONFIG_NAMES:
+            root = os.path.join(self.dir, name.replace(os.sep, "_"))
+            self.write(os.path.join(root, name), {"red_percent": 61})
+            config = lc_config.load_config({"cwd": root}, self.env)
+            self.assertEqual(config["red_percent"], 61, name)
+            self.assertEqual(config["_project_dir"], root, name)
+
+    def test_project_beats_global_and_env_beats_both(self):
+        self.write(os.path.join(self.env["LASTCALL_HOME"], "config.json"),
+                   {"red_percent": 60, "yellow_percent": 30})
+        self.write(os.path.join(self.dir, ".lastcall.json"), {"red_percent": 70})
+        env = dict(self.env, LASTCALL_YELLOW_PERCENT="33")
+        config = lc_config.load_config({"cwd": self.dir}, env)
+        self.assertEqual((config["yellow_percent"], config["red_percent"]), (33, 70))
+
+    def test_the_nearest_project_wins(self):
+        self.write(os.path.join(self.dir, ".lastcall.json"), {"red_percent": 70})
+        inner = os.path.join(self.dir, "inner")
+        self.write(os.path.join(inner, ".codex", "lastcall.json"), {"red_percent": 80})
+        self.assertEqual(lc_config.load_config({"cwd": inner}, self.env)["red_percent"], 80)
+
+    def test_home_is_never_a_project_even_with_every_marker(self):
+        home = self.env["HOME"]
+        for marker in (".claude", ".codex", ".git"):
+            os.makedirs(os.path.join(home, marker))
+        self.write(os.path.join(home, ".claude", "lastcall.json"), {"red_percent": 99})
+        project = os.path.join(home, "code", "project")
+        os.makedirs(project)
+        for name in ("HOME", "USERPROFILE"):   # expanduser reads USERPROFILE on Windows
+            self.addCleanup(_restore_env, name, os.environ.get(name))
+            os.environ[name] = home
+        config = lc_config.load_config({"cwd": project}, self.env)
+        self.assertEqual(config["_project_dir"], project)
+        self.assertIsNone(config["_config_path"])
+        self.assertEqual(config["red_percent"], cg.DEFAULTS["red_percent"])
+
+    def test_a_git_file_marks_a_worktree_as_the_project(self):
+        worktree = os.path.join(self.dir, "worktree")
+        subdir = os.path.join(worktree, "src", "deep")
+        os.makedirs(subdir)
+        with open(os.path.join(worktree, ".git"), "w", encoding="utf-8") as handle:
+            handle.write("gitdir: /elsewhere/.git/worktrees/worktree\n")
+        config = lc_config.load_config({"cwd": subdir}, self.env)
+        self.assertEqual(config["_project_dir"], worktree)
+
+    def test_unknown_keys_are_problems_but_comments_are_not(self):
+        self.write(os.path.join(self.dir, ".lastcall.json"),
+                   {"_comment": "x", "red_precent": 60})
+        problems = lc_config.load_config({"cwd": self.dir}, self.env)["_problems"]
+        self.assertEqual(len(problems), 1)
+        self.assertIn('did you mean "red_percent"', problems[0])
+
+    def test_state_defaults_under_lastcall_home(self):
+        config = lc_config.load_config({"cwd": self.dir}, self.env)
+        self.assertEqual(lc_config.state_dir(config, self.env),
+                         os.path.join(self.env["LASTCALL_HOME"], "state"))
+
+    def test_compaction_note_env_accepts_false(self):
+        env = dict(self.env, LASTCALL_COMPACTION_NOTE="false")
+        self.assertIs(lc_config.load_config({"cwd": self.dir}, env)["compaction_note"], False)
+
+    def test_fallback_window_env_accepts_none(self):
+        env = dict(self.env, LASTCALL_FALLBACK_WINDOW_TOKENS="none")
+        self.assertIsNone(lc_config.load_config({"cwd": self.dir}, env)["fallback_window_tokens"])

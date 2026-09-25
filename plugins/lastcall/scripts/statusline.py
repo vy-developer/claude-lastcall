@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Optional status line that teaches Last Call the exact context window.
 
-The Stop hook cannot see how big the window is. The transcript records the
+The hooks cannot see how big a Claude Code session's window is. The transcript records the
 model as e.g. "claude-opus-5" whether that session has a 200K window or a 1M
 one, so the size is genuinely not derivable there — measured, not assumed.
 
@@ -20,16 +20,18 @@ sends, which is the way to check the field names below against reality.
 
 import json
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from lastcall import (band_for, load_config, read_state, state_dir,
-                               write_state)
+    from lastcall import band_for, load_config, read_state, update_state
 except ImportError:  # standalone copy — degrade to printing only
-    band_for = load_config = read_state = state_dir = write_state = None
+    band_for = load_config = read_state = update_state = None
+try:
+    from lastcall_core.windows import record_learned
+except ImportError:
+    record_learned = None
 
 # Field names vary across Claude Code versions, so match on shape rather than
 # betting the feature on one spelling. --dump exists for when none of these hit.
@@ -65,7 +67,18 @@ def gauge(percent, width=10):
     return "[" + "#" * filled + "-" * (width - filled) + "]"
 
 
+def utf8_stdio():
+    """Claude Code pipes UTF-8 JSON in and reads UTF-8 back; a redirected
+    stream on Windows would be cp1252. Self-contained, for a standalone copy."""
+    for stream in (sys.stdin, sys.stdout):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main(argv):
+    utf8_stdio()
     raw = sys.stdin.read() if not sys.stdin.isatty() else "{}"
     try:
         payload = json.loads(raw or "{}")
@@ -82,14 +95,26 @@ def main(argv):
     used = deep_find(payload, _USED_KEYS)
     session_id = payload.get("session_id") or (payload.get("session") or {}).get("id")
 
-    # Cache the window for the Stop hook. This is the whole point of the file.
+    # Cache the window for the hooks. This is the whole point of the file.
+    # update_state touches only this one field, re-reading the file first, so
+    # a hook writing the same session's state at the same moment keeps its
+    # fields and this one keeps its own. The status line is Claude Code's.
     if window and session_id and load_config:
         try:
             config = load_config(payload)
-            state = read_state(config, session_id)
+            state = read_state(config, session_id, "claude")
             if state.get("window_from_statusline") != window:
-                state["window_from_statusline"] = window
-                write_state(config, session_id, state)
+                update_state(config, session_id,
+                             {"window_from_statusline": window}, "claude")
+                # And remember it for the model, so the next session on it
+                # starts with the right window before this script first runs.
+                # Transcripts record the model without "[1m]", so neither
+                # does the learned entry.
+                model_id = (payload.get("model") or {}).get("id") \
+                    if isinstance(payload.get("model"), dict) else None
+                if record_learned and isinstance(model_id, str) and model_id.strip():
+                    base = model_id.replace("[1m]", "").replace("[1M]", "").strip()
+                    record_learned(config, "claude", base, window, "statusline")
         except Exception:  # noqa: BLE001 - a status line must never fail loudly
             pass
 
@@ -107,7 +132,10 @@ def main(argv):
         label = "ctx %s %.0f%%" % (gauge(percent), percent)
         if band_for and load_config:
             try:
-                band = band_for(percent, load_config(payload))
+                # Pass the real window. Without it band_for rebuilds the
+                # token count against the CONFIGURED window (or 1M), so zones
+                # written in tokens showed RED on a 200k session at 75%.
+                band = band_for(percent, load_config(payload), window)
                 if band != "green":
                     label += " " + band.upper()
             except Exception:  # noqa: BLE001

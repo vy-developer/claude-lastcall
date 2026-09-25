@@ -42,7 +42,7 @@ Run these and use the answers to shape your questions:
 ```
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/lastcall.py doctor
 git rev-parse --show-toplevel 2>/dev/null || echo "not a git repo"
-command -v tmux git codex gemini claude
+command -v git claude codex gemini tmux
 ls docs/handoff .claude/work 2>/dev/null
 ```
 
@@ -93,17 +93,20 @@ confirmation.
    the session that wrote the code cannot see. If they say yes, set `verifier`.
 
 6. **Automatic handover.** Whether a fresh session should be spawned when the
-   context runs out. Needs tmux and the claude CLI; git is optional and only
-   used to verify the handoff is committed. If yes, settle the whole `relay`
-   block: `repo` if it is not this directory, `handoff_dir`, and `model` /
-   `fallback_model` — e.g. `"model": "opus"` with `"fallback_model":
-   "fable,sonnet"`, since Claude Code switches by itself when a model is
-   overloaded. Ask whether the successor runs UNATTENDED (`skip_permissions`),
+   context runs out. Needs the `claude` or `codex` CLI (tmux only for Codex's
+   optional `codex_mode: "tmux"`); git is optional and only used to verify the
+   handoff is committed. If yes, settle the whole `relay` block: `repo` if it
+   is not this directory, `handoff_dir`, `agent` (`"claude"` or `"codex"` —
+   leave it unset to hand over to whichever agent is running, set it to hand
+   over across agents), and `model` / `fallback_model` — e.g. `"model":
+   "opus"` with `"fallback_model": "fable,sonnet"`, since Claude Code switches
+   by itself when a model is overloaded (`codex_model` for a Codex
+   successor). Ask whether the successor runs UNATTENDED (`skip_permissions`),
    be explicit that it then runs tools without asking, and never enable it
    without a clear yes. `remote_control` is on by default so you can reach the
    successor later. Offer `kill_predecessor` too — it retires the old session
-   once the successor has proved itself, and without it every handover leaves
-   another session running forever.
+   once the successor has checked in (never a desktop-app session), and
+   without it every handover leaves another session running forever.
 
 If the user does not want Last Call in this project, write
 `{"disabled": true}` to `.lastcall.json` and stop. That silences it

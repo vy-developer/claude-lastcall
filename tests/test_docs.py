@@ -215,10 +215,21 @@ class TestRelayTemplateMatchesTheRelay(unittest.TestCase):
     def test_it_does_not_claim_the_relay_never_kills(self):
         self.assertNotIn("never kills", self.template())
 
-    def test_it_describes_both_ways_the_predecessor_is_retired(self):
+    def test_it_says_when_the_predecessor_is_retired_and_when_not(self):
+        """Relay v2 retires only on kill_predecessor / --retire-predecessor,
+        never a desktop-app session, and no longer asks the successor to."""
         text = self.template()
         self.assertIn("kill_predecessor", text)
-        self.assertIn("ASKED", text)
+        self.assertIn("never a desktop-app session", text)
+        self.assertIn("NOT\n     ASKED", text)
+
+    def test_it_names_the_new_relay_and_cross_agent_handover(self):
+        text = self.template()
+        self.assertIn("{relay}", text)
+        self.assertNotIn("bash {relay}", text)
+        self.assertNotIn("tmux", text)
+        self.assertIn("--agent codex", text)
+        self.assertIn("--agent claude", text)
 
 
 class TestOnboardingCoversTheFeatures(unittest.TestCase):
